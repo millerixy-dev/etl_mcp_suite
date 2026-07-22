@@ -114,16 +114,29 @@ def _validated_key(key: object) -> HiveCacheKey:
 def _validated_result(
     key: HiveCacheKey, value: object
 ) -> CacheableHiveResult:
-    if not isinstance(
-        value, (ListDatabasesResult, ListTablesResult, TableSchemaResult)
+    if type(value) not in (
+        ListDatabasesResult,
+        ListTablesResult,
+        TableSchemaResult,
     ):
-        raise TypeError("cache loader must return a validated Hive metadata result")
-    if key[0] == "list_databases" and isinstance(value, ListDatabasesResult):
+        raise TypeError(
+            "cache loader must return a validated Hive metadata result; "
+            "exact Hive metadata result type required"
+        )
+    if key[0] == "list_databases" and type(value) is ListDatabasesResult:
         return value
-    if key[0] == "list_tables" and isinstance(value, ListTablesResult):
-        return value
-    if key[0] == "get_table_schema" and isinstance(value, TableSchemaResult):
-        return value
+    if key[0] == "list_tables" and type(value) is ListTablesResult:
+        tables_result = value
+        if tables_result.database.casefold() == key[1]:
+            return tables_result
+    if key[0] == "get_table_schema" and type(value) is TableSchemaResult:
+        schema_result = value
+        if (
+            schema_result.database.casefold() == key[1]
+            and schema_result.table.casefold() == key[2]
+            and (schema_result.ddl is not None) is key[3]
+        ):
+            return schema_result
     raise TypeError("cache loader result does not match Hive cache key")
 
 
@@ -171,8 +184,8 @@ class HiveMetadataCache:
         return fresh
 
     def _get(self, key: HiveCacheKey) -> CacheableHiveResult | None:
-        now = self._clock()
         with self._lock:
+            now = self._clock()
             entry = self._entries.get(key)
             if entry is None:
                 return None
@@ -183,8 +196,8 @@ class HiveMetadataCache:
             return entry.value
 
     def _put(self, key: HiveCacheKey, value: CacheableHiveResult) -> None:
-        now = self._clock()
         with self._lock:
+            now = self._clock()
             expired_keys = [
                 existing_key
                 for existing_key, entry in self._entries.items()

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
+from queue import Queue
+from threading import Event, Lock, Thread
 from typing import cast
 
 import pytest
@@ -12,7 +15,11 @@ from mcp_stdio.plugins.hive.cache import (
     HiveMetadataCache,
     make_hive_cache_key,
 )
-from mcp_stdio.plugins.hive.models import ListDatabasesResult, ListTablesResult
+from mcp_stdio.plugins.hive.models import (
+    ListDatabasesResult,
+    ListTablesResult,
+    TableSchemaResult,
+)
 
 
 class FakeClock:
@@ -26,6 +33,40 @@ class FakeClock:
 
     def advance(self, seconds: float) -> None:
         self.now += seconds
+
+
+class CredentialBearingResult(ListDatabasesResult):
+    """Malicious subtype that must not cross the exact cache value boundary."""
+
+    credential: str
+
+
+class GateLock:
+    """Test lock that blocks one selected entry until the test releases it."""
+
+    def __init__(self, *, block_on_enter: int) -> None:
+        self._block_on_enter = block_on_enter
+        self._enter_count = 0
+        self._count_lock = Lock()
+        self.blocked = Event()
+        self.release = Event()
+
+    def __enter__(self) -> None:
+        with self._count_lock:
+            self._enter_count += 1
+            should_block = self._enter_count == self._block_on_enter
+        if should_block:
+            self.blocked.set()
+            if not self.release.wait(timeout=2):
+                raise TimeoutError("test gate was not released")
+
+    def __exit__(
+        self,
+        exc_type: object,
+        exc_value: object,
+        traceback: object,
+    ) -> None:
+        del exc_type, exc_value, traceback
 
 
 def database_result(name: str) -> ListDatabasesResult:
@@ -50,6 +91,24 @@ def counting_tables_loader(
         return ListTablesResult(database=database, tables=("events",), cached=False)
 
     return load
+
+
+def threaded_cache_call(
+    cache: HiveMetadataCache,
+    key: HiveCacheKey,
+    loader: Callable[[], Awaitable[ListDatabasesResult]],
+) -> tuple[Thread, Queue[object]]:
+    outcomes: Queue[object] = Queue()
+
+    def run() -> None:
+        try:
+            outcomes.put(asyncio.run(cache.get_or_load(key, loader)))
+        except BaseException as error:
+            outcomes.put(error)
+
+    thread = Thread(target=run, daemon=True)
+    thread.start()
+    return thread, outcomes
 
 
 async def test_identical_successful_request_hits_cache_with_accurate_flag() -> None:
@@ -181,6 +240,28 @@ async def test_cache_rejects_non_result_values_without_storing_them() -> None:
     assert calls == 2
 
 
+async def test_cache_rejects_result_subclasses_with_extra_fields_without_storing() -> None:
+    calls = 0
+    cache = HiveMetadataCache(ttl_seconds=30)
+    key = make_hive_cache_key("list_databases")
+
+    async def load() -> ListDatabasesResult:
+        nonlocal calls
+        calls += 1
+        return CredentialBearingResult(
+            databases=("default",),
+            cached=False,
+            credential="credential-sentinel",
+        )
+
+    with pytest.raises(TypeError, match="exact Hive metadata result type"):
+        await cache.get_or_load(key, load)
+    with pytest.raises(TypeError, match="exact Hive metadata result type"):
+        await cache.get_or_load(key, load)
+
+    assert calls == 2
+
+
 async def test_cache_rejects_noncanonical_direct_key_before_loading() -> None:
     calls: list[str] = []
     cache = HiveMetadataCache(ttl_seconds=30)
@@ -208,6 +289,158 @@ async def test_cache_rejects_result_model_for_another_tool_without_storing() -> 
         await cache.get_or_load(key, wrong_result)
 
     assert calls == 2
+
+
+@pytest.mark.parametrize(
+    ("key", "result"),
+    [
+        (
+            make_hive_cache_key("list_tables", database="analytics"),
+            ListTablesResult(database="other", tables=("events",), cached=False),
+        ),
+        (
+            make_hive_cache_key(
+                "get_table_schema", database="analytics", table="events"
+            ),
+            TableSchemaResult(
+                database="other",
+                table="events",
+                columns=(),
+                partition_columns=(),
+                cached=False,
+            ),
+        ),
+        (
+            make_hive_cache_key(
+                "get_table_schema", database="analytics", table="events"
+            ),
+            TableSchemaResult(
+                database="analytics",
+                table="other",
+                columns=(),
+                partition_columns=(),
+                cached=False,
+            ),
+        ),
+        (
+            make_hive_cache_key(
+                "get_table_schema",
+                database="analytics",
+                table="events",
+                include_ddl=True,
+            ),
+            TableSchemaResult(
+                database="analytics",
+                table="events",
+                columns=(),
+                partition_columns=(),
+                ddl=None,
+                cached=False,
+            ),
+        ),
+        (
+            make_hive_cache_key(
+                "get_table_schema", database="analytics", table="events"
+            ),
+            TableSchemaResult(
+                database="analytics",
+                table="events",
+                columns=(),
+                partition_columns=(),
+                ddl="CREATE TABLE `analytics`.`events` (id int)",
+                cached=False,
+            ),
+        ),
+    ],
+)
+async def test_cache_rejects_result_content_mismatched_with_key_without_storing(
+    key: HiveCacheKey,
+    result: ListTablesResult | TableSchemaResult,
+) -> None:
+    calls = 0
+    cache = HiveMetadataCache(ttl_seconds=30)
+
+    async def load() -> ListTablesResult | TableSchemaResult:
+        nonlocal calls
+        calls += 1
+        return result
+
+    with pytest.raises(TypeError, match="does not match Hive cache key"):
+        await cache.get_or_load(key, load)  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="does not match Hive cache key"):
+        await cache.get_or_load(key, load)  # type: ignore[arg-type]
+
+    assert calls == 2
+
+
+async def test_cache_accepts_case_normalized_result_identifiers() -> None:
+    cache = HiveMetadataCache(ttl_seconds=30)
+    key = make_hive_cache_key("list_tables", database="analytics")
+
+    async def load() -> ListTablesResult:
+        return ListTablesResult(database="Analytics", tables=("events",), cached=False)
+
+    first = await cache.get_or_load(key, load)
+    second = await cache.get_or_load(key, load)
+
+    assert first.cached is False
+    assert second.cached is True
+
+
+def test_get_reads_clock_after_lock_acquisition_at_ttl_boundary() -> None:
+    calls: list[str] = []
+    clock = FakeClock()
+    cache = HiveMetadataCache(ttl_seconds=5, clock=clock)
+    key = make_hive_cache_key("list_databases")
+    asyncio.run(cache.get_or_load(key, counting_loader(calls, "seed")))
+    gate = GateLock(block_on_enter=1)
+    vars(cache)["_lock"] = gate
+
+    thread, outcomes = threaded_cache_call(
+        cache, key, counting_loader(calls, "reloaded")
+    )
+    try:
+        assert gate.blocked.wait(timeout=2)
+        clock.advance(5)
+    finally:
+        gate.release.set()
+        thread.join(timeout=2)
+
+    assert not thread.is_alive()
+    result = outcomes.get_nowait()
+    assert isinstance(result, ListDatabasesResult)
+    assert result == database_result("reloaded")
+    assert result.cached is False
+    assert calls == ["seed", "reloaded"]
+
+
+def test_put_reads_clock_after_lock_acquisition_at_ttl_boundary() -> None:
+    calls: list[str] = []
+    clock = FakeClock()
+    cache = HiveMetadataCache(ttl_seconds=5, clock=clock)
+    key = make_hive_cache_key("list_databases")
+    gate = GateLock(block_on_enter=2)
+    vars(cache)["_lock"] = gate
+
+    thread, outcomes = threaded_cache_call(
+        cache, key, counting_loader(calls, "seed")
+    )
+    try:
+        assert gate.blocked.wait(timeout=2)
+        clock.advance(5)
+    finally:
+        gate.release.set()
+        thread.join(timeout=2)
+
+    assert not thread.is_alive()
+    first = outcomes.get_nowait()
+    assert isinstance(first, ListDatabasesResult)
+    second = asyncio.run(
+        cache.get_or_load(key, counting_loader(calls, "not-loaded"))
+    )
+    assert first.cached is False
+    assert second.cached is True
+    assert calls == ["seed"]
 
 
 async def test_cache_evicts_least_recently_used_entry_at_fixed_256_bound() -> None:
