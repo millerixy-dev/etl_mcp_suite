@@ -6,14 +6,14 @@ import json
 import os
 import re
 import typing
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import UnionType
 from typing import Annotated, ClassVar, Generic, Literal, TypeVar, cast, get_args, get_origin
 
 import yaml
-from pydantic import BaseModel, ConfigDict, SecretBytes, SecretStr, TypeAdapter, ValidationError
+from pydantic import BaseModel, ConfigDict, SecretStr, TypeAdapter, ValidationError
 
 _SUPPORTED_VERSION = 1
 _ROOT_FIELDS = frozenset({"version", "plugin", "settings", "secrets"})
@@ -33,10 +33,14 @@ class ConfigError(ValueError):
         super().__init__(f"{self.category}: {message}")
 
 
-class SecretConfigModel(BaseModel):
-    """Base for secret schemas whose fields are safe in model representations."""
+class StrictConfigModel(BaseModel):
+    """Base for configuration schemas that reject unknown fields."""
 
     model_config = ConfigDict(extra="forbid")
+
+
+class SecretConfigModel(StrictConfigModel):
+    """Base for secret schemas whose fields are safe in model representations."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,6 +83,7 @@ def load_config(
         )
 
     raw_settings = _require_string_mapping(root.get("settings"), location="settings")
+    _validate_strict_model_schema(settings_type, location="settings")
     _reject_unknown_model_fields(raw_settings, settings_type, location="settings")
     settings_data = dict(raw_settings)
     environment = os.environ if environ is None else environ
@@ -137,108 +142,52 @@ def _reject_unknown_model_fields(
 ) -> None:
     allowed = frozenset(model_type.model_fields)
     _reject_unknown_fields(values, allowed=allowed, location=location)
-    for field_name, value in values.items():
-        model_field = model_type.model_fields[field_name]
-        _reject_nested_unknown_fields(
-            value,
-            annotation=model_field.annotation,
-            location=f"{location}.{field_name}",
-        )
-
-
-def _reject_nested_unknown_fields(value: object, *, annotation: object, location: str) -> None:
-    if _is_model_type(annotation):
-        if isinstance(value, Mapping):
-            nested_values = _require_string_mapping(
-                cast(Mapping[object, object], value), location=location
-            )
-            _reject_unknown_model_fields(
-                nested_values,
-                cast(type[BaseModel], annotation),
-                location=location,
-            )
-        return
-
-    origin: object = get_origin(annotation)
-    arguments = cast(tuple[object, ...], get_args(annotation))
-    if origin is Annotated and arguments:
-        _reject_nested_unknown_fields(value, annotation=arguments[0], location=location)
-        return
-
-    nested_annotations = tuple(
-        candidate for candidate in arguments if _annotation_contains_model(candidate)
-    )
-    if not nested_annotations:
-        return
-
-    if _is_mapping_origin(origin) and isinstance(value, Mapping) and len(arguments) >= 2:
-        for key, item in cast(Mapping[object, object], value).items():
-            _reject_nested_unknown_fields(
-                item,
-                annotation=arguments[1],
-                location=f"{location}.{key}",
-            )
-        return
-
-    if (
-        _is_sequence_origin(origin)
-        and isinstance(value, Sequence)
-        and not isinstance(value, str)
-        and arguments
-    ):
-        item_annotation = arguments[0]
-        for index, item in enumerate(cast(Sequence[object], value)):
-            _reject_nested_unknown_fields(
-                item,
-                annotation=item_annotation,
-                location=f"{location}.{index}",
-            )
-        return
-
-    errors: list[ConfigError] = []
-    for nested_annotation in nested_annotations:
-        try:
-            _reject_nested_unknown_fields(
-                cast(object, value),
-                annotation=nested_annotation,
-                location=location,
-            )
-        except ConfigError as error:
-            errors.append(error)
-        else:
-            return
-    if errors:
-        raise errors[0]
-
-
-def _annotation_contains_model(annotation: object) -> bool:
-    return _is_model_type(annotation) or any(
-        _annotation_contains_model(argument) for argument in get_args(annotation)
-    )
 
 
 def _is_model_type(annotation: object) -> bool:
     return isinstance(annotation, type) and issubclass(annotation, BaseModel)
 
 
-def _is_mapping_origin(origin: object) -> bool:
-    return isinstance(origin, type) and issubclass(origin, Mapping)
+def _model_types_in_annotation(annotation: object) -> set[type[BaseModel]]:
+    if _is_model_type(annotation):
+        return {cast(type[BaseModel], annotation)}
+    nested_types: set[type[BaseModel]] = set()
+    for argument in cast(tuple[object, ...], get_args(annotation)):
+        nested_types.update(_model_types_in_annotation(argument))
+    return nested_types
 
 
-def _is_sequence_origin(origin: object) -> bool:
-    return isinstance(origin, type) and issubclass(origin, Sequence)
-
-
-def _validate_secret_model_schema(model_type: type[BaseModel]) -> None:
+def _validate_strict_model_schema(
+    model_type: type[BaseModel],
+    *,
+    location: str,
+    checked: set[type[BaseModel]] | None = None,
+) -> None:
+    checked_types: set[type[BaseModel]] = set() if checked is None else checked
+    if model_type in checked_types:
+        return
+    checked_types.add(model_type)
+    if not issubclass(model_type, StrictConfigModel):
+        raise ConfigError(f"configuration schema {location} must inherit StrictConfigModel")
     for field_name, model_field in model_type.model_fields.items():
-        if not _is_safe_secret_annotation(model_field.annotation):
-            raise ConfigError(
-                f"secret schema field secrets.{field_name} must use SecretStr or SecretBytes"
+        for nested_type in _model_types_in_annotation(model_field.annotation):
+            _validate_strict_model_schema(
+                nested_type,
+                location=f"{location}.{field_name}",
+                checked=checked_types,
             )
 
 
+def _validate_secret_model_schema(model_type: type[BaseModel]) -> None:
+    if not issubclass(model_type, SecretConfigModel):
+        raise ConfigError("configuration schema secrets must inherit SecretConfigModel")
+    for field_name, model_field in model_type.model_fields.items():
+        if not _is_safe_secret_annotation(model_field.annotation):
+            raise ConfigError(f"secret schema field secrets.{field_name} must use SecretStr")
+
+
 def _is_safe_secret_annotation(annotation: object) -> bool:
-    if isinstance(annotation, type) and issubclass(annotation, (SecretStr, SecretBytes)):
+    if isinstance(annotation, type) and issubclass(annotation, SecretStr):
         return True
 
     origin = get_origin(annotation)

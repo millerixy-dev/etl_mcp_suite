@@ -12,10 +12,16 @@ from typing import Annotated
 import pytest
 from pydantic import BaseModel, Field, SecretBytes, SecretStr, field_validator
 
-from mcp_stdio.core.config import ConfigError, LoadedConfig, SecretConfigModel, load_config
+from mcp_stdio.core.config import (
+    ConfigError,
+    LoadedConfig,
+    SecretConfigModel,
+    StrictConfigModel,
+    load_config,
+)
 
 
-class ExampleSettings(BaseModel):
+class ExampleSettings(StrictConfigModel):
     host: str
     port: int = 10_000
     tls: bool = False
@@ -31,11 +37,11 @@ class LengthCheckedSecrets(SecretConfigModel):
     password: Annotated[SecretStr, Field(min_length=64)]
 
 
-class NestedConnectionSettings(BaseModel):
+class NestedConnectionSettings(StrictConfigModel):
     endpoint: str
 
 
-class SettingsWithNestedModel(BaseModel):
+class SettingsWithNestedModel(StrictConfigModel):
     connection: NestedConnectionSettings
 
 
@@ -43,9 +49,16 @@ class UnsafeSecrets(BaseModel):
     password: str
 
 
+class ByteSecrets(SecretConfigModel):
+    certificate: SecretBytes
+
+
 class OptionalAuthSecrets(SecretConfigModel):
     token: SecretStr | None = None
-    certificate: SecretBytes | None = None
+
+
+class SettingsWithModelOrMapping(StrictConfigModel):
+    connection: NestedConnectionSettings | dict[str, object]
 
 
 class LegacyOptionalAuthSecrets(SecretConfigModel):
@@ -211,6 +224,25 @@ def test_unknown_fields_in_nested_models_are_rejected(tmp_path: Path) -> None:
     assert "settings.connection.nested_extra" in str(exc_info.value)
 
 
+def test_valid_open_mapping_branch_in_model_union_is_accepted(tmp_path: Path) -> None:
+    document = _valid_document()
+    document["settings"] = {"connection": {"freeform": 1}}
+    config_path = _write_json(tmp_path / "config.json", document)
+
+    loaded = load_config(
+        config_path,
+        expected_plugin="hive",
+        settings_type=SettingsWithModelOrMapping,
+        secrets_type=ExampleSecrets,
+        environ={
+            "HIVE_USERNAME": "resolved-username-sentinel",
+            "HIVE_PASSWORD": "resolved-password-sentinel",
+        },
+    )
+
+    assert loaded.settings.connection == {"freeform": 1}
+
+
 def test_cli_plugin_must_match_file_plugin(tmp_path: Path) -> None:
     document = _valid_document()
     document["plugin"] = "zeppelin"
@@ -308,8 +340,27 @@ def test_optional_safe_secret_types_are_supported_and_masked(tmp_path: Path) -> 
 
     assert loaded.secrets.token is not None
     assert loaded.secrets.token.get_secret_value() == secret_sentinel
-    assert loaded.secrets.certificate is None
     assert secret_sentinel not in repr(loaded.secrets)
+
+
+def test_secret_bytes_schema_is_rejected_before_resolution(tmp_path: Path) -> None:
+    secret_sentinel = "byte-secret-sentinel"
+    document = _valid_document()
+    document["secrets"] = {"certificate": "CERTIFICATE_ENV"}
+    config_path = _write_json(tmp_path / "config.json", document)
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_config(
+            config_path,
+            expected_plugin="hive",
+            settings_type=ExampleSettings,
+            secrets_type=ByteSecrets,
+            environ={"CERTIFICATE_ENV": secret_sentinel},
+        )
+
+    rendered_traceback = "".join(traceback.format_exception(exc_info.value))
+    assert "must use SecretStr" in rendered_traceback
+    assert secret_sentinel not in rendered_traceback
 
 
 def test_typing_optional_safe_secret_type_is_supported(tmp_path: Path) -> None:
