@@ -8,8 +8,8 @@
 
 ## 2. Shared stdio Runtime
 
-- [ ] 2.1 Add failing tests for versioned YAML/JSON loading, safe YAML behavior, unknown-field rejection, plugin mismatch, non-sensitive environment overrides, environment-backed secret resolution, and secret-safe errors.
-- [ ] 2.2 Implement core configuration models and loading until the configuration tests pass without performing network calls.
+- [x] 2.1 Add failing tests for versioned YAML/JSON loading, safe YAML behavior, unknown-field rejection, plugin mismatch, non-sensitive environment overrides, environment-backed secret resolution, and secret-safe errors.
+- [x] 2.2 Implement core configuration models and loading until the configuration tests pass without performing network calls.
 - [ ] 2.3 Add failing tests for stable error categories, correlation IDs, stderr logging, stdout protocol discipline, and credential/header/cookie redaction.
 - [ ] 2.4 Implement the shared error and logging boundary until safe error serialization and redaction tests pass.
 - [ ] 2.5 Define the minimal plugin lifecycle contract and explicit registry, then test supported selection, unknown-plugin rejection, and the prohibition on dynamic import-by-name.
