@@ -40,17 +40,22 @@ def _service_error(
     )
 
 
-def _validated_identifier(value: str, *, operation: ToolOperation) -> str:
+def _validated_identifier(value: object, *, operation: ToolOperation) -> str:
+    if not isinstance(value, str):
+        raise _service_error(
+            category=ErrorCategory.INVALID_INPUT,
+            operation=operation,
+        )
     try:
         return HiveIdentifier(value).value
-    except (TypeError, ValueError):
+    except ValueError:
         raise _service_error(
             category=ErrorCategory.INVALID_INPUT,
             operation=operation,
         ) from None
 
 
-def _validated_include_ddl(value: bool) -> bool:
+def _validated_include_ddl(value: object) -> bool:
     if type(value) is not bool:
         raise _service_error(
             category=ErrorCategory.INVALID_INPUT,
@@ -120,7 +125,7 @@ class HiveSchemaService:
             load,
         )
 
-    async def list_tables(self, database: str) -> ListTablesResult:
+    async def list_tables(self, database: object) -> ListTablesResult:
         database = _validated_identifier(
             database,
             operation=ToolOperation.LIST_TABLES,
@@ -146,9 +151,9 @@ class HiveSchemaService:
 
     async def get_table_schema(
         self,
-        database: str,
-        table: str,
-        include_ddl: bool = False,
+        database: object,
+        table: object,
+        include_ddl: object = False,
     ) -> TableSchemaResult:
         database = _validated_identifier(
             database,

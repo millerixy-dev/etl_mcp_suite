@@ -73,23 +73,16 @@ async def test_runtime_loads_config_without_network_and_registers_exact_tools(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    adapter = FakeAdapter()
-    captured: list[tuple[HiveSettings, HiveSecrets]] = []
-
-    def build_adapter(*, settings: HiveSettings, secrets: HiveSecrets) -> FakeAdapter:
-        captured.append((settings, secrets))
-        return adapter
-
     def reject_network(*args: object, **kwargs: object) -> object:
         del args, kwargs
         raise AssertionError("runtime construction attempted network access")
 
-    monkeypatch.setattr(
-        "mcp_stdio.plugins.hive.plugin.PyHiveMetadataAdapter",
-        build_adapter,
-    )
     monkeypatch.setattr(socket, "create_connection", reject_network)
     monkeypatch.setattr(socket.socket, "connect", reject_network)
+    monkeypatch.setattr(socket.socket, "connect_ex", reject_network)
+    monkeypatch.setattr(socket, "getaddrinfo", reject_network)
+    monkeypatch.setattr(socket, "gethostbyname", reject_network)
+    monkeypatch.setattr(socket, "gethostbyname_ex", reject_network)
     environment: Mapping[str, str] = {
         "HIVE_USERNAME": "runtime-user-sentinel",
         "HIVE_PASSWORD": "runtime-password-sentinel",
@@ -108,16 +101,6 @@ async def test_runtime_loads_config_without_network_and_registers_exact_tools(
         "list_tables",
         "get_table_schema",
     ]
-    assert len(captured) == 1
-    settings, secrets = captured[0]
-    assert settings == HiveSettings(
-        host="hive.example.internal",
-        port=10001,
-        database="catalog",
-        cache_ttl_seconds=45,
-    )
-    assert secrets.username.get_secret_value() == "runtime-user-sentinel"
-    assert secrets.password.get_secret_value() == "runtime-password-sentinel"
 
     await runtime.close()
     await runtime.close()

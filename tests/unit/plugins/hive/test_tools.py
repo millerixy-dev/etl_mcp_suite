@@ -10,10 +10,12 @@ from typing import cast
 import pytest
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError as FastMCPToolError
+from mcp.types import TextContent
 
 from mcp_stdio.contracts.plugin import ToolHandler
 from mcp_stdio.core.errors import ErrorCategory, ToolError, ToolOperation
-from mcp_stdio.plugins.hive.gateway import HiveGatewayError
+from mcp_stdio.plugins.hive.cache import HiveMetadataCache
+from mcp_stdio.plugins.hive.gateway import HiveGatewayError, HiveRows
 from mcp_stdio.plugins.hive.models import (
     ColumnMetadata,
     ListDatabasesResult,
@@ -71,6 +73,27 @@ class FakeHiveService:
             raise self.failure
 
 
+class RecordingGateway:
+    def __init__(self) -> None:
+        self.calls: list[tuple[object, ...]] = []
+
+    async def list_databases(self) -> HiveRows:
+        self.calls.append(("list_databases",))
+        return (("default",),)
+
+    async def list_tables(self, database: str) -> HiveRows:
+        self.calls.append(("list_tables", database))
+        return (("events",),)
+
+    async def describe_table(self, database: str, table: str) -> HiveRows:
+        self.calls.append(("describe_table", database, table))
+        return (("event_id", "bigint", None),)
+
+    async def show_create_table(self, database: str, table: str) -> HiveRows:
+        self.calls.append(("show_create_table", database, table))
+        return (("CREATE TABLE",),)
+
+
 def tool_adapter(
     service: FakeHiveService,
     *,
@@ -91,6 +114,29 @@ def registered_handlers(
         cast(str, name): cast(Callable[..., Awaitable[object]], handler)
         for handler, name in registrar.tools
     }
+
+
+def real_tool_server(
+    gateway: RecordingGateway,
+    *,
+    secret_values: tuple[str, ...] = (),
+) -> FastMCP:
+    service = HiveSchemaService(
+        gateway=gateway,
+        cache=HiveMetadataCache(ttl_seconds=0),
+    )
+    server = FastMCP("hive-real-boundary")
+    HiveToolAdapter(service=service, secret_values=secret_values).register_tools(server)
+    return server
+
+
+def safe_error_payload(error: FastMCPToolError) -> dict[str, object]:
+    text = str(error)
+    payload_start = text.find("{")
+    assert payload_start >= 0
+    payload = json.loads(text[payload_start:])
+    assert isinstance(payload, dict)
+    return cast(dict[str, object], payload)
 
 
 async def test_registers_exact_three_tools_with_narrow_public_signatures() -> None:
@@ -208,13 +254,32 @@ async def test_fastmcp_schema_has_narrow_fields_and_strict_boolean_type() -> Non
     tools = {tool.name: tool for tool in await server.list_tools()}
 
     assert tuple(tools) == ("list_databases", "list_tables", "get_table_schema")
-    schema = tools["get_table_schema"].inputSchema
-    assert schema["type"] == "object"
-    assert schema["required"] == ["database", "table"]
-    assert schema["properties"] == {
-        "database": {"title": "Database", "type": "string"},
-        "table": {"title": "Table", "type": "string"},
-        "include_ddl": {"default": False, "title": "Include Ddl", "type": "boolean"},
+    assert tools["list_databases"].inputSchema == {
+        "properties": {},
+        "title": "list_databasesArguments",
+        "type": "object",
+    }
+    assert tools["list_tables"].inputSchema == {
+        "properties": {
+            "database": {"title": "Database", "type": "string"},
+        },
+        "required": ["database"],
+        "title": "list_tablesArguments",
+        "type": "object",
+    }
+    assert tools["get_table_schema"].inputSchema == {
+        "properties": {
+            "database": {"title": "Database", "type": "string"},
+            "table": {"title": "Table", "type": "string"},
+            "include_ddl": {
+                "default": False,
+                "title": "Include Ddl",
+                "type": "boolean",
+            },
+        },
+        "required": ["database", "table"],
+        "title": "get_table_schemaArguments",
+        "type": "object",
     }
     assert not {
         "sql",
@@ -223,20 +288,127 @@ async def test_fastmcp_schema_has_narrow_fields_and_strict_boolean_type() -> Non
         "statement",
         "query",
         "options",
-    }.intersection(schema["properties"])
+    }.intersection(
+        property_name
+        for tool in tools.values()
+        for property_name in tool.inputSchema["properties"]
+    )
 
-    assert tools["list_databases"].outputSchema == {
-        "additionalProperties": False,
-        "description": "Database names and their cache provenance.",
-        "properties": {
-            "databases": {
-                "items": {"minLength": 1, "type": "string"},
-                "title": "Databases",
-                "type": "array",
+    assert tools["list_databases"].outputSchema == ListDatabasesResult.model_json_schema()
+    assert tools["list_tables"].outputSchema == ListTablesResult.model_json_schema()
+    assert tools["get_table_schema"].outputSchema == TableSchemaResult.model_json_schema()
+
+
+async def test_fastmcp_call_tool_returns_structured_results_for_all_three_tools() -> None:
+    server = FastMCP("hive-structured-contract")
+    tool_adapter(FakeHiveService()).register_tools(server)
+
+    expectations: list[tuple[str, dict[str, object], dict[str, object]]] = [
+        (
+            "list_databases",
+            {},
+            {"databases": ["default", "Sales Data"], "cached": False},
+        ),
+        (
+            "list_tables",
+            {"database": "Analytics"},
+            {"database": "Analytics", "tables": ["events"], "cached": True},
+        ),
+        (
+            "get_table_schema",
+            {"database": "Analytics", "table": "Events", "include_ddl": True},
+            {
+                "database": "Analytics",
+                "table": "Events",
+                "columns": [
+                    {
+                        "name": "event_id",
+                        "type": "bigint",
+                        "comment": None,
+                        "ordinal": 1,
+                    }
+                ],
+                "partition_columns": [],
+                "ddl": "CREATE TABLE",
+                "cached": False,
             },
-            "cached": {"title": "Cached", "type": "boolean"},
-        },
-        "required": ["databases", "cached"],
-        "title": "ListDatabasesResult",
-        "type": "object",
-    }
+        ),
+    ]
+
+    for name, arguments, expected in expectations:
+        raw_result = await server.call_tool(name, arguments)
+        assert isinstance(raw_result, tuple)
+        result = cast(tuple[list[TextContent], dict[str, object]], raw_result)
+        content, structured = result
+        assert structured == expected
+        assert len(content) == 1
+        assert json.loads(content[0].text) == expected
+
+
+@pytest.mark.parametrize(
+    "database",
+    [1, 0, {"credential": "wire-input-secret-sentinel"}],
+)
+async def test_fastmcp_list_tables_routes_raw_invalid_input_to_safe_boundary(
+    database: object,
+) -> None:
+    secret = "wire-input-secret-sentinel"
+    gateway = RecordingGateway()
+    server = real_tool_server(gateway, secret_values=(secret,))
+
+    with pytest.raises(FastMCPToolError) as captured:
+        await server.call_tool("list_tables", {"database": database})
+
+    payload = safe_error_payload(captured.value)
+    assert payload["category"] == "INVALID_INPUT"
+    assert payload["operation"] == "list_tables"
+    assert payload["identifiers"] == {}
+    assert gateway.calls == []
+    assert secret not in str(captured.value)
+
+
+@pytest.mark.parametrize(
+    ("arguments", "secret"),
+    [
+        ({"database": 1, "table": "events"}, "unused-sentinel"),
+        ({"database": "default", "table": 0}, "unused-sentinel"),
+        (
+            {"database": "default", "table": {"secret": "table-wire-secret-sentinel"}},
+            "table-wire-secret-sentinel",
+        ),
+        ({"database": "default", "table": "events", "include_ddl": 1}, "unused-sentinel"),
+        ({"database": "default", "table": "events", "include_ddl": 0}, "unused-sentinel"),
+        (
+            {"database": "default", "table": "events", "include_ddl": "true"},
+            "unused-sentinel",
+        ),
+        (
+            {"database": "default", "table": "events", "include_ddl": "false"},
+            "unused-sentinel",
+        ),
+        (
+            {
+                "database": "default",
+                "table": "events",
+                "include_ddl": {"token": "ddl-wire-secret-sentinel"},
+            },
+            "ddl-wire-secret-sentinel",
+        ),
+    ],
+)
+async def test_fastmcp_schema_routes_raw_non_strict_values_to_safe_boundary(
+    arguments: dict[str, object],
+    secret: str,
+) -> None:
+    gateway = RecordingGateway()
+    server = real_tool_server(gateway, secret_values=(secret,))
+
+    with pytest.raises(FastMCPToolError) as captured:
+        await server.call_tool("get_table_schema", arguments)
+
+    payload = safe_error_payload(captured.value)
+    assert payload["category"] == "INVALID_INPUT"
+    assert payload["operation"] == "get_table_schema"
+    assert payload["identifiers"] == {}
+    assert gateway.calls == []
+    assert secret not in str(captured.value)

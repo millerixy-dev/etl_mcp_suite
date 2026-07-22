@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable
-from typing import NoReturn
+from typing import Annotated, NoReturn
 
 from mcp.server.fastmcp.exceptions import ToolError as FastMCPToolError
+from pydantic import WithJsonSchema
 
 from mcp_stdio.contracts.plugin import ToolRegistrar
 from mcp_stdio.core.errors import ToolError, ToolOperation, unexpected_tool_error
@@ -17,6 +18,9 @@ from mcp_stdio.plugins.hive.models import (
     TableSchemaResult,
 )
 from mcp_stdio.plugins.hive.service import HiveSchemaService
+
+HiveToolString = Annotated[object, WithJsonSchema({"type": "string"})]
+HiveToolBoolean = Annotated[object, WithJsonSchema({"type": "boolean"})]
 
 
 class HiveToolAdapter:
@@ -53,7 +57,7 @@ class HiveToolAdapter:
                 )
             )
 
-    async def list_tables(self, database: str) -> ListTablesResult:
+    async def list_tables(self, database: HiveToolString) -> ListTablesResult:
         """List tables in one validated Hive database."""
 
         try:
@@ -70,9 +74,9 @@ class HiveToolAdapter:
 
     async def get_table_schema(
         self,
-        database: str,
-        table: str,
-        include_ddl: bool = False,
+        database: HiveToolString,
+        table: HiveToolString,
+        include_ddl: HiveToolBoolean = False,
     ) -> TableSchemaResult:
         """Return regular/partition columns and optionally fixed metadata DDL."""
 

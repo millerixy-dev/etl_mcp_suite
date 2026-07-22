@@ -87,13 +87,16 @@ async def test_list_tables_validates_before_gateway_and_preserves_upstream_names
     assert gateway.calls == [("list_tables", "Analytics")]
 
 
-@pytest.mark.parametrize("database", ["sales data", "bad.db", "`quoted`", "x; DROP TABLE y"])
-async def test_list_tables_rejects_unsafe_database_before_gateway(database: str) -> None:
+@pytest.mark.parametrize(
+    "database",
+    ["sales data", "bad.db", "`quoted`", "x; DROP TABLE y", 1, 0, {"bad": "value"}],
+)
+async def test_list_tables_rejects_unsafe_database_before_gateway(database: object) -> None:
     gateway = FakeHiveGateway()
     service = service_with(gateway)
 
     with pytest.raises(HiveGatewayError) as captured:
-        await service.list_tables(database)
+        await service.list_tables(database)  # type: ignore[arg-type]
 
     assert captured.value.tool_error.category is ErrorCategory.INVALID_INPUT
     assert captured.value.tool_error.operation is ToolOperation.LIST_TABLES
@@ -148,16 +151,19 @@ async def test_get_table_schema_requests_and_parses_ddl_only_when_enabled() -> N
         ("bad database", "events"),
         ("default", "events; SELECT 1"),
         ("default", "db.table"),
+        (1, "events"),
+        ("default", 0),
+        ({"bad": "value"}, "events"),
     ],
 )
 async def test_get_table_schema_rejects_unsafe_identifiers_before_gateway(
-    database: str, table: str
+    database: object, table: object
 ) -> None:
     gateway = FakeHiveGateway()
     service = service_with(gateway)
 
     with pytest.raises(HiveGatewayError) as captured:
-        await service.get_table_schema(database, table)
+        await service.get_table_schema(database, table)  # type: ignore[arg-type]
 
     assert captured.value.tool_error.category is ErrorCategory.INVALID_INPUT
     assert captured.value.tool_error.operation is ToolOperation.GET_TABLE_SCHEMA
