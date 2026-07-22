@@ -43,6 +43,84 @@ def test_logging_writes_only_redacted_text_to_stderr(
     logging.getLogger("mcp_stdio").handlers.clear()
 
 
+@pytest.mark.parametrize(
+    ("message", "secret_values"),
+    [
+        (
+            "password='multi word password unknown sentinel'",
+            ("multi word password unknown sentinel",),
+        ),
+        (
+            'Authorization: "Bearer quoted authorization unknown sentinel"',
+            ("quoted authorization unknown sentinel",),
+        ),
+        (
+            "Cookie: session=cookie-first-unknown; refresh=cookie-second-unknown",
+            ("cookie-first-unknown", "cookie-second-unknown"),
+        ),
+        (
+            "Proxy-Authorization: 'Basic proxy authorization unknown sentinel'",
+            ("proxy authorization unknown sentinel",),
+        ),
+    ],
+)
+def test_structural_redaction_removes_complete_unknown_sensitive_values(
+    message: str,
+    secret_values: tuple[str, ...],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from mcp_stdio.core.logging import configure_logging
+
+    logger = configure_logging()
+
+    logger.info(message)
+    captured = capsys.readouterr()
+
+    assert "[REDACTED]" in captured.err
+    for secret in secret_values:
+        assert secret not in captured.err
+    assert captured.out == ""
+    logging.getLogger("mcp_stdio").handlers.clear()
+
+
+def test_structural_redaction_runs_before_configured_literal_replacement(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from mcp_stdio.core.logging import configure_logging
+
+    leaked_value = "must-not-leak-after-key-replacement"
+    logger = configure_logging(secret_values=("password",))
+
+    logger.info("password=%s", leaked_value)
+    captured = capsys.readouterr()
+
+    assert leaked_value not in captured.err
+    assert captured.out == ""
+    logging.getLogger("mcp_stdio").handlers.clear()
+
+
+def test_malformed_format_arguments_fail_closed_without_logging_raw_arguments(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from mcp_stdio.core.logging import configure_logging
+
+    secret = "malformed-format-argument-unknown-sentinel"
+    logger = configure_logging()
+    previous_raise_exceptions = logging.raiseExceptions
+    logging.raiseExceptions = True
+    try:
+        logger.info("password=%s %s", secret)
+    finally:
+        logging.raiseExceptions = previous_raise_exceptions
+    captured = capsys.readouterr()
+
+    assert "logging record formatting failed safely" in captured.err
+    assert secret not in captured.err
+    assert "Arguments:" not in captured.err
+    assert captured.out == ""
+    logging.getLogger("mcp_stdio").handlers.clear()
+
+
 def test_debug_traceback_is_redacted_after_rendering(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
