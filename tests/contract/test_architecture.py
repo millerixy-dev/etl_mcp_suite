@@ -57,5 +57,22 @@ def test_plugin_to_plugin_import_is_rejected(tmp_path: Path) -> None:
     ]
 
 
+def test_only_registry_may_import_a_concrete_plugin_from_shared_code(
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "src"
+    _write_module(
+        source_root,
+        "mcp_stdio/bootstrap.py",
+        "from mcp_stdio.plugins.hive import plugin\n",
+    )
+
+    violations = find_import_violations(source_root)
+
+    assert [(item.rule, item.imported) for item in violations] == [
+        ("shared-to-plugin", "mcp_stdio.plugins.hive"),
+    ]
+
+
 def test_source_tree_respects_architecture_import_boundaries() -> None:
     assert find_import_violations(SOURCE_ROOT) == []

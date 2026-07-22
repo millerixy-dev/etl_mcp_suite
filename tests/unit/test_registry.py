@@ -22,7 +22,7 @@ from mcp_stdio.plugins.dolphinscheduler.plugin import (
 )
 from mcp_stdio.plugins.hive.plugin import PLUGIN_DEFINITION as HIVE_PLUGIN
 from mcp_stdio.plugins.zeppelin.plugin import PLUGIN_DEFINITION as ZEPPELIN_PLUGIN
-from mcp_stdio.registry import BUILTIN_PLUGINS, get_plugin_definition
+from mcp_stdio.registry import BUILTIN_PLUGIN_LOADERS, get_plugin_definition
 
 PROJECT_ROOT = Path(__file__).parents[2]
 SOURCE_ROOT = PROJECT_ROOT / "src" / "mcp_stdio"
@@ -56,9 +56,11 @@ class RecordingRuntime:
         return {"ok": True}
 
 
-def test_registry_contains_only_the_three_static_builtin_definitions() -> None:
-    assert tuple(BUILTIN_PLUGINS) == ("hive", "zeppelin", "dolphinscheduler")
-    assert BUILTIN_PLUGINS == {
+def test_registry_contains_only_the_three_static_builtin_loaders() -> None:
+    assert tuple(BUILTIN_PLUGIN_LOADERS) == ("hive", "zeppelin", "dolphinscheduler")
+    assert {
+        name: loader() for name, loader in BUILTIN_PLUGIN_LOADERS.items()
+    } == {
         "hive": HIVE_PLUGIN,
         "zeppelin": ZEPPELIN_PLUGIN,
         "dolphinscheduler": DOLPHINSCHEDULER_PLUGIN,
@@ -133,15 +135,6 @@ async def test_runtime_cleanup_is_asynchronous() -> None:
     assert runtime.closed is True
 
 
-@pytest.mark.parametrize("definition", BUILTIN_PLUGINS.values())
-def test_placeholder_runtime_construction_fails_clearly(
-    definition: PluginDefinition,
-    tmp_path: Path,
-) -> None:
-    with pytest.raises(NotImplementedError, match=rf"^{definition.name} plugin runtime"):
-        definition.create_runtime(tmp_path / "config.yaml", environ={})
-
-
 def test_registry_and_plugin_composition_sources_prohibit_dynamic_discovery() -> None:
     source_paths = [
         SOURCE_ROOT / "registry.py",
@@ -193,6 +186,100 @@ def reject_network(*args, **kwargs):
 socket.create_connection = reject_network
 socket.socket.connect = reject_network
 import mcp_stdio.registry
+"""
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=PROJECT_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_importing_registry_loads_no_concrete_plugin_roots() -> None:
+    script = """
+import sys
+import mcp_stdio.registry
+
+plugin_roots = {
+    "mcp_stdio.plugins.hive.plugin",
+    "mcp_stdio.plugins.zeppelin.plugin",
+    "mcp_stdio.plugins.dolphinscheduler.plugin",
+}
+assert plugin_roots.isdisjoint(sys.modules), sorted(plugin_roots & sys.modules.keys())
+"""
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=PROJECT_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+
+
+@pytest.mark.parametrize(
+    ("selected", "expected_module"),
+    [
+        ("hive", "mcp_stdio.plugins.hive.plugin"),
+        ("zeppelin", "mcp_stdio.plugins.zeppelin.plugin"),
+        ("dolphinscheduler", "mcp_stdio.plugins.dolphinscheduler.plugin"),
+    ],
+)
+def test_selection_loads_only_the_selected_concrete_plugin_root(
+    selected: str,
+    expected_module: str,
+) -> None:
+    script = f"""
+import sys
+from mcp_stdio.registry import get_plugin_definition
+
+plugin_roots = {{
+    "mcp_stdio.plugins.hive.plugin",
+    "mcp_stdio.plugins.zeppelin.plugin",
+    "mcp_stdio.plugins.dolphinscheduler.plugin",
+}}
+assert plugin_roots.isdisjoint(sys.modules), sorted(plugin_roots & sys.modules.keys())
+definition = get_plugin_definition({selected!r})
+assert definition.name == {selected!r}
+assert plugin_roots & sys.modules.keys() == {{{expected_module!r}}}
+"""
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=PROJECT_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_unknown_selection_loads_no_concrete_plugin_roots() -> None:
+    script = """
+import sys
+from mcp_stdio.core.config import ConfigError
+from mcp_stdio.registry import get_plugin_definition
+
+plugin_roots = {
+    "mcp_stdio.plugins.hive.plugin",
+    "mcp_stdio.plugins.zeppelin.plugin",
+    "mcp_stdio.plugins.dolphinscheduler.plugin",
+}
+assert plugin_roots.isdisjoint(sys.modules), sorted(plugin_roots & sys.modules.keys())
+try:
+    get_plugin_definition("caller.controlled.module")
+except ConfigError as error:
+    assert str(error) == "CONFIG_ERROR: unknown plugin"
+else:
+    raise AssertionError("unknown plugin was accepted")
+assert plugin_roots.isdisjoint(sys.modules), sorted(plugin_roots & sys.modules.keys())
 """
 
     completed = subprocess.run(

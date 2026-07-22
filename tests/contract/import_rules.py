@@ -64,6 +64,12 @@ def _is_service_infrastructure_import(module: str, imported: str) -> bool:
     return imported.split(".")[-1] in infrastructure_modules
 
 
+def _is_shared_concrete_plugin_import(module: str, imported: str) -> bool:
+    imports_concrete_plugin = _plugin_name(imported) is not None
+    source_is_plugin = module.startswith("mcp_stdio.plugins.")
+    return imports_concrete_plugin and not source_is_plugin and module != "mcp_stdio.registry"
+
+
 def find_import_violations(source_root: Path) -> list[ImportViolation]:
     violations: list[ImportViolation] = []
     for path in sorted(source_root.rglob("*.py")):
@@ -77,6 +83,8 @@ def find_import_violations(source_root: Path) -> list[ImportViolation]:
                 rule = "core-to-plugin"
             elif _is_service_infrastructure_import(module, imported):
                 rule = "service-to-infrastructure"
+            elif _is_shared_concrete_plugin_import(module, imported):
+                rule = "shared-to-plugin"
             else:
                 source_plugin = _plugin_name(module)
                 imported_plugin = _plugin_name(imported)
