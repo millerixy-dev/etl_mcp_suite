@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Sequence
-from typing import Literal, Protocol, cast
+from typing import Protocol, cast, runtime_checkable
 
 from pyhive import hive  # pyright: ignore[reportMissingTypeStubs]
 from pyhive.exc import (  # pyright: ignore[reportMissingTypeStubs]
@@ -36,8 +36,12 @@ class _Connection(Protocol):
     def close(self) -> object: ...
 
 
+@runtime_checkable
+class _Closable(Protocol):
+    def close(self) -> object: ...
+
+
 _ConnectionFactory = Callable[..., _Connection]
-_FailurePhase = Literal["connect", "cursor", "execute", "fetch", "response", "close"]
 
 
 class _HiveRowsShapeError(ValueError):
@@ -86,8 +90,6 @@ def _sql_state(exception: OperationalError) -> str | None:
 
 def _category_for_exception(
     exception: Exception,
-    *,
-    phase: _FailurePhase,
 ) -> tuple[ErrorCategory, bool]:
     if isinstance(exception, _HiveRowsShapeError):
         return ErrorCategory.UNEXPECTED_RESPONSE, False
@@ -96,13 +98,6 @@ def _category_for_exception(
     if isinstance(exception, TTransportException):
         if exception.type == TTransportException.TIMED_OUT:
             return ErrorCategory.TIMEOUT, True
-        transport_inner = cast(object | None, getattr(exception, "inner", None))
-        if (
-            phase == "connect"
-            and exception.type == TTransportException.NOT_OPEN
-            and transport_inner is None
-        ):
-            return ErrorCategory.AUTHENTICATION_FAILED, False
         return ErrorCategory.CONNECTION_FAILED, True
     if isinstance(exception, InterfaceError):
         return ErrorCategory.CONNECTION_FAILED, True
@@ -130,11 +125,10 @@ def _category_for_exception(
 def _gateway_error(
     exception: Exception,
     *,
-    phase: _FailurePhase,
     operation: ToolOperation,
     identifiers: dict[str, str],
 ) -> HiveGatewayError:
-    category, retryable = _category_for_exception(exception, phase=phase)
+    category, retryable = _category_for_exception(exception)
     return HiveGatewayError(
         ToolError.create(
             category=category,
@@ -160,6 +154,35 @@ def _validated_identifier(
                 retryable=False,
             )
         ) from None
+
+
+def _force_close_pinned_pyhive_transport(connection: _Connection) -> None:
+    """Best-effort the PyHive 0.7.0 transport when CloseSession aborts close."""
+
+    try:
+        transport = cast(object, getattr(connection, "_transport", None))
+        if not isinstance(transport, _Closable):
+            return
+        transport.close()
+    except Exception:
+        pass
+
+
+async def _wait_for_worker_cleanup(worker: asyncio.Task[HiveRows]) -> None:
+    """Retrieve one shielded worker result despite repeated caller cancellation."""
+
+    while not worker.done():
+        try:
+            await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            continue
+        except Exception:
+            break
+    if not worker.cancelled():
+        try:
+            worker.result()
+        except Exception:
+            pass
 
 
 class PyHiveMetadataAdapter:
@@ -241,12 +264,19 @@ class PyHiveMetadataAdapter:
         operation: ToolOperation,
         identifiers: dict[str, str],
     ) -> HiveRows:
-        return await asyncio.to_thread(
-            self._execute_blocking,
-            statement,
-            operation,
-            identifiers,
+        worker = asyncio.create_task(
+            asyncio.to_thread(
+                self._execute_blocking,
+                statement,
+                operation,
+                identifiers,
+            )
         )
+        try:
+            return await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            await _wait_for_worker_cleanup(worker)
+            raise
 
     def _execute_blocking(
         self,
@@ -257,8 +287,7 @@ class PyHiveMetadataAdapter:
         connection: _Connection | None = None
         cursor: _Cursor | None = None
         rows: HiveRows | None = None
-        primary_failure: tuple[Exception, _FailurePhase] | None = None
-        phase: _FailurePhase = "connect"
+        primary_failure: Exception | None = None
 
         try:
             connection = self._connection_factory(
@@ -269,42 +298,36 @@ class PyHiveMetadataAdapter:
                 password=self._secrets.password.get_secret_value(),
                 auth="LDAP",
             )
-            phase = "cursor"
             cursor = connection.cursor()
-            phase = "execute"
             cursor.execute(statement)
-            phase = "fetch"
             raw_rows = cursor.fetchall()
-            phase = "response"
             rows = _snapshot_rows(raw_rows)
         except Exception as exception:
-            primary_failure = (exception, phase)
+            primary_failure = exception
         finally:
             if cursor is not None:
                 try:
                     cursor.close()
                 except Exception as exception:
                     if primary_failure is None:
-                        primary_failure = (exception, "close")
+                        primary_failure = exception
             if connection is not None:
                 try:
                     connection.close()
                 except Exception as exception:
+                    _force_close_pinned_pyhive_transport(connection)
                     if primary_failure is None:
-                        primary_failure = (exception, "close")
+                        primary_failure = exception
 
         if primary_failure is not None:
-            exception, failure_phase = primary_failure
             raise _gateway_error(
-                exception,
-                phase=failure_phase,
+                primary_failure,
                 operation=operation,
                 identifiers=identifiers,
             ) from None
         if rows is None:
             raise _gateway_error(
                 _HiveRowsShapeError(),
-                phase="response",
                 operation=operation,
                 identifiers=identifiers,
             ) from None

@@ -10,10 +10,12 @@ from dataclasses import dataclass
 
 import pytest
 from pydantic import SecretStr
+from pyhive import hive  # pyright: ignore[reportMissingTypeStubs]
 from pyhive.exc import (  # pyright: ignore[reportMissingTypeStubs]
     InterfaceError,
     OperationalError,
 )
+from TCLIService import ttypes  # pyright: ignore[reportMissingTypeStubs]
 from thrift.transport.TTransport import (  # pyright: ignore[reportMissingTypeStubs]
     TTransportException,
 )
@@ -79,6 +81,8 @@ class FakeConnection:
         cursor_error: Exception | None = None,
         close_error: Exception | None = None,
         events: list[tuple[str, int]] | None = None,
+        transport: FakeOwnedTransport | None = None,
+        closed_event: threading.Event | None = None,
     ) -> None:
         self.cursor_error = cursor_error
         self.close_error = close_error
@@ -86,6 +90,8 @@ class FakeConnection:
         self.cursor_calls = 0
         self.close_calls = 0
         self.cursor_instance = cursor
+        self._transport = transport
+        self.closed_event = closed_event
 
     def cursor(self) -> FakeCursor:
         self.events.append(("cursor", threading.get_ident()))
@@ -97,8 +103,73 @@ class FakeConnection:
     def close(self) -> None:
         self.events.append(("connection.close", threading.get_ident()))
         self.close_calls += 1
+        if self.closed_event is not None:
+            self.closed_event.set()
         if self.close_error is not None:
             raise self.close_error
+
+
+class FakeOwnedTransport:
+    def __init__(self, *, close_error: Exception | None = None) -> None:
+        self.close_error = close_error
+        self.open_calls = 0
+        self.close_calls = 0
+
+    def open(self) -> None:
+        self.open_calls += 1
+
+    def close(self) -> None:
+        self.close_calls += 1
+        if self.close_error is not None:
+            raise self.close_error
+
+
+class BlockingCursor(FakeCursor):
+    def __init__(
+        self,
+        *,
+        started: threading.Event,
+        release: threading.Event,
+    ) -> None:
+        super().__init__()
+        self.started = started
+        self.release = release
+
+    def execute(self, statement: str) -> None:
+        self.events.append(("execute", threading.get_ident()))
+        self.statements.append(statement)
+        self.started.set()
+        if not self.release.wait(timeout=2):
+            raise TimeoutError("test worker release timed out")
+
+
+@dataclass(frozen=True, slots=True)
+class DriverSessionResponse:
+    status: object
+    sessionHandle: object
+    serverProtocolVersion: object
+
+
+@dataclass(frozen=True, slots=True)
+class DriverStatus:
+    statusCode: object
+
+
+class DriverClientSpy:
+    def __init__(self, response: DriverSessionResponse) -> None:
+        self.response = response
+        self.open_session_calls = 0
+        self.close_session_calls = 0
+
+    def OpenSession(self, request: object) -> DriverSessionResponse:
+        del request
+        self.open_session_calls += 1
+        return self.response
+
+    def CloseSession(self, request: object) -> DriverSessionResponse:
+        del request
+        self.close_session_calls += 1
+        return self.response
 
 
 class RecordingFactory:
@@ -191,6 +262,47 @@ async def test_adapter_generates_only_four_fixed_statement_families() -> None:
         for connection in factory.connections
     )
     assert all(connection.close_calls == 1 for connection in factory.connections)
+
+
+def test_pinned_pyhive_constructor_executes_only_configured_database_use(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = HiveSettings(host="unused", database="catalog")
+    driver_cursor = FakeCursor()
+    transport = FakeOwnedTransport()
+    protocol_version = ttypes.TProtocolVersion.HIVE_CLI_SERVICE_PROTOCOL_V6
+    response = DriverSessionResponse(
+        status=DriverStatus(statusCode=ttypes.TStatusCode.SUCCESS_STATUS),
+        sessionHandle=object(),
+        serverProtocolVersion=protocol_version,
+    )
+    client = DriverClientSpy(response)
+
+    def client_factory(protocol: object) -> DriverClientSpy:
+        del protocol
+        return client
+
+    def cursor_factory(connection: object) -> FakeCursor:
+        del connection
+        return driver_cursor
+
+    monkeypatch.setattr(hive.TCLIService, "Client", client_factory)
+    monkeypatch.setattr(hive.Connection, "cursor", cursor_factory)
+
+    connection = hive.Connection(  # pyright: ignore[reportUnknownMemberType]
+        username="ldap-user-sentinel",
+        database=settings.database,
+        thrift_transport=transport,
+    )
+
+    assert driver_cursor.statements == ["USE `catalog`"]
+    assert driver_cursor.close_calls == 1
+    assert client.open_session_calls == 1
+    assert transport.open_calls == 1
+
+    connection.close()  # pyright: ignore[reportUnknownMemberType]
+    assert client.close_session_calls == 1
+    assert transport.close_calls == 1
 
 
 def test_adapter_public_api_has_no_caller_sql_or_statement_arguments() -> None:
@@ -287,6 +399,35 @@ async def test_concurrent_invocations_use_independent_connections() -> None:
     assert all(connection.close_calls == 1 for connection in factory.connections)
 
 
+@pytest.mark.parametrize("cancel_count", [1, 2])
+async def test_cancellation_waits_for_worker_cleanup_before_propagating(
+    cancel_count: int,
+) -> None:
+    started = threading.Event()
+    release = threading.Event()
+    connection_closed = threading.Event()
+    cursor = BlockingCursor(started=started, release=release)
+    connection = FakeConnection(cursor, closed_event=connection_closed)
+    adapter = adapter_with(RecordingFactory(lambda: connection))
+    request = asyncio.create_task(adapter.list_databases())
+
+    assert await asyncio.to_thread(started.wait, 1)
+    try:
+        for _ in range(cancel_count):
+            request.cancel()
+            await asyncio.sleep(0)
+            assert not request.done()
+    finally:
+        release.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(request, timeout=1)
+
+    assert connection_closed.is_set()
+    assert cursor.close_calls == 1
+    assert connection.close_calls == 1
+
+
 @pytest.mark.parametrize("failure_stage", ["connect", "cursor", "execute", "fetchall"])
 async def test_primary_failure_closes_every_created_resource(failure_stage: str) -> None:
     secret = "secret-must-not-cross-error-boundary"
@@ -343,6 +484,7 @@ async def test_close_failure_after_success_is_mapped_and_other_resource_is_close
 
 async def test_cleanup_failure_does_not_mask_primary_failure() -> None:
     primary = OperationalError(FakeResponse(FakeStatus(sqlState="42501")))
+    transport = FakeOwnedTransport(close_error=RuntimeError("fallback-close-secret"))
     cursor = FakeCursor(
         execute_error=primary,
         close_error=RuntimeError("cursor-close-secret"),
@@ -350,6 +492,7 @@ async def test_cleanup_failure_does_not_mask_primary_failure() -> None:
     connection = FakeConnection(
         cursor,
         close_error=RuntimeError("connection-close-secret"),
+        transport=transport,
     )
     adapter = adapter_with(RecordingFactory(lambda: connection))
 
@@ -358,6 +501,25 @@ async def test_cleanup_failure_does_not_mask_primary_failure() -> None:
 
     assert captured.value.tool_error.category is ErrorCategory.PERMISSION_DENIED
     assert cursor.close_calls == connection.close_calls == 1
+    assert transport.close_calls == 1
+
+
+async def test_connection_close_failure_forces_owned_transport_close() -> None:
+    transport = FakeOwnedTransport(close_error=RuntimeError("fallback-close-secret"))
+    connection = FakeConnection(
+        FakeCursor(),
+        close_error=RuntimeError("session-close-secret"),
+        transport=transport,
+    )
+    adapter = adapter_with(RecordingFactory(lambda: connection))
+
+    with pytest.raises(HiveGatewayError) as captured:
+        await adapter.list_databases()
+
+    assert captured.value.tool_error.category is ErrorCategory.UPSTREAM_ERROR
+    assert "secret" not in str(captured.value)
+    assert connection.close_calls == 1
+    assert transport.close_calls == 1
 
 
 @pytest.mark.parametrize(
@@ -368,7 +530,7 @@ async def test_cleanup_failure_does_not_mask_primary_failure() -> None:
                 type=TTransportException.NOT_OPEN,
                 message="ldap-rejection-secret",
             ),
-            ErrorCategory.AUTHENTICATION_FAILED,
+            ErrorCategory.CONNECTION_FAILED,
         ),
         (
             TTransportException(

@@ -391,6 +391,7 @@ dependencies = [
     { name = "pydantic" },
     { name = "pyhive", extra = ["hive-pure-sasl"] },
     { name = "pyyaml" },
+    { name = "thrift" },
 ]
 
 [package.dev-dependencies]
@@ -411,6 +412,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.11,<3" },
     { name = "pyhive", extras = ["hive-pure-sasl"], specifier = "==0.7.0" },
     { name = "pyyaml", specifier = ">=6,<7" },
+    { name = "thrift", specifier = ">=0.20,<1" },
 ]
 
 [package.metadata.requires-dev]

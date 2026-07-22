@@ -52,11 +52,15 @@ The `get_table_schema` tool SHALL execute `SHOW CREATE TABLE` only when `include
 - **THEN** the tool additionally executes fixed `SHOW CREATE TABLE <quoted-database>.<quoted-table>` and returns the resulting DDL string
 
 ### Requirement: Restrict generated Hive statements
-The Hive plugin MUST generate only `SHOW DATABASES`, `SHOW TABLES`, `DESCRIBE`, and `SHOW CREATE TABLE` statement families and MUST NOT concatenate unvalidated caller text into a statement.
+The Hive application and adapter code MUST generate only `SHOW DATABASES`, `SHOW TABLES`, `DESCRIBE`, and `SHOW CREATE TABLE` metadata statement families and MUST NOT concatenate unvalidated caller text into a statement. The pinned PyHive 0.7.0 driver SHALL receive the strictly validated configured database and SHALL execute exactly one driver-owned `USE <quoted-configured-database>` statement while constructing each connection; that initialization statement is not tool-generated or caller-controlled, and its internal cursor MUST be closed by the driver.
 
 #### Scenario: Inspect every tool input schema
 - **WHEN** an MCP client inspects all Hive tool schemas
 - **THEN** no tool accepts SQL text, a WHERE clause, a statement fragment, or a row-query option
+
+#### Scenario: Initialize the configured database through PyHive
+- **WHEN** the adapter constructs a PyHive 0.7.0 connection for a validated `settings.database`
+- **THEN** the driver executes only `USE <backtick-quoted-configured-database>` before the requested fixed metadata statement and closes the internal initialization cursor
 
 ### Requirement: Use isolated lazy Hive connections
 Each uncached Hive tool invocation SHALL open one PyHive LDAP connection lazily in a worker thread and SHALL close its cursor and connection on success and failure.
@@ -68,6 +72,14 @@ Each uncached Hive tool invocation SHALL open one PyHive LDAP connection lazily 
 #### Scenario: Failed metadata request
 - **WHEN** connection, execution, parsing, or response conversion fails
 - **THEN** any created cursor and connection are closed and the error is safely categorized
+
+#### Scenario: Cancel an in-flight metadata request
+- **WHEN** an MCP request is cancelled after its blocking PyHive worker has started
+- **THEN** the adapter waits for the worker to close its cursor and connection before propagating cancellation
+
+#### Scenario: PyHive session close fails
+- **WHEN** PyHive 0.7.0 raises while closing the Hive session before closing its owned Thrift transport
+- **THEN** the adapter makes a best-effort direct transport close without replacing the operation's primary failure
 
 #### Scenario: Concurrent tool requests
 - **WHEN** multiple uncached Hive tools run concurrently
@@ -98,3 +110,7 @@ The Hive plugin SHALL distinguish invalid input, authentication rejection, autho
 #### Scenario: LDAP authentication is rejected
 - **WHEN** HiveServer2 rejects the configured LDAP credentials
 - **THEN** the tool returns `AUTHENTICATION_FAILED` without including the username, password, or raw exception representation
+
+#### Scenario: Ambiguous transport-open failure
+- **WHEN** PyHive reports `TTransportException.NOT_OPEN` without a standardized authentication SQL state
+- **THEN** the tool conservatively returns `CONNECTION_FAILED` without inspecting or exposing raw exception text

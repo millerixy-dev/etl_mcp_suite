@@ -156,7 +156,7 @@ Bootstrap performs these steps:
 
 Only MCP protocol messages may be written to stdout. Logging is configured once by bootstrap and writes to stderr. Debug mode is explicit and still applies secret redaction. Importing a plugin must have no network side effects.
 
-HTTP plugins use one lazily constructed asynchronous HTTP client per process and close it at shutdown. The Hive plugin opens a new PyHive connection for each uncached tool invocation, closes cursors and connections in `finally` paths, and executes blocking calls with `asyncio.to_thread`.
+HTTP plugins use one lazily constructed asynchronous HTTP client per process and close it at shutdown. The Hive plugin opens a new PyHive connection for each uncached tool invocation, closes cursors and connections in `finally` paths, and executes blocking calls with `asyncio.to_thread`. The adapter wraps each worker in a task and awaits it through `asyncio.shield`; after cancellation it continues waiting for the worker's `finally` cleanup before propagating `CancelledError`, including when a second cancellation request arrives.
 
 ### 7. Keep tool names local to each isolated plugin process
 
@@ -186,7 +186,9 @@ Adding a tool changes a public MCP contract and requires a spec change. The regi
 
 Hive uses `PyHive[hive_pure_sasl]==0.7.0` with binary Thrift transport and LDAP authentication. Database and table identifiers must match `[A-Za-z_][A-Za-z0-9_]*` and are backtick-quoted only after validation.
 
-Only four statement families may be generated: `SHOW DATABASES`, `SHOW TABLES`, `DESCRIBE`, and optional `SHOW CREATE TABLE`. No tool accepts SQL text. `DESCRIBE` parsing preserves complex type strings, separates partition columns, uses one-based ordinals, and converts empty comments to null.
+Application and adapter code generate only four metadata statement families: `SHOW DATABASES`, `SHOW TABLES`, `DESCRIBE`, and optional `SHOW CREATE TABLE`. No tool accepts SQL text. The pinned PyHive constructor also executes one driver-owned `USE` statement from the strictly validated configured database before each requested metadata operation and closes that initialization cursor through `contextlib.closing`; this unavoidable driver behavior is not caller-controlled and does not expand the MCP statement surface. Tests exercise the real PyHive constructor with spies so dependency upgrades cannot silently add other initialization statements. `DESCRIBE` parsing preserves complex type strings, separates partition columns, uses one-based ordinals, and converts empty comments to null.
+
+PyHive 0.7.0 calls `CloseSession` before its transport close, so a `CloseSession` exception can otherwise leave the transport open. When `connection.close()` raises, the adapter therefore performs a best-effort close of the connection's owned `_transport`, the private shape used by this pinned driver version. Any fallback-close failure is suppressed so it cannot replace the primary operation or cleanup error. This compatibility boundary must be revalidated before upgrading PyHive.
 
 Successful Hive metadata responses may be cached in a plugin-local TTL/LRU cache. The cache is disabled at TTL zero, contains at most 256 entries, and never stores failures, credentials, clients, cursors, or connections. Each response reports whether it came from cache.
 
@@ -224,6 +226,8 @@ Core error categories are:
 
 Plugins may define internal exceptions but must map them to these categories before they cross the MCP boundary. Tool errors include the category, operation, safe object identifiers, a concise message, and whether retry may succeed. They omit credential values, raw connection objects, cookies, authorization headers, full upstream bodies, and stack traces.
 
+Hive authentication is classified only from a standardized SQL state in the `28xxx` class. A bare `TTransportException.NOT_OPEN` is ambiguous between SASL and network failures and is conservatively classified as `CONNECTION_FAILED`; exception message matching is prohibited because it is backend-specific and can contain sensitive text.
+
 Unexpected exceptions are logged to stderr with a generated correlation ID and returned as a generic `UPSTREAM_ERROR` or `UNEXPECTED_RESPONSE`. Tests exercise the actual FastMCP serialization path to ensure raw exception text is not exposed.
 
 ### 12. Manage and lock the full environment with uv
@@ -235,8 +239,9 @@ uv is the only project and dependency manager used by development and documented
 - `PyYAML>=6,<7`
 - `httpx>=0.27,<1`
 - `PyHive[hive_pure_sasl]==0.7.0`
+- `thrift>=0.20,<1`
 
-Development dependencies include pytest, coverage support, Ruff, and Pyright. SQLAlchemy, web frameworks, dotenv loaders, dynamic plugin frameworks, external cache packages, and automatic retry libraries are not needed in v1.
+`thrift` is direct because the Hive adapter imports `TTransportException` for stable transport classification and implements a PyHive 0.7.0-specific best-effort transport cleanup. Development dependencies include pytest, coverage support, Ruff, and Pyright. SQLAlchemy, web frameworks, dotenv loaders, dynamic plugin frameworks, external cache packages, and automatic retry libraries are not needed in v1.
 
 One distribution contains all built-in plugins. The import boundary ensures that starting a REST plugin does not import PyHive or establish Hive state, even though the dependency is installed.
 
@@ -275,7 +280,7 @@ When an approved OpenSpec change modifies runtime or module behavior, update the
 
 ## Risks / Trade-offs
 
-- **[PyHive 0.7.0 is old and has a fragile transitive dependency chain]** → Use the pure-SASL extra, lock all resolved versions with uv, test the declared Python 3.10+ support matrix, and require the Hive integration suite before dependency upgrades.
+- **[PyHive 0.7.0 is old and has a fragile transitive dependency chain]** → Use the pure-SASL extra, declare the directly imported Thrift runtime explicitly, lock all resolved versions with uv, spy-test driver initialization and cleanup shapes, and require the Hive integration suite before dependency upgrades.
 - **[FastMCP v1 error serialization could expose unexpected exception text]** → Catch exceptions at the inbound adapter, test the real serialization path, and fall back to the SDK's low-level `CallToolResult` API if safe structured errors cannot be guaranteed.
 - **[Zeppelin can execute arbitrary code through allowed interpreters]** → Default to an empty allowlist, require explicit interpreter opt-in, document trust implications, and use a restricted Zeppelin account/interpreter configuration.
 - **[A single distribution installs dependencies unused by some processes]** → Accept the small v1 installation overhead to keep release and deployment simple; revisit optional extras only if deployment size becomes material.
