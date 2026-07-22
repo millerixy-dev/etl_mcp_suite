@@ -9,7 +9,10 @@ from collections.abc import Iterable
 
 _LOGGER_NAME = "mcp_stdio"
 _REDACTED = "[REDACTED]"
-_SENSITIVE_KEY = r"""
+_SENSITIVE_FIELD = re.compile(
+    r"""
+    (?<![A-Za-z0-9_])
+    (?:\\?["'])?
     (?:
         authorization
         | proxy-authorization
@@ -22,49 +25,74 @@ _SENSITIVE_KEY = r"""
         | cookie
         | set-cookie
     )
-"""
-_AUTH_OR_COOKIE_KEY = r"(?:authorization|proxy-authorization|cookie|set-cookie)"
-_ORDINARY_SENSITIVE_KEY = r"""
-    (?:
-        password
-        | passwd
-        | token
-        | access[_-]?token
-        | refresh[_-]?token
-        | api[_-]?key
+    (?:\\?["'])?
+    \s*[:=]\s*
+    """,
+    flags=re.IGNORECASE | re.VERBOSE,
+)
+_STANDALONE_BEARER = re.compile(r"(?<![A-Za-z0-9_])bearer\s+", flags=re.IGNORECASE)
+_CORRELATION_ID = re.compile(
+    r"""
+    (?<![A-Za-z0-9_])correlation_id\s*=\s*
+    (?P<value>
+        [0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-
+        [0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}
     )
-"""
-_QUOTED_SENSITIVE_VALUE = re.compile(
-    rf"""
-    (?P<prefix>["']?{_SENSITIVE_KEY}["']?\s*[:=]\s*)
-    (?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')
+    (?![0-9A-Fa-f-])
     """,
-    flags=re.IGNORECASE | re.VERBOSE,
-)
-_AUTH_OR_COOKIE_VALUE = re.compile(
-    rf"""
-    (?P<prefix>["']?{_AUTH_OR_COOKIE_KEY}["']?\s*[:=]\s*)
-    [^\r\n]*
-    """,
-    flags=re.IGNORECASE | re.VERBOSE,
-)
-_UNQUOTED_SENSITIVE_VALUE = re.compile(
-    r"""
-    (?P<prefix>["']?"""
-    + _ORDINARY_SENSITIVE_KEY
-    + r"""["']?\s*[:=]\s*)
-    [^\s,;}\]]+
-    """,
-    flags=re.IGNORECASE | re.VERBOSE,
-)
-_BEARER_CREDENTIAL = re.compile(
-    r"""
-    \bbearer\s+
-    (?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\r\n,;}\]]+)
-    """,
-    flags=re.IGNORECASE | re.VERBOSE,
+    flags=re.VERBOSE,
 )
 _FORMAT_FAILURE = "ERROR mcp_stdio logging record formatting failed safely"
+
+
+def _split_line_ending(line: str) -> tuple[str, str]:
+    if line.endswith("\r\n"):
+        return line[:-2], "\r\n"
+    if line.endswith(("\r", "\n")):
+        return line[:-1], line[-1:]
+    return line, ""
+
+
+def _correlation_suffix(line: str) -> str:
+    match = _CORRELATION_ID.search(line)
+    if match is None:
+        return ""
+    return f" correlation_id={match.group('value')}"
+
+
+def _redact_sensitive_line(line: str) -> tuple[str, bool]:
+    field_match = _SENSITIVE_FIELD.search(line)
+    bearer_match = _STANDALONE_BEARER.search(line)
+    if field_match is None and bearer_match is None:
+        return line, False
+
+    if field_match is not None and (
+        bearer_match is None or field_match.start() <= bearer_match.start()
+    ):
+        safe_prefix = line[: field_match.end()]
+    else:
+        assert bearer_match is not None
+        safe_prefix = line[: bearer_match.start()]
+    return f"{safe_prefix}{_REDACTED}{_correlation_suffix(line)}", True
+
+
+def _redact_structure(value: str) -> str:
+    redacted_lines: list[str] = []
+    redact_continuation = False
+    for raw_line in value.splitlines(keepends=True):
+        line, line_ending = _split_line_ending(raw_line)
+        if redact_continuation and line.startswith((" ", "\t")):
+            indentation = line[: len(line) - len(line.lstrip(" \t"))]
+            redacted_lines.append(
+                f"{indentation}{_REDACTED}{_correlation_suffix(line)}{line_ending}"
+            )
+            continue
+
+        redact_continuation = False
+        redacted_line, contains_sensitive_data = _redact_sensitive_line(line)
+        redacted_lines.append(f"{redacted_line}{line_ending}")
+        redact_continuation = contains_sensitive_data
+    return "".join(redacted_lines)
 
 
 class _Redactor:
@@ -76,16 +104,7 @@ class _Redactor:
         )
 
     def redact(self, value: str) -> str:
-        redacted = _QUOTED_SENSITIVE_VALUE.sub(
-            lambda match: f"{match.group('prefix')}{_REDACTED}", value
-        )
-        redacted = _AUTH_OR_COOKIE_VALUE.sub(
-            lambda match: f"{match.group('prefix')}{_REDACTED}", redacted
-        )
-        redacted = _UNQUOTED_SENSITIVE_VALUE.sub(
-            lambda match: f"{match.group('prefix')}{_REDACTED}", redacted
-        )
-        redacted = _BEARER_CREDENTIAL.sub(_REDACTED, redacted)
+        redacted = _redact_structure(value)
         for secret in self._secret_values:
             redacted = redacted.replace(secret, _REDACTED)
         return redacted

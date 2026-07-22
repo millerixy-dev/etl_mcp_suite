@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import logging
-import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from types import MappingProxyType
@@ -26,6 +25,21 @@ class ErrorCategory(str, Enum):
     UNEXPECTED_RESPONSE = "UNEXPECTED_RESPONSE"
 
 
+class ToolOperation(str, Enum):
+    """Closed set of public V1 tools plus an internal fallback operation."""
+
+    LIST_DATABASES = "list_databases"
+    LIST_TABLES = "list_tables"
+    GET_TABLE_SCHEMA = "get_table_schema"
+    CREATE_NOTEBOOK = "create_notebook"
+    ADD_PARAGRAPH = "add_paragraph"
+    RUN_PARAGRAPH = "run_paragraph"
+    GET_PARAGRAPH_STATUS = "get_paragraph_status"
+    GET_PARAGRAPH_RESULT = "get_paragraph_result"
+    GET_SERVER_STATUS = "get_server_status"
+    RUNTIME = "runtime"
+
+
 _ERROR_MESSAGES: Mapping[ErrorCategory, str] = MappingProxyType(
     {
         ErrorCategory.CONFIG_ERROR: "Configuration is invalid.",
@@ -39,10 +53,21 @@ _ERROR_MESSAGES: Mapping[ErrorCategory, str] = MappingProxyType(
         ErrorCategory.UNEXPECTED_RESPONSE: "The upstream response was not understood.",
     }
 )
-_OPERATION_PATTERN = re.compile(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)*\Z")
-_IDENTIFIER_KEY_PATTERN = _OPERATION_PATTERN
-_IDENTIFIER_VALUE_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}\Z")
-_MAX_OPERATION_LENGTH = 64
+_ALLOWED_IDENTIFIER_KEYS: Mapping[ToolOperation, frozenset[str]] = MappingProxyType(
+    {
+        ToolOperation.LIST_DATABASES: frozenset(),
+        ToolOperation.LIST_TABLES: frozenset({"database"}),
+        ToolOperation.GET_TABLE_SCHEMA: frozenset({"database", "table"}),
+        ToolOperation.CREATE_NOTEBOOK: frozenset(),
+        ToolOperation.ADD_PARAGRAPH: frozenset({"notebook_id"}),
+        ToolOperation.RUN_PARAGRAPH: frozenset({"notebook_id", "paragraph_id"}),
+        ToolOperation.GET_PARAGRAPH_STATUS: frozenset({"notebook_id", "paragraph_id"}),
+        ToolOperation.GET_PARAGRAPH_RESULT: frozenset({"notebook_id", "paragraph_id"}),
+        ToolOperation.GET_SERVER_STATUS: frozenset(),
+        ToolOperation.RUNTIME: frozenset(),
+    }
+)
+_MAX_IDENTIFIER_LENGTH = 256
 _SENSITIVE_IDENTIFIER_KEY_PARTS = (
     "authorization",
     "cookie",
@@ -67,7 +92,7 @@ class ToolError:
     """A safe error value ready for transport-specific serialization."""
 
     category: ErrorCategory
-    operation: str
+    operation: ToolOperation
     retryable: bool
     identifiers: Mapping[str, str] = field(default_factory=_empty_identifiers)
     message: str = field(init=False)
@@ -81,29 +106,30 @@ class ToolError:
 
         if not isinstance(category, ErrorCategory):
             raise ValueError("category must be an ErrorCategory")
-        if not isinstance(operation, str) or not (
-            len(operation) <= _MAX_OPERATION_LENGTH
-            and _OPERATION_PATTERN.fullmatch(operation)
-        ):
-            raise ValueError("operation must be a canonical tool operation")
+        if not isinstance(operation, ToolOperation):
+            raise ValueError("operation must be a supported ToolOperation")
         if type(retryable) is not bool:
             raise ValueError("retryable must be a boolean")
 
         try:
             identifier_items = dict(raw_identifiers)
-        except (TypeError, ValueError):
+        except Exception:
             raise ValueError("identifiers must be a string mapping") from None
         identifiers: dict[str, str] = {}
+        allowed_identifier_keys = _ALLOWED_IDENTIFIER_KEYS[operation]
         for key, value in identifier_items.items():
             normalized_key = key.lower() if isinstance(key, str) else ""
             if not (
                 isinstance(key, str)
-                and len(key) <= _MAX_OPERATION_LENGTH
-                and _IDENTIFIER_KEY_PATTERN.fullmatch(key)
                 and not any(part in normalized_key for part in _SENSITIVE_IDENTIFIER_KEY_PARTS)
+                and key in allowed_identifier_keys
             ):
-                raise ValueError("identifier key is unsafe")
-            if not isinstance(value, str) or not _IDENTIFIER_VALUE_PATTERN.fullmatch(value):
+                raise ValueError("identifier key is not allowed for the operation")
+            if not (
+                isinstance(value, str)
+                and 0 < len(value) <= _MAX_IDENTIFIER_LENGTH
+                and not any(ord(character) < 32 or ord(character) == 127 for character in value)
+            ):
                 raise ValueError("identifier value is unsafe")
             identifiers[key] = value
 
@@ -115,7 +141,7 @@ class ToolError:
         cls,
         *,
         category: ErrorCategory,
-        operation: str,
+        operation: ToolOperation,
         retryable: bool,
         identifiers: Mapping[str, str] | None = None,
     ) -> ToolError:
@@ -128,15 +154,21 @@ class ToolError:
             identifiers={} if identifiers is None else identifiers,
         )
 
-    def to_dict(self) -> dict[str, object]:
+    def to_dict(self, *, secret_values: Iterable[str]) -> dict[str, object]:
         """Return only the stable, explicitly safe public fields."""
 
+        secrets = tuple(secret for secret in secret_values if secret)
+        safe_identifiers = {
+            key: value
+            for key, value in self.identifiers.items()
+            if not any(secret in value for secret in secrets)
+        }
         return {
             "category": self.category.value,
-            "operation": self.operation,
+            "operation": self.operation.value,
             "message": self.message,
             "retryable": self.retryable,
-            "identifiers": dict(self.identifiers),
+            "identifiers": safe_identifiers,
             "correlation_id": self.correlation_id,
         }
 
@@ -144,21 +176,31 @@ class ToolError:
 def unexpected_tool_error(
     exception: Exception,
     *,
-    operation: str,
+    operation: ToolOperation,
     identifiers: Mapping[str, str] | None = None,
 ) -> ToolError:
     """Map and diagnose an uncategorized exception without exposing its text."""
 
-    tool_error = ToolError.create(
-        category=ErrorCategory.UPSTREAM_ERROR,
-        operation=operation,
-        retryable=False,
-        identifiers=identifiers,
-    )
+    try:
+        tool_error = ToolError.create(
+            category=ErrorCategory.UPSTREAM_ERROR,
+            operation=operation,
+            retryable=False,
+            identifiers=identifiers,
+        )
+    except Exception:
+        tool_error = ToolError.create(
+            category=ErrorCategory.UPSTREAM_ERROR,
+            operation=ToolOperation.RUNTIME,
+            retryable=False,
+        )
     logger = logging.getLogger("mcp_stdio.errors")
-    logger.error(
-        "unexpected exception during %s correlation_id=%s",
-        operation,
-        tool_error.correlation_id,
-    )
+    try:
+        logger.error(
+            "unexpected exception during %s correlation_id=%s",
+            tool_error.operation.value,
+            tool_error.correlation_id,
+        )
+    except Exception:
+        pass
     return tool_error

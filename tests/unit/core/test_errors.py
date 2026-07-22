@@ -5,9 +5,25 @@ from __future__ import annotations
 import inspect
 import json
 import logging
+from collections.abc import Iterator, Mapping
+from typing import cast
 from uuid import UUID
 
 import pytest
+
+
+class ExplodingIdentifiers(Mapping[str, str]):
+    def __init__(self, sentinel: str) -> None:
+        self._sentinel = sentinel
+
+    def __getitem__(self, key: str) -> str:
+        raise KeyError(key)
+
+    def __iter__(self) -> Iterator[str]:
+        raise RuntimeError(self._sentinel)
+
+    def __len__(self) -> int:
+        return 1
 
 
 def test_error_categories_are_exactly_the_stable_public_set() -> None:
@@ -26,17 +42,37 @@ def test_error_categories_are_exactly_the_stable_public_set() -> None:
     }
 
 
+def test_tool_operations_are_closed_to_v1_tools_plus_internal_fallback() -> None:
+    from mcp_stdio.core.errors import ToolOperation
+
+    public_operations = {operation.value for operation in ToolOperation} - {
+        ToolOperation.RUNTIME.value
+    }
+
+    assert public_operations == {
+        "list_databases",
+        "list_tables",
+        "get_table_schema",
+        "create_notebook",
+        "add_paragraph",
+        "run_paragraph",
+        "get_paragraph_status",
+        "get_paragraph_result",
+        "get_server_status",
+    }
+
+
 def test_tool_error_serializes_only_the_safe_structured_contract() -> None:
-    from mcp_stdio.core.errors import ErrorCategory, ToolError
+    from mcp_stdio.core.errors import ErrorCategory, ToolError, ToolOperation
 
     error = ToolError.create(
         category=ErrorCategory.NOT_FOUND,
-        operation="get_table_schema",
+        operation=ToolOperation.GET_TABLE_SCHEMA,
         retryable=False,
         identifiers={"database": "analytics", "table": "daily_sales"},
     )
 
-    payload = error.to_dict()
+    payload = error.to_dict(secret_values=())
 
     assert payload == {
         "category": "NOT_FOUND",
@@ -51,16 +87,16 @@ def test_tool_error_serializes_only_the_safe_structured_contract() -> None:
 
 
 def test_tool_error_generates_a_new_correlation_id_per_failure() -> None:
-    from mcp_stdio.core.errors import ErrorCategory, ToolError
+    from mcp_stdio.core.errors import ErrorCategory, ToolError, ToolOperation
 
     first = ToolError.create(
         category=ErrorCategory.TIMEOUT,
-        operation="get_paragraph_status",
+        operation=ToolOperation.GET_PARAGRAPH_STATUS,
         retryable=True,
     )
     second = ToolError.create(
         category=ErrorCategory.TIMEOUT,
-        operation="get_paragraph_status",
+        operation=ToolOperation.GET_PARAGRAPH_STATUS,
         retryable=True,
     )
 
@@ -82,11 +118,11 @@ def test_tool_error_generates_a_new_correlation_id_per_failure() -> None:
     ],
 )
 def test_tool_error_message_is_fixed_by_category(category: str, message: str) -> None:
-    from mcp_stdio.core.errors import ErrorCategory, ToolError
+    from mcp_stdio.core.errors import ErrorCategory, ToolError, ToolOperation
 
     error = ToolError.create(
         category=ErrorCategory(category),
-        operation="get_server_status",
+        operation=ToolOperation.GET_SERVER_STATUS,
         retryable=False,
     )
 
@@ -102,30 +138,70 @@ def test_direct_construction_cannot_inject_message_or_correlation_id() -> None:
     assert "correlation_id" not in constructor_fields
 
 
-@pytest.mark.parametrize(
-    ("operation", "identifiers"),
-    [
-        ("Get Table", {}),
-        ("get-table", {}),
-        ("x" * 65, {}),
-        ("get_table_schema", {"password": "identifier-password-sentinel"}),
-        ("get_table_schema", {"table": "multi word identifier sentinel"}),
-        ("get_table_schema", {"table": "x" * 129}),
-    ],
-)
-def test_tool_error_rejects_unsafe_operations_and_identifiers(
-    operation: str,
-    identifiers: dict[str, str],
-) -> None:
-    from mcp_stdio.core.errors import ErrorCategory, ToolError
+def test_tool_error_rejects_arbitrary_operation_string() -> None:
+    from mcp_stdio.core.errors import ErrorCategory, ToolError, ToolOperation
 
     with pytest.raises(ValueError):
         ToolError.create(
             category=ErrorCategory.INVALID_INPUT,
-            operation=operation,
+            operation=cast(ToolOperation, "arbitrary_operation"),
+            retryable=False,
+        )
+
+
+@pytest.mark.parametrize(
+    ("operation_name", "identifiers"),
+    [
+        ("list_tables", {"table": "not-allowed-for-list-tables"}),
+        ("get_table_schema", {"password": "identifier-password-sentinel"}),
+        ("add_paragraph", {"notebook_id": "unsafe\ncontrol"}),
+        ("add_paragraph", {"notebook_id": "x" * 257}),
+    ],
+)
+def test_tool_error_rejects_disallowed_or_unsafe_identifiers(
+    operation_name: str,
+    identifiers: dict[str, str],
+) -> None:
+    from mcp_stdio.core.errors import ErrorCategory, ToolError, ToolOperation
+
+    with pytest.raises(ValueError):
+        ToolError.create(
+            category=ErrorCategory.INVALID_INPUT,
+            operation=ToolOperation(operation_name),
             retryable=False,
             identifiers=identifiers,
         )
+
+
+def test_tool_error_accepts_bounded_opaque_identifier_characters() -> None:
+    from mcp_stdio.core.errors import ErrorCategory, ToolError, ToolOperation
+
+    opaque_id = "notebook+opaque==%2Fsegment"
+    error = ToolError.create(
+        category=ErrorCategory.NOT_FOUND,
+        operation=ToolOperation.ADD_PARAGRAPH,
+        retryable=False,
+        identifiers={"notebook_id": opaque_id},
+    )
+
+    assert error.to_dict(secret_values=())["identifiers"] == {"notebook_id": opaque_id}
+
+
+def test_tool_error_serialization_omits_identifier_containing_known_secret() -> None:
+    from mcp_stdio.core.errors import ErrorCategory, ToolError, ToolOperation
+
+    secret = "known-identifier-secret-sentinel"
+    error = ToolError.create(
+        category=ErrorCategory.NOT_FOUND,
+        operation=ToolOperation.ADD_PARAGRAPH,
+        retryable=False,
+        identifiers={"notebook_id": f"opaque-prefix-{secret}-suffix"},
+    )
+
+    payload = error.to_dict(secret_values=(secret,))
+
+    assert payload["identifiers"] == {}
+    assert secret not in json.dumps(payload)
 
 
 def test_unexpected_mapper_does_not_accept_a_caller_logger() -> None:
@@ -138,7 +214,7 @@ def test_unexpected_exception_is_generic_and_logged_with_correlation_id(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from mcp_stdio.core.errors import unexpected_tool_error
+    from mcp_stdio.core.errors import ToolOperation, unexpected_tool_error
 
     secret = "unexpected-exception-unknown-sentinel"
     error_logger = logging.getLogger("mcp_stdio.errors")
@@ -154,26 +230,77 @@ def test_unexpected_exception_is_generic_and_logged_with_correlation_id(
         except RuntimeError as error:
             mapped = unexpected_tool_error(
                 error,
-                operation="create_notebook",
-                identifiers={"notebook": "safe-notebook-id"},
+                operation=ToolOperation.RUN_PARAGRAPH,
+                identifiers={
+                    "notebook_id": "safe-notebook-id",
+                    "paragraph_id": "safe-paragraph-id",
+                },
             )
     finally:
         error_logger.setLevel(previous_level)
         error_logger.propagate = previous_propagate
 
     captured = capsys.readouterr()
-    payload_text = json.dumps(mapped.to_dict())
+    payload_text = json.dumps(mapped.to_dict(secret_values=(secret,)))
 
     assert mapped.category.value == "UPSTREAM_ERROR"
     assert mapped.message == "The upstream operation failed."
     assert mapped.retryable is False
-    assert mapped.identifiers == {"notebook": "safe-notebook-id"}
+    assert mapped.identifiers == {
+        "notebook_id": "safe-notebook-id",
+        "paragraph_id": "safe-paragraph-id",
+    }
     assert mapped.correlation_id in captured.err
-    assert "unexpected exception during create_notebook" in captured.err
+    assert "unexpected exception during run_paragraph" in captured.err
     assert secret not in payload_text
     assert "raw upstream failure" not in payload_text
     assert secret not in captured.err
     assert "RuntimeError" not in captured.err
     assert "Traceback" not in captured.err
+    assert captured.out == ""
+    logging.getLogger("mcp_stdio").handlers.clear()
+
+
+@pytest.mark.parametrize(
+    ("operation", "identifiers", "sentinel"),
+    [
+        ("hostile_operation", {}, "hostile-operation-secret-sentinel"),
+        (
+            "add_paragraph",
+            {"notebook_id": "unsafe\nidentifier-secret-sentinel"},
+            "identifier-secret-sentinel",
+        ),
+        (
+            "add_paragraph",
+            ExplodingIdentifiers("mapping-runtime-secret-sentinel"),
+            "mapping-runtime-secret-sentinel",
+        ),
+    ],
+)
+def test_unexpected_mapper_falls_back_safely_for_hostile_runtime_inputs(
+    operation: str,
+    identifiers: object,
+    sentinel: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from mcp_stdio.core.errors import ToolOperation, unexpected_tool_error
+    from mcp_stdio.core.logging import configure_logging
+
+    configure_logging()
+
+    mapped = unexpected_tool_error(
+        RuntimeError(f"raw exception {sentinel}"),
+        operation=cast(ToolOperation, operation),
+        identifiers=cast(Mapping[str, str], identifiers),
+    )
+    captured = capsys.readouterr()
+    payload = mapped.to_dict(secret_values=(sentinel,))
+    payload_text = json.dumps(payload)
+
+    assert mapped.operation is ToolOperation.RUNTIME
+    assert payload["identifiers"] == {}
+    assert mapped.correlation_id in captured.err
+    assert sentinel not in captured.err
+    assert sentinel not in payload_text
     assert captured.out == ""
     logging.getLogger("mcp_stdio").handlers.clear()

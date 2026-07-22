@@ -99,6 +99,114 @@ def test_structural_redaction_runs_before_configured_literal_replacement(
     logging.getLogger("mcp_stdio").handlers.clear()
 
 
+@pytest.mark.parametrize(
+    ("message", "sentinels"),
+    [
+        (
+            'password="unterminated multi word secret',
+            ("unterminated", "multi word secret"),
+        ),
+        (
+            r'body={\"password\":\"escaped-json-secret\"}',
+            ("escaped-json-secret",),
+        ),
+    ],
+)
+def test_sensitive_field_detection_discards_malformed_or_escaped_line_suffix(
+    message: str,
+    sentinels: tuple[str, ...],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from mcp_stdio.core.logging import configure_logging
+
+    logger = configure_logging()
+
+    logger.info(message)
+    captured = capsys.readouterr()
+
+    assert "[REDACTED]" in captured.err
+    for sentinel in sentinels:
+        assert sentinel not in captured.err
+    assert captured.out == ""
+    logging.getLogger("mcp_stdio").handlers.clear()
+
+
+@pytest.mark.parametrize(
+    ("message", "sentinels"),
+    [
+        (
+            "Cookie: session=first-cookie-secret\n csrf=second-cookie-secret",
+            ("first-cookie-secret", "second-cookie-secret"),
+        ),
+        (
+            "Authorization: Bearer first-auth-secret\n continuation-auth-secret",
+            ("first-auth-secret", "continuation-auth-secret"),
+        ),
+        (
+            "request Bearer first-bearer-secret\n continuation-bearer-secret",
+            ("first-bearer-secret", "continuation-bearer-secret"),
+        ),
+    ],
+)
+def test_sensitive_lines_redact_immediately_indented_continuations(
+    message: str,
+    sentinels: tuple[str, ...],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from mcp_stdio.core.logging import configure_logging
+
+    logger = configure_logging()
+
+    logger.info(message)
+    captured = capsys.readouterr()
+
+    for sentinel in sentinels:
+        assert sentinel not in captured.err
+    assert captured.out == ""
+    logging.getLogger("mcp_stdio").handlers.clear()
+
+
+def test_existing_redaction_marker_does_not_gain_bracket_artifacts(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from mcp_stdio.core.logging import configure_logging
+
+    logger = configure_logging()
+
+    logger.info("password=[REDACTED]")
+    captured = capsys.readouterr()
+
+    assert captured.err.count("[REDACTED]") == 1
+    assert "]]" not in captured.err
+    assert captured.out == ""
+    logging.getLogger("mcp_stdio").handlers.clear()
+
+
+def test_sensitive_line_preserves_only_valid_correlation_id_from_suffix(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from mcp_stdio.core.logging import configure_logging
+
+    correlation_id = "123e4567-e89b-12d3-a456-426614174000"
+    secret = "correlated-password-secret"
+    discarded_suffix = "discarded-sensitive-suffix"
+    logger = configure_logging()
+
+    logger.info(
+        "password=%s correlation_id=%s %s",
+        secret,
+        correlation_id,
+        discarded_suffix,
+    )
+    captured = capsys.readouterr()
+
+    assert correlation_id in captured.err
+    assert secret not in captured.err
+    assert discarded_suffix not in captured.err
+    assert captured.out == ""
+    logging.getLogger("mcp_stdio").handlers.clear()
+
+
 def test_malformed_format_arguments_fail_closed_without_logging_raw_arguments(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
