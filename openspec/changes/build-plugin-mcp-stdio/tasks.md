@@ -27,7 +27,7 @@
 - [x] 3.7 Add failing PyHive adapter tests for the four application-generated metadata statement families, the pinned driver's validated configured-database `USE` initialization, LDAP/pure-SASL connection parameters, one connection per uncached invocation, worker-thread execution, cancellation waiting, and cursor/connection/transport cleanup on every path.
 - [x] 3.8 Implement the Hive gateway and PyHive adapter with safe exception mapping, shielded cancellation cleanup, pinned-driver transport fallback, and no caller-controlled SQL.
 - [x] 3.9 Implement and contract-test `list_databases`, `list_tables`, and `get_table_schema`, including exact input/output schemas, optional DDL, cache integration, and the exact three-tool set.
-- [ ] 3.10 Add an opt-in HiveServer2 integration test covering LDAP connection, database/table listing, schema parsing, partition detection, optional DDL, and secret-safe failure output.
+- [x] 3.10 Add an opt-in HiveServer2 integration test covering LDAP connection, database/table listing, schema parsing, partition detection, optional DDL, and secret-safe failure output.
 
 ## 4. Zeppelin Notebook Plugin
 
