@@ -67,9 +67,9 @@ def parse_describe_rows(
         raw_name = row[0]
         if not isinstance(raw_name, str) or not raw_name.strip():
             raise HiveResponseShapeError("DESCRIBE")
-        name = raw_name.strip()
+        normalized_name = raw_name.strip()
 
-        if name == _PARTITION_MARKER:
+        if normalized_name == _PARTITION_MARKER:
             if (
                 parsing_partitions
                 or not columns
@@ -79,12 +79,12 @@ def parse_describe_rows(
             parsing_partitions = True
             continue
 
-        if name == _COLUMN_HEADER:
+        if normalized_name == _COLUMN_HEADER:
             if not _is_column_header(row):
                 raise HiveResponseShapeError("DESCRIBE")
             continue
 
-        if name.startswith("#"):
+        if normalized_name.startswith("#"):
             raise HiveResponseShapeError("DESCRIBE")
 
         raw_type = row[1]
@@ -95,11 +95,11 @@ def parse_describe_rows(
             raise HiveResponseShapeError("DESCRIBE")
 
         target = partition_columns if parsing_partitions else columns
-        comment = None if raw_comment is None or not raw_comment.strip() else raw_comment.strip()
+        comment = None if raw_comment is None or not raw_comment.strip() else raw_comment
         target.append(
             ColumnMetadata(
-                name=name,
-                type=raw_type.strip(),
+                name=raw_name,
+                type=raw_type,
                 comment=comment,
                 ordinal=len(target) + 1,
             )

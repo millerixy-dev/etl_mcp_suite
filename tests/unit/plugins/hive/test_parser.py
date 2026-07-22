@@ -64,22 +64,60 @@ def test_parse_describe_ignores_repeated_headers_and_blank_rows_around_transitio
     assert [column.name for column in partition_columns] == ["dt"]
 
 
-def test_parse_describe_preserves_nested_complex_types_and_normalizes_comments() -> None:
+def test_parse_describe_preserves_non_empty_metadata_text_exactly() -> None:
+    columns, _ = parse_describe_rows(
+        [(" payload.value/原文 ", " array<struct<x:int>> ", "  keep me  ")]
+    )
+
+    assert columns == (
+        ColumnMetadata(
+            name=" payload.value/原文 ",
+            type=" array<struct<x:int>> ",
+            comment="  keep me  ",
+            ordinal=1,
+        ),
+    )
+
+
+def test_parse_describe_preserves_nested_complex_types_and_normalizes_empty_comments() -> None:
     nested_type = "array<struct<x:int,y:map<string,array<decimal(10,2)>>>>"
 
     columns, _ = parse_describe_rows(
         [
-            (" payload.value/原文 ", f" {nested_type} ", "   "),
-            ("note", "string", "  populated comment  "),
+            ("payload.value/原文", nested_type, "   "),
+            ("note", "string", None),
         ]
     )
 
     assert columns == (
         ColumnMetadata(name="payload.value/原文", type=nested_type, comment=None, ordinal=1),
-        ColumnMetadata(
-            name="note", type="string", comment="populated comment", ordinal=2
-        ),
+        ColumnMetadata(name="note", type="string", comment=None, ordinal=2),
     )
+
+
+def test_parse_describe_partition_marker_does_not_require_repeated_header() -> None:
+    columns, partition_columns = parse_describe_rows(
+        [
+            ("payload", "string", None),
+            (" # Partition Information ", "", None),
+            ("dt", "date", None),
+        ]
+    )
+
+    assert [column.name for column in columns] == ["payload"]
+    assert [column.name for column in partition_columns] == ["dt"]
+
+
+def test_parse_describe_rejects_duplicate_partition_marker() -> None:
+    with pytest.raises(HiveResponseShapeError):
+        parse_describe_rows(
+            [
+                ("payload", "string", None),
+                ("# Partition Information", "", ""),
+                ("dt", "date", None),
+                ("# Partition Information", "", ""),
+            ]
+        )
 
 
 def test_parse_show_create_joins_first_column_rows_in_order() -> None:
