@@ -1,0 +1,1 @@
+"""Hive schema domain models."""

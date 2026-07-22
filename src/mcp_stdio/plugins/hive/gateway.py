@@ -1,0 +1,1 @@
+"""Hive metadata gateway contract."""

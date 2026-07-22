@@ -1,0 +1,1 @@
+"""Zeppelin HTTP outbound adapter."""

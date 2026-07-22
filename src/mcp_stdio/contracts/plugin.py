@@ -1,0 +1,1 @@
+"""Minimal plugin lifecycle contract."""

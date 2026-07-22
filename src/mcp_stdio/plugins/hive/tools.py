@@ -1,0 +1,1 @@
+"""Hive MCP tool adapters."""
