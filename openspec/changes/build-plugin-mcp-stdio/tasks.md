@@ -18,14 +18,14 @@
 
 ## 3. Hive Schema Plugin
 
-- [ ] 3.1 Add failing tests for Hive configuration, identifier validation/backtick quoting, and rejection before connection creation.
+- [x] 3.1 Add failing tests for Hive configuration, identifier validation/backtick quoting, and rejection before connection creation.
 - [x] 3.2 Implement Hive configuration, identifiers, and typed metadata/result models.
 - [x] 3.3 Add failing parser tests for normal columns, partition transitions, repeated headers, blank rows, empty comments, one-based ordinals, and nested complex Hive types.
 - [x] 3.4 Implement `DESCRIBE` and `SHOW CREATE TABLE` response parsing until parser tests pass.
 - [x] 3.5 Add failing cache tests for hit, expiry, TTL-zero disablement, normalized keys, success-only storage, accurate `cached` flags, and the 256-entry LRU bound.
 - [x] 3.6 Implement the plugin-local standard-library TTL/LRU cache until cache tests pass.
-- [ ] 3.7 Add failing PyHive adapter tests for the four application-generated metadata statement families, the pinned driver's validated configured-database `USE` initialization, LDAP/pure-SASL connection parameters, one connection per uncached invocation, worker-thread execution, cancellation waiting, and cursor/connection/transport cleanup on every path.
-- [ ] 3.8 Implement the Hive gateway and PyHive adapter with safe exception mapping, shielded cancellation cleanup, pinned-driver transport fallback, and no caller-controlled SQL.
+- [x] 3.7 Add failing PyHive adapter tests for the four application-generated metadata statement families, the pinned driver's validated configured-database `USE` initialization, LDAP/pure-SASL connection parameters, one connection per uncached invocation, worker-thread execution, cancellation waiting, and cursor/connection/transport cleanup on every path.
+- [x] 3.8 Implement the Hive gateway and PyHive adapter with safe exception mapping, shielded cancellation cleanup, pinned-driver transport fallback, and no caller-controlled SQL.
 - [ ] 3.9 Implement and contract-test `list_databases`, `list_tables`, and `get_table_schema`, including exact input/output schemas, optional DDL, cache integration, and the exact three-tool set.
 - [ ] 3.10 Add an opt-in HiveServer2 integration test covering LDAP connection, database/table listing, schema parsing, partition detection, optional DDL, and secret-safe failure output.
 
