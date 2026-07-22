@@ -18,7 +18,7 @@
 
 ## 3. Hive Schema Plugin
 
-- [x] 3.1 Add failing tests for Hive configuration, identifier validation/backtick quoting, and rejection before connection creation.
+- [ ] 3.1 Add failing tests for Hive configuration, identifier validation/backtick quoting, and rejection before connection creation.
 - [x] 3.2 Implement Hive configuration, identifiers, and typed metadata/result models.
 - [ ] 3.3 Add failing parser tests for normal columns, partition transitions, repeated headers, blank rows, empty comments, one-based ordinals, and nested complex Hive types.
 - [ ] 3.4 Implement `DESCRIBE` and `SHOW CREATE TABLE` response parsing until parser tests pass.

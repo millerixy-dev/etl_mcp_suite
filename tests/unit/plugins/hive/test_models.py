@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import pytest
 from pydantic import ValidationError
 
@@ -100,21 +102,57 @@ def test_domain_models_are_strict_frozen_and_reject_unknown_fields() -> None:
         )
 
 
-@pytest.mark.parametrize("field", ["databases", "database", "table", "tables"])
-def test_result_models_reject_unsafe_identifier_names(field: str) -> None:
-    unsafe = "unsafe.name"
-    constructors = {
-        "databases": lambda: ListDatabasesResult(databases=(unsafe,), cached=False),
-        "database": lambda: ListTablesResult(database=unsafe, tables=(), cached=False),
-        "table": lambda: TableSchemaResult(
+def test_upstream_metadata_names_preserve_punctuation_unicode_and_display_quotes() -> None:
+    databases = ListDatabasesResult(
+        databases=("sales.prod", "销售数据", "`quoted-db`"),
+        cached=False,
+    )
+    tables = ListTablesResult(
+        database="default",
+        tables=("events-2026", "订单 明细", "`quoted.table`"),
+        cached=False,
+    )
+    column = ColumnMetadata(name="payload.value/原文", type="string", ordinal=1)
+
+    assert databases.model_dump(mode="json")["databases"] == [
+        "sales.prod",
+        "销售数据",
+        "`quoted-db`",
+    ]
+    assert tables.model_dump(mode="json")["tables"] == [
+        "events-2026",
+        "订单 明细",
+        "`quoted.table`",
+    ]
+    assert column.model_dump(mode="json")["name"] == "payload.value/原文"
+
+
+@pytest.mark.parametrize(
+    "construct",
+    [
+        lambda: ListTablesResult(database="unsafe.name", tables=(), cached=False),
+        lambda: TableSchemaResult(
             database="default",
-            table=unsafe,
+            table="unsafe.name",
             columns=(),
             partition_columns=(),
             cached=False,
         ),
-        "tables": lambda: ListTablesResult(database="default", tables=(unsafe,), cached=False),
-    }
-
+    ],
+)
+def test_caller_identifier_echoes_remain_validated(construct: Callable[[], object]) -> None:
     with pytest.raises(ValidationError):
-        constructors[field]()
+        construct()
+
+
+@pytest.mark.parametrize(
+    "construct",
+    [
+        lambda: ColumnMetadata(name="", type="string", ordinal=1),
+        lambda: ListDatabasesResult(databases=("",), cached=False),
+        lambda: ListTablesResult(database="default", tables=("",), cached=False),
+    ],
+)
+def test_upstream_metadata_names_must_be_non_empty(construct: Callable[[], object]) -> None:
+    with pytest.raises(ValidationError):
+        construct()

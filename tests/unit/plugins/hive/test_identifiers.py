@@ -36,19 +36,6 @@ def test_invalid_hive_identifier_is_rejected(value: str) -> None:
         HiveIdentifier(value)
 
 
-def test_invalid_identifier_is_rejected_before_gateway_seam_is_called() -> None:
-    gateway_calls: list[HiveIdentifier] = []
-
-    def invoke_after_validation(raw_database: str) -> None:
-        database = HiveIdentifier(raw_database)
-        gateway_calls.append(database)
-
-    with pytest.raises(ValueError, match="Hive identifier"):
-        invoke_after_validation("default; SHOW TABLES")
-
-    assert gateway_calls == []
-
-
 def test_identifier_rejects_non_string_values_without_coercion() -> None:
     with pytest.raises(ValueError, match="Hive identifier"):
         HiveIdentifier(123)  # type: ignore[arg-type]
