@@ -10,8 +10,8 @@
 
 - [x] 2.1 Add failing tests for versioned YAML/JSON loading, safe YAML behavior, unknown-field rejection, plugin mismatch, non-sensitive environment overrides, environment-backed secret resolution, and secret-safe errors.
 - [x] 2.2 Implement core configuration models and loading until the configuration tests pass without performing network calls.
-- [ ] 2.3 Add failing tests for stable error categories, correlation IDs, stderr logging, stdout protocol discipline, and credential/header/cookie redaction.
-- [ ] 2.4 Implement the shared error and logging boundary until safe error serialization and redaction tests pass.
+- [x] 2.3 Add failing tests for stable error categories, correlation IDs, stderr logging, stdout protocol discipline, and credential/header/cookie redaction.
+- [x] 2.4 Implement the shared error and logging boundary until safe error serialization and redaction tests pass.
 - [ ] 2.5 Define the minimal plugin lifecycle contract and explicit registry, then test supported selection, unknown-plugin rejection, and the prohibition on dynamic import-by-name.
 - [ ] 2.6 Implement bootstrap and FastMCP stdio lifecycle with exactly one selected plugin, lazy resource construction, cleanup on EOF/cancellation/startup failure, and no network side effects during import or startup.
 - [ ] 2.7 Add MCP contract and subprocess smoke tests covering startup, exact per-plugin tool registration, protocol-only stdout, stderr logs, and process isolation.
