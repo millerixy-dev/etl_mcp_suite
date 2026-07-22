@@ -5,13 +5,14 @@ from __future__ import annotations
 import json
 import socket
 import traceback
+import typing
 from pathlib import Path
 from typing import Annotated
 
 import pytest
-from pydantic import BaseModel, Field, SecretStr
+from pydantic import BaseModel, Field, SecretBytes, SecretStr, field_validator
 
-from mcp_stdio.core.config import ConfigError, LoadedConfig, load_config
+from mcp_stdio.core.config import ConfigError, LoadedConfig, SecretConfigModel, load_config
 
 
 class ExampleSettings(BaseModel):
@@ -20,14 +21,44 @@ class ExampleSettings(BaseModel):
     tls: bool = False
 
 
-class ExampleSecrets(BaseModel):
+class ExampleSecrets(SecretConfigModel):
     username: SecretStr
     password: SecretStr
 
 
-class LengthCheckedSecrets(BaseModel):
+class LengthCheckedSecrets(SecretConfigModel):
     username: SecretStr
     password: Annotated[SecretStr, Field(min_length=64)]
+
+
+class NestedConnectionSettings(BaseModel):
+    endpoint: str
+
+
+class SettingsWithNestedModel(BaseModel):
+    connection: NestedConnectionSettings
+
+
+class UnsafeSecrets(BaseModel):
+    password: str
+
+
+class OptionalAuthSecrets(SecretConfigModel):
+    token: SecretStr | None = None
+    certificate: SecretBytes | None = None
+
+
+class LegacyOptionalAuthSecrets(SecretConfigModel):
+    token: typing.Optional[SecretStr] = None  # noqa: UP045
+
+
+class ExplodingValidatorSecrets(SecretConfigModel):
+    password: SecretStr
+
+    @field_validator("password")
+    @classmethod
+    def reject_password(cls, value: SecretStr) -> SecretStr:
+        raise TypeError(f"validator leaked:{value.get_secret_value()}")
 
 
 def _write_yaml(path: Path, body: str) -> Path:
@@ -155,6 +186,31 @@ def test_unknown_fields_are_rejected(tmp_path: Path, section: str | None, field:
     assert field in str(exc_info.value)
 
 
+def test_unknown_fields_in_nested_models_are_rejected(tmp_path: Path) -> None:
+    document = _valid_document()
+    document["settings"] = {
+        "connection": {
+            "endpoint": "service.example.internal",
+            "nested_extra": 1,
+        }
+    }
+    config_path = _write_json(tmp_path / "config.json", document)
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_config(
+            config_path,
+            expected_plugin="hive",
+            settings_type=SettingsWithNestedModel,
+            secrets_type=ExampleSecrets,
+            environ={
+                "HIVE_USERNAME": "resolved-username-sentinel",
+                "HIVE_PASSWORD": "resolved-password-sentinel",
+            },
+        )
+
+    assert "settings.connection.nested_extra" in str(exc_info.value)
+
+
 def test_cli_plugin_must_match_file_plugin(tmp_path: Path) -> None:
     document = _valid_document()
     document["plugin"] = "zeppelin"
@@ -215,6 +271,61 @@ def test_secret_references_resolve_to_masked_values(tmp_path: Path) -> None:
 
     assert loaded.secrets.password.get_secret_value() == "resolved-password-sentinel"
     assert "resolved-password-sentinel" not in repr(loaded)
+
+
+def test_unsafe_plain_string_secret_schema_is_rejected_before_resolution(tmp_path: Path) -> None:
+    secret_sentinel = "unsafe-schema-secret-sentinel"
+    document = _valid_document()
+    document["secrets"] = {"password": "PASSWORD_ENV"}
+    config_path = _write_json(tmp_path / "config.json", document)
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_config(
+            config_path,
+            expected_plugin="hive",
+            settings_type=ExampleSettings,
+            secrets_type=UnsafeSecrets,
+            environ={"PASSWORD_ENV": secret_sentinel},
+        )
+
+    rendered_error = "".join(traceback.format_exception(exc_info.value))
+    assert secret_sentinel not in rendered_error
+
+
+def test_optional_safe_secret_types_are_supported_and_masked(tmp_path: Path) -> None:
+    secret_sentinel = "optional-auth-secret-sentinel"
+    document = _valid_document()
+    document["secrets"] = {"token": "TOKEN_ENV"}
+    config_path = _write_json(tmp_path / "config.json", document)
+
+    loaded = load_config(
+        config_path,
+        expected_plugin="hive",
+        settings_type=ExampleSettings,
+        secrets_type=OptionalAuthSecrets,
+        environ={"TOKEN_ENV": secret_sentinel},
+    )
+
+    assert loaded.secrets.token is not None
+    assert loaded.secrets.token.get_secret_value() == secret_sentinel
+    assert loaded.secrets.certificate is None
+    assert secret_sentinel not in repr(loaded.secrets)
+
+
+def test_typing_optional_safe_secret_type_is_supported(tmp_path: Path) -> None:
+    document = _valid_document()
+    document["secrets"] = {"token": "TOKEN_ENV"}
+    config_path = _write_json(tmp_path / "config.json", document)
+
+    loaded = load_config(
+        config_path,
+        expected_plugin="hive",
+        settings_type=ExampleSettings,
+        secrets_type=LegacyOptionalAuthSecrets,
+        environ={"TOKEN_ENV": "legacy-optional-secret-sentinel"},
+    )
+
+    assert loaded.secrets.token is not None
 
 
 def test_missing_secret_names_variable_without_exposing_other_values(tmp_path: Path) -> None:
@@ -285,6 +396,25 @@ def test_secret_validation_traceback_does_not_echo_resolved_value(tmp_path: Path
                 "HIVE_USERNAME": "resolved-username-sentinel",
                 "HIVE_PASSWORD": secret_sentinel,
             },
+        )
+
+    rendered_traceback = "".join(traceback.format_exception(exc_info.value))
+    assert secret_sentinel not in rendered_traceback
+
+
+def test_non_validation_error_from_validator_is_mapped_without_secret(tmp_path: Path) -> None:
+    secret_sentinel = "validator-secret-sentinel"
+    document = _valid_document()
+    document["secrets"] = {"password": "PASSWORD_ENV"}
+    config_path = _write_json(tmp_path / "config.json", document)
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_config(
+            config_path,
+            expected_plugin="hive",
+            settings_type=ExampleSettings,
+            secrets_type=ExplodingValidatorSecrets,
+            environ={"PASSWORD_ENV": secret_sentinel},
         )
 
     rendered_traceback = "".join(traceback.format_exception(exc_info.value))

@@ -5,13 +5,15 @@ from __future__ import annotations
 import json
 import os
 import re
-from collections.abc import Mapping
+import typing
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import ClassVar, Generic, Literal, TypeVar, cast
+from types import UnionType
+from typing import Annotated, ClassVar, Generic, Literal, TypeVar, cast, get_args, get_origin
 
 import yaml
-from pydantic import BaseModel, TypeAdapter, ValidationError
+from pydantic import BaseModel, ConfigDict, SecretBytes, SecretStr, TypeAdapter, ValidationError
 
 _SUPPORTED_VERSION = 1
 _ROOT_FIELDS = frozenset({"version", "plugin", "settings", "secrets"})
@@ -29,6 +31,12 @@ class ConfigError(ValueError):
 
     def __init__(self, message: str) -> None:
         super().__init__(f"{self.category}: {message}")
+
+
+class SecretConfigModel(BaseModel):
+    """Base for secret schemas whose fields are safe in model representations."""
+
+    model_config = ConfigDict(extra="forbid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +85,7 @@ def load_config(
     _apply_settings_overrides(settings_data, settings_type, environment)
     settings = _validate_model(settings_type, settings_data, location="settings")
 
+    _validate_secret_model_schema(secrets_type)
     raw_secret_references = _require_string_mapping(root.get("secrets"), location="secrets")
     _reject_unknown_model_fields(raw_secret_references, secrets_type, location="secrets")
     resolved_secrets = _resolve_secret_references(raw_secret_references, environment)
@@ -128,6 +137,120 @@ def _reject_unknown_model_fields(
 ) -> None:
     allowed = frozenset(model_type.model_fields)
     _reject_unknown_fields(values, allowed=allowed, location=location)
+    for field_name, value in values.items():
+        model_field = model_type.model_fields[field_name]
+        _reject_nested_unknown_fields(
+            value,
+            annotation=model_field.annotation,
+            location=f"{location}.{field_name}",
+        )
+
+
+def _reject_nested_unknown_fields(value: object, *, annotation: object, location: str) -> None:
+    if _is_model_type(annotation):
+        if isinstance(value, Mapping):
+            nested_values = _require_string_mapping(
+                cast(Mapping[object, object], value), location=location
+            )
+            _reject_unknown_model_fields(
+                nested_values,
+                cast(type[BaseModel], annotation),
+                location=location,
+            )
+        return
+
+    origin: object = get_origin(annotation)
+    arguments = cast(tuple[object, ...], get_args(annotation))
+    if origin is Annotated and arguments:
+        _reject_nested_unknown_fields(value, annotation=arguments[0], location=location)
+        return
+
+    nested_annotations = tuple(
+        candidate for candidate in arguments if _annotation_contains_model(candidate)
+    )
+    if not nested_annotations:
+        return
+
+    if _is_mapping_origin(origin) and isinstance(value, Mapping) and len(arguments) >= 2:
+        for key, item in cast(Mapping[object, object], value).items():
+            _reject_nested_unknown_fields(
+                item,
+                annotation=arguments[1],
+                location=f"{location}.{key}",
+            )
+        return
+
+    if (
+        _is_sequence_origin(origin)
+        and isinstance(value, Sequence)
+        and not isinstance(value, str)
+        and arguments
+    ):
+        item_annotation = arguments[0]
+        for index, item in enumerate(cast(Sequence[object], value)):
+            _reject_nested_unknown_fields(
+                item,
+                annotation=item_annotation,
+                location=f"{location}.{index}",
+            )
+        return
+
+    errors: list[ConfigError] = []
+    for nested_annotation in nested_annotations:
+        try:
+            _reject_nested_unknown_fields(
+                cast(object, value),
+                annotation=nested_annotation,
+                location=location,
+            )
+        except ConfigError as error:
+            errors.append(error)
+        else:
+            return
+    if errors:
+        raise errors[0]
+
+
+def _annotation_contains_model(annotation: object) -> bool:
+    return _is_model_type(annotation) or any(
+        _annotation_contains_model(argument) for argument in get_args(annotation)
+    )
+
+
+def _is_model_type(annotation: object) -> bool:
+    return isinstance(annotation, type) and issubclass(annotation, BaseModel)
+
+
+def _is_mapping_origin(origin: object) -> bool:
+    return isinstance(origin, type) and issubclass(origin, Mapping)
+
+
+def _is_sequence_origin(origin: object) -> bool:
+    return isinstance(origin, type) and issubclass(origin, Sequence)
+
+
+def _validate_secret_model_schema(model_type: type[BaseModel]) -> None:
+    for field_name, model_field in model_type.model_fields.items():
+        if not _is_safe_secret_annotation(model_field.annotation):
+            raise ConfigError(
+                f"secret schema field secrets.{field_name} must use SecretStr or SecretBytes"
+            )
+
+
+def _is_safe_secret_annotation(annotation: object) -> bool:
+    if isinstance(annotation, type) and issubclass(annotation, (SecretStr, SecretBytes)):
+        return True
+
+    origin = get_origin(annotation)
+    arguments = get_args(annotation)
+    if origin is Annotated and arguments:
+        return _is_safe_secret_annotation(arguments[0])
+    if origin in (UnionType, typing.Union):
+        secret_arguments = tuple(argument for argument in arguments if argument is not type(None))
+        return bool(secret_arguments) and all(
+            _is_safe_secret_annotation(argument) for argument in secret_arguments
+        )
+    return False
 
 
 def _apply_settings_overrides(
@@ -182,3 +305,5 @@ def _validate_model(
         )
         invalid_location = invalid_locations[0] if invalid_locations else location
         raise ConfigError(f"invalid configuration at {invalid_location}") from None
+    except Exception:
+        raise ConfigError(f"invalid configuration at {location}") from None
