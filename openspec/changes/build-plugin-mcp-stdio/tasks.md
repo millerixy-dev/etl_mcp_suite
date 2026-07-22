@@ -20,8 +20,8 @@
 
 - [ ] 3.1 Add failing tests for Hive configuration, identifier validation/backtick quoting, and rejection before connection creation.
 - [x] 3.2 Implement Hive configuration, identifiers, and typed metadata/result models.
-- [ ] 3.3 Add failing parser tests for normal columns, partition transitions, repeated headers, blank rows, empty comments, one-based ordinals, and nested complex Hive types.
-- [ ] 3.4 Implement `DESCRIBE` and `SHOW CREATE TABLE` response parsing until parser tests pass.
+- [x] 3.3 Add failing parser tests for normal columns, partition transitions, repeated headers, blank rows, empty comments, one-based ordinals, and nested complex Hive types.
+- [x] 3.4 Implement `DESCRIBE` and `SHOW CREATE TABLE` response parsing until parser tests pass.
 - [ ] 3.5 Add failing cache tests for hit, expiry, TTL-zero disablement, normalized keys, success-only storage, accurate `cached` flags, and the 256-entry LRU bound.
 - [ ] 3.6 Implement the plugin-local standard-library TTL/LRU cache until cache tests pass.
 - [ ] 3.7 Add failing PyHive adapter tests for the four allowed statement families, LDAP/pure-SASL connection parameters, one connection per uncached invocation, worker-thread execution, and cursor/connection cleanup on every path.
