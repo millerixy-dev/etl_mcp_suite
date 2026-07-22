@@ -22,8 +22,8 @@
 - [x] 3.2 Implement Hive configuration, identifiers, and typed metadata/result models.
 - [x] 3.3 Add failing parser tests for normal columns, partition transitions, repeated headers, blank rows, empty comments, one-based ordinals, and nested complex Hive types.
 - [x] 3.4 Implement `DESCRIBE` and `SHOW CREATE TABLE` response parsing until parser tests pass.
-- [ ] 3.5 Add failing cache tests for hit, expiry, TTL-zero disablement, normalized keys, success-only storage, accurate `cached` flags, and the 256-entry LRU bound.
-- [ ] 3.6 Implement the plugin-local standard-library TTL/LRU cache until cache tests pass.
+- [x] 3.5 Add failing cache tests for hit, expiry, TTL-zero disablement, normalized keys, success-only storage, accurate `cached` flags, and the 256-entry LRU bound.
+- [x] 3.6 Implement the plugin-local standard-library TTL/LRU cache until cache tests pass.
 - [ ] 3.7 Add failing PyHive adapter tests for the four allowed statement families, LDAP/pure-SASL connection parameters, one connection per uncached invocation, worker-thread execution, and cursor/connection cleanup on every path.
 - [ ] 3.8 Implement the Hive gateway and PyHive adapter with safe exception mapping and no caller-controlled SQL.
 - [ ] 3.9 Implement and contract-test `list_databases`, `list_tables`, and `get_table_schema`, including exact input/output schemas, optional DDL, cache integration, and the exact three-tool set.
