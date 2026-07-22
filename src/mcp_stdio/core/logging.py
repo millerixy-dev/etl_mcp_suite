@@ -12,7 +12,7 @@ _REDACTED = "[REDACTED]"
 _SENSITIVE_FIELD = re.compile(
     r"""
     (?<![A-Za-z0-9_])
-    (?:\\?["'])?
+    (?:\\?["'`])?
     (?:
         authorization
         | proxy-authorization
@@ -25,23 +25,21 @@ _SENSITIVE_FIELD = re.compile(
         | cookie
         | set-cookie
     )
-    (?:\\?["'])?
+    (?:\\?["'`])?
+    \]?
     \s*[:=]\s*
     """,
     flags=re.IGNORECASE | re.VERBOSE,
 )
 _STANDALONE_BEARER = re.compile(r"(?<![A-Za-z0-9_])bearer\s+", flags=re.IGNORECASE)
-_CORRELATION_ID = re.compile(
+_TRUSTED_CORRELATION_ID = re.compile(
     r"""
-    (?<![A-Za-z0-9_])correlation_id\s*=\s*
-    (?P<value>
-        [0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-
-        [0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}
-    )
-    (?![0-9A-Fa-f-])
+    [0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-
+    [0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}
     """,
     flags=re.VERBOSE,
 )
+_TRUSTED_CORRELATION_ATTRIBUTE = "_mcp_correlation_id"
 _FORMAT_FAILURE = "ERROR mcp_stdio logging record formatting failed safely"
 
 
@@ -51,13 +49,6 @@ def _split_line_ending(line: str) -> tuple[str, str]:
     if line.endswith(("\r", "\n")):
         return line[:-1], line[-1:]
     return line, ""
-
-
-def _correlation_suffix(line: str) -> str:
-    match = _CORRELATION_ID.search(line)
-    if match is None:
-        return ""
-    return f" correlation_id={match.group('value')}"
 
 
 def _redact_sensitive_line(line: str) -> tuple[str, bool]:
@@ -73,7 +64,7 @@ def _redact_sensitive_line(line: str) -> tuple[str, bool]:
     else:
         assert bearer_match is not None
         safe_prefix = line[: bearer_match.start()]
-    return f"{safe_prefix}{_REDACTED}{_correlation_suffix(line)}", True
+    return f"{safe_prefix}{_REDACTED}", True
 
 
 def _redact_structure(value: str) -> str:
@@ -83,9 +74,7 @@ def _redact_structure(value: str) -> str:
         line, line_ending = _split_line_ending(raw_line)
         if redact_continuation and line.startswith((" ", "\t")):
             indentation = line[: len(line) - len(line.lstrip(" \t"))]
-            redacted_lines.append(
-                f"{indentation}{_REDACTED}{_correlation_suffix(line)}{line_ending}"
-            )
+            redacted_lines.append(f"{indentation}{_REDACTED}{line_ending}")
             continue
 
         redact_continuation = False
@@ -119,9 +108,15 @@ class _RedactingFormatter(logging.Formatter):
 
     def format(self, record: logging.LogRecord) -> str:
         try:
-            return self._redactor.redact(super().format(record))
+            rendered = self._redactor.redact(super().format(record))
         except Exception:
             return _FORMAT_FAILURE
+        correlation_id = record.__dict__.get(_TRUSTED_CORRELATION_ATTRIBUTE)
+        if isinstance(correlation_id, str) and _TRUSTED_CORRELATION_ID.fullmatch(
+            correlation_id
+        ):
+            return f"{rendered} correlation_id={correlation_id}"
+        return rendered
 
 
 def configure_logging(

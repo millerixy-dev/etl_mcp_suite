@@ -197,9 +197,9 @@ def unexpected_tool_error(
     logger = logging.getLogger("mcp_stdio.errors")
     try:
         logger.error(
-            "unexpected exception during %s correlation_id=%s",
+            "unexpected exception during %s",
             tool_error.operation.value,
-            tool_error.correlation_id,
+            extra={"_mcp_correlation_id": tool_error.correlation_id},
         )
     except Exception:
         pass

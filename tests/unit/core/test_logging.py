@@ -132,6 +132,38 @@ def test_sensitive_field_detection_discards_malformed_or_escaped_line_suffix(
 
 
 @pytest.mark.parametrize(
+    ("message", "sentinel"),
+    [
+        ("headers[Authorization]=Basic basic-secret-sentinel", "basic-secret-sentinel"),
+        (
+            "headers['Authorization']=Basic quoted-basic-secret-sentinel",
+            "quoted-basic-secret-sentinel",
+        ),
+        ("credentials[password]=password-secret-sentinel", "password-secret-sentinel"),
+        ("headers[Cookie]=session=cookie-secret-sentinel", "cookie-secret-sentinel"),
+        ("`password`=backtick-secret-sentinel", "backtick-secret-sentinel"),
+    ],
+)
+def test_structured_sensitive_key_wrappers_fail_closed(
+    message: str,
+    sentinel: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from mcp_stdio.core.logging import configure_logging
+
+    logger = configure_logging()
+
+    logger.info(message)
+    captured = capsys.readouterr()
+
+    assert "[REDACTED]" in captured.err
+    assert sentinel not in captured.err
+    assert sentinel not in captured.out
+    assert captured.out == ""
+    logging.getLogger("mcp_stdio").handlers.clear()
+
+
+@pytest.mark.parametrize(
     ("message", "sentinels"),
     [
         (
@@ -182,27 +214,27 @@ def test_existing_redaction_marker_does_not_gain_bracket_artifacts(
     logging.getLogger("mcp_stdio").handlers.clear()
 
 
-def test_sensitive_line_preserves_only_valid_correlation_id_from_suffix(
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Cookie: correlation_id={correlation_id}",
+        "password=correlation_id={correlation_id}",
+        "Authorization: Bearer correlation_id={correlation_id}",
+    ],
+)
+def test_untrusted_sensitive_message_cannot_restore_correlation_id(
+    message: str,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     from mcp_stdio.core.logging import configure_logging
 
     correlation_id = "123e4567-e89b-12d3-a456-426614174000"
-    secret = "correlated-password-secret"
-    discarded_suffix = "discarded-sensitive-suffix"
     logger = configure_logging()
 
-    logger.info(
-        "password=%s correlation_id=%s %s",
-        secret,
-        correlation_id,
-        discarded_suffix,
-    )
+    logger.info(message.format(correlation_id=correlation_id))
     captured = capsys.readouterr()
 
-    assert correlation_id in captured.err
-    assert secret not in captured.err
-    assert discarded_suffix not in captured.err
+    assert correlation_id not in captured.err
     assert captured.out == ""
     logging.getLogger("mcp_stdio").handlers.clear()
 

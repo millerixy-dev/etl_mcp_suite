@@ -212,33 +212,23 @@ def test_unexpected_mapper_does_not_accept_a_caller_logger() -> None:
 
 def test_unexpected_exception_is_generic_and_logged_with_correlation_id(
     capsys: pytest.CaptureFixture[str],
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from mcp_stdio.core.errors import ToolOperation, unexpected_tool_error
+    from mcp_stdio.core.logging import configure_logging
 
     secret = "unexpected-exception-unknown-sentinel"
-    error_logger = logging.getLogger("mcp_stdio.errors")
-    previous_level = error_logger.level
-    previous_propagate = error_logger.propagate
-    error_logger.handlers.clear()
-    error_logger.setLevel(logging.ERROR)
-    error_logger.propagate = False
-    monkeypatch.setattr(logging, "lastResort", logging.StreamHandler())
+    configure_logging()
     try:
-        try:
-            raise RuntimeError(f"raw upstream failure without structural label {secret}")
-        except RuntimeError as error:
-            mapped = unexpected_tool_error(
-                error,
-                operation=ToolOperation.RUN_PARAGRAPH,
-                identifiers={
-                    "notebook_id": "safe-notebook-id",
-                    "paragraph_id": "safe-paragraph-id",
-                },
-            )
-    finally:
-        error_logger.setLevel(previous_level)
-        error_logger.propagate = previous_propagate
+        raise RuntimeError(f"raw upstream failure without structural label {secret}")
+    except RuntimeError as error:
+        mapped = unexpected_tool_error(
+            error,
+            operation=ToolOperation.RUN_PARAGRAPH,
+            identifiers={
+                "notebook_id": "safe-notebook-id",
+                "paragraph_id": "safe-paragraph-id",
+            },
+        )
 
     captured = capsys.readouterr()
     payload_text = json.dumps(mapped.to_dict(secret_values=(secret,)))
