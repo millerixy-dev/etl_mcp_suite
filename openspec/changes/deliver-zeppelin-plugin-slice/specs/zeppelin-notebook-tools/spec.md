@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: Validate a fixed Zeppelin V1 configuration
-The Zeppelin plugin SHALL accept only these non-sensitive settings: `base_url`, `request_timeout_seconds`, `max_response_bytes`, `max_result_bytes`, `max_notebook_name_chars`, `max_paragraph_title_chars`, `max_paragraph_body_bytes`, `max_opaque_id_chars`, and `allowed_interpreters`. `base_url` MUST be an absolute HTTP or HTTPS URL without user information, query, or fragment; it MAY include a reverse-proxy path and SHALL be normalized without a trailing slash. Numeric settings SHALL use strict numeric types and the following inclusive ranges and defaults: timeout greater than zero and at most 300 seconds (default 30), response bytes 1 through 8 MiB (default 1 MiB), result bytes 1 through 1 MiB (default 65,536), notebook and paragraph-title characters 1 through 1,024 (default 256 each), paragraph-body bytes 1 through 1 MiB (default 65,536), and opaque-ID characters 1 through 4,096 (default 512).
+The Zeppelin plugin SHALL accept only these non-sensitive settings: `base_url`, `request_timeout_seconds`, `max_response_bytes`, `max_result_bytes`, `max_notebook_name_chars`, `max_paragraph_title_chars`, `max_paragraph_body_bytes`, `max_opaque_id_chars`, `allowed_interpreters`, `sql_write_allowed_databases`, and `sh_allowed_commands`. `base_url` MUST be an absolute HTTP or HTTPS URL without user information, query, or fragment; it MAY include a reverse-proxy path and SHALL be normalized without a trailing slash. Numeric settings SHALL use strict numeric types and the following inclusive ranges and defaults: timeout greater than zero and at most 300 seconds (default 30), response bytes 1 through 8 MiB (default 1 MiB), result bytes 1 through 1 MiB (default 65,536), notebook and paragraph-title characters 1 through 1,024 (default 256 each), paragraph-body bytes 1 through 1 MiB (default 65,536), and opaque-ID characters 1 through 4,096 (default 512).
 
 `allowed_interpreters` SHALL default to an immutable empty sequence. Each entry MUST match `[A-Za-z][A-Za-z0-9_.-]{0,63}`. Exact duplicate entries are invalid; matching and uniqueness are case-sensitive. The configuration SHALL reject unknown fields and coercion from strings, booleans, or other incompatible scalar types.
 
@@ -129,6 +129,33 @@ The `add_paragraph` tool SHALL accept an opaque notebook ID, title, interpreter 
 - **WHEN** `allowed_interpreters` is empty or omitted
 - **THEN** every `add_paragraph` request is rejected until an administrator explicitly configures an interpreter
 
+
+### Requirement: Gate paragraph content with write-operation safety rules
+The `add_paragraph` tool SHALL inspect the paragraph body before sending it to Zeppelin and reject content that violates configured write-safety rules. For SQL interpreters (any interpreter whose name contains `sql`), write operations (`INSERT`, `UPDATE`, `DELETE`, `MERGE`, `CREATE`, `ALTER`, `DROP`, `TRUNCATE`, `LOAD`) SHALL only target tables in databases listed in `sql_write_allowed_databases` (default `tmp_dc_ep`). For the `sh` interpreter, only commands whose first token is in `sh_allowed_commands` (default empty) SHALL be allowed. All rejections SHALL return `INVALID_INPUT` without sending the paragraph body to Zeppelin.
+
+#### Scenario: Allow a SQL write to an approved database
+- **WHEN** a SQL interpreter paragraph contains `INSERT INTO tmp_dc_ep.my_table` and `sql_write_allowed_databases` includes `tmp_dc_ep`
+- **THEN** the paragraph is accepted and sent to Zeppelin
+
+#### Scenario: Reject a SQL write to a non-approved database
+- **WHEN** a SQL interpreter paragraph contains `INSERT INTO other_db.my_table` and `sql_write_allowed_databases` is `["tmp_dc_ep"]`
+- **THEN** the tool returns `INVALID_INPUT` without sending the paragraph body to Zeppelin
+
+#### Scenario: Allow a SQL read against any database
+- **WHEN** a SQL interpreter paragraph contains `SELECT * FROM any_db.my_table`
+- **THEN** the paragraph is accepted regardless of `sql_write_allowed_databases`
+
+#### Scenario: Reject a non-allowlisted sh command
+- **WHEN** an `sh` interpreter paragraph body starts with `rm` and `sh_allowed_commands` is `["echo", "cat"]`
+- **THEN** the tool returns `INVALID_INPUT` without sending the paragraph body to Zeppelin
+
+#### Scenario: Allow an allowlisted sh command
+- **WHEN** an `sh` interpreter paragraph body starts with `echo` and `sh_allowed_commands` is `["echo", "cat"]`
+- **THEN** the paragraph is accepted and sent to Zeppelin
+
+#### Scenario: Default deny all sh commands
+- **WHEN** `sh_allowed_commands` is empty or omitted and an `sh` interpreter paragraph is submitted
+- **THEN** the tool returns `INVALID_INPUT` without sending the paragraph body to Zeppelin
 ### Requirement: Encode opaque Zeppelin identifiers safely
 The Zeppelin adapter MUST treat notebook and paragraph IDs as opaque values, validate their size, and encode them as URL path segments rather than concatenating unchecked path text.
 

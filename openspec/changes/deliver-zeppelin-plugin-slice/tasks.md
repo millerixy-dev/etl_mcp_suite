@@ -30,6 +30,11 @@
 - [x] 6.1 Add failing tests for `list_notebooks`: mock-transport adapter test returning a directory tree from flat `{id, path}` pairs, service test, and contract test asserting the exact six-tool set.
 - [x] 6.2 Implement `list_notebooks` in the gateway, HTTP adapter, service, models, and tool adapter until all tests pass.
 
-## 7. Verification
+## 7. Paragraph Write-Safety Gate
 
-- [x] 7.1 Run the full unit/contract suite, Ruff, Pyright, console-entry-point smoke test, and strict OpenSpec validation; report exact commands and results.
+- [x] 7.1 Add failing tests for SQL write-target validation (allow writes to `tmp_dc_ep`, reject writes to other databases, allow reads anywhere) and sh command allowlist (reject non-allowlisted, allow allowlisted, default deny).
+- [x] 7.2 Add `sql_write_allowed_databases` and `sh_allowed_commands` to ZeppelinSettings, implement content-safety validators in models.py, and wire them into the service `add_paragraph` gate before network access.
+
+## 8. Verification
+
+- [x] 8.1 Run the full unit/contract suite, Ruff, Pyright, console-entry-point smoke test, and strict OpenSpec validation; report exact commands and results.

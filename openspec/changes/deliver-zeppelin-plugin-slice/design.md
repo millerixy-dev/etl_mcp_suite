@@ -122,3 +122,20 @@ Captured against a live Zeppelin 0.10.1 server. These are the authoritative upst
 
 ### Result normalization
 `results.msg[]` entries are flattened into bounded output items preserving `type` and `data` (UTF-8 byte-bounded, truncated at `max_result_bytes` with the `truncated` flag). `results.code == "ERROR"` drives the `ERROR` status with safe failure details from `results.exception` (bounded, no credentials).
+
+
+## Paragraph Write-Safety Gate
+
+The `add_paragraph` service method already gates interpreters against `allowed_interpreters` before network access. The write-safety gate extends this with content inspection:
+
+### SQL write target validation
+For interpreters whose name contains `sql` (case-insensitive), the body is scanned for SQL write keywords (`INSERT`, `UPDATE`, `DELETE`, `MERGE`, `CREATE`, `ALTER`, `DROP`, `TRUNCATE`, `LOAD`). When a write keyword is found, the target table's database prefix is extracted from patterns like `INSERT INTO <db>.<table>` or `DROP TABLE <db>.<table>`. If the database is not in `sql_write_allowed_databases` (default `("tmp_dc_ep",)`), the paragraph is rejected with `INVALID_INPUT`. Read-only SQL (`SELECT`, `SHOW`, `DESCRIBE`, `EXPLAIN`) is allowed against any database. If a write keyword is found but the target database cannot be determined, the paragraph is rejected (fail-closed).
+
+### sh command allowlist
+For the `sh` interpreter, the first non-empty, non-comment token of the body is extracted as the command name. If it is not in `sh_allowed_commands` (default empty), the paragraph is rejected with `INVALID_INPUT`. This is a deny-by-default design: no shell command runs unless explicitly configured.
+
+### Configuration
+- `sql_write_allowed_databases`: tuple of database names, default `("tmp_dc_ep",)`.
+- `sh_allowed_commands`: tuple of command names, default `()` (deny all).
+
+Both are validated with the same strict config rules (case-sensitive, unique, safe syntax).
