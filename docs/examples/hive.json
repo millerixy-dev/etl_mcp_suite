@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "plugin": "hive",
+  "settings": {
+    "host": "hive.example.internal",
+    "port": 10001,
+    "database": "catalog",
+    "cache_ttl_seconds": 60
+  },
+  "secrets": {
+    "username": "HIVE_USERNAME",
+    "password": "HIVE_PASSWORD"
+  }
+}

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, Protocol
@@ -33,8 +33,14 @@ class PluginRuntime(Protocol):
     async def close(self) -> None:
         """Idempotently close resources owned by this runtime."""
 
+    @property
+    def redaction_values(self) -> Iterable[str]:
+        """Secret values the runtime holds for stderr log redaction."""
 
-PluginRuntimeBuilder = Callable[[Path, Mapping[str, str] | None], PluginRuntime]
+        ...
+
+
+PluginRuntimeBuilder = Callable[[Path | None, Mapping[str, str] | None], PluginRuntime]
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,10 +52,11 @@ class PluginDefinition:
 
     def create_runtime(
         self,
-        config_path: str | Path,
+        config_path: str | Path | None,
         *,
         environ: Mapping[str, str] | None = None,
     ) -> PluginRuntime:
         """Validate plugin config and construct a runtime through plugin-owned composition."""
 
-        return self.runtime_builder(Path(config_path), environ)
+        path = None if config_path is None else Path(config_path)
+        return self.runtime_builder(path, environ)

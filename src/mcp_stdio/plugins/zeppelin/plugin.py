@@ -9,7 +9,7 @@ from mcp_stdio.contracts.plugin import PluginDefinition, PluginRuntime
 
 
 def _create_runtime(
-    config_path: Path,
+    config_path: Path | None,
     environ: Mapping[str, str] | None,
 ) -> PluginRuntime:
     raise NotImplementedError("zeppelin plugin runtime is not implemented yet")

@@ -6,9 +6,9 @@ This document explains how the plugin-based MCP stdio runtime starts, handles re
 
 The active OpenSpec change remains normative:
 
-- `openspec/changes/build-plugin-mcp-stdio/design.md`
-- `openspec/changes/build-plugin-mcp-stdio/specs/`
-- `openspec/changes/build-plugin-mcp-stdio/tasks.md`
+- `openspec/changes/support-env-var-configuration/` (configuration source and precedence)
+- `openspec/specs/plugin-stdio-runtime/spec.md` (synced main spec)
+- `openspec/changes/build-plugin-mcp-stdio/` (multi-plugin runtime, partially deferred)
 
 If this document differs from an active OpenSpec artifact, update the OpenSpec artifact first and then synchronize this explanation.
 
@@ -19,36 +19,42 @@ The MCP host launches one child process for every configured plugin instance. `c
 ```text
 MCP Host
 │
-├── mcp-stdio --plugin hive --config hive.yaml
+├── mcp-stdio --plugin hive [--config hive.yaml]   # --config optional; HIVE_* env vars may supply everything
 │     └── Hive plugin ── PyHive/Thrift/LDAP ── HiveServer2
 │
-├── mcp-stdio --plugin zeppelin --config zeppelin.yaml
-│     └── Zeppelin plugin ── REST ── Zeppelin Server
+├── mcp-stdio --plugin zeppelin --config zeppelin.yaml   (deferred)
+│     └── Zeppelin plugin ── REST ── Zeppelin Server      (deferred)
 │
-└── mcp-stdio --plugin dolphinscheduler --config dolphinscheduler.json
-      └── DolphinScheduler plugin ── REST ── DolphinScheduler
+└── mcp-stdio --plugin dolphinscheduler --config dolphinscheduler.json   (deferred)
+      └── DolphinScheduler plugin ── REST ── DolphinScheduler             (deferred)
 ```
 
 Every child process has its own stdin/stdout MCP channel, configuration, secrets, clients, caches, failures, and shutdown lifecycle. Processes share installed package files only.
+
+The first deliverable slice (`deliver-hive-plugin-slice`) ships the Hive plugin and the shared runtime it depends on. The Zeppelin and DolphinScheduler processes shown above are deferred to separate follow-up changes; their registry loaders exist as placeholders that reject runtime construction until implemented.
 
 ## Startup Flow
 
 ```mermaid
 flowchart TD
-    A["MCP host starts child process"] --> B["Parse --plugin and --config"]
-    B --> C["Load YAML or JSON safely"]
-    C --> D["Apply non-secret environment overrides"]
-    D --> E["Resolve secret environment references"]
-    E --> F["Validate version, schema, and plugin match"]
-    F --> G["Select plugin from explicit registry"]
-    G --> H["Construct runtime without network access"]
-    H --> I["Register only selected plugin tools"]
-    I --> J["Start FastMCP over stdin/stdout"]
+    A["MCP host starts child process"] --> B["Parse --plugin and optional --config"]
+    B --> C{"--config provided?"}
+    C -->|"yes"| D["Load YAML or JSON safely"]
+    C -->|"no (env-only)"| E["Synthesize from <PREFIX>_<FIELD> env vars"]
+    D --> F["Apply env overrides: <PREFIX>_<FIELD> > MCP_STDIO__SETTINGS__ > file"]
+    E --> F
+    F --> G["Resolve secret environment references / prefix values"]
+    G --> H["Validate version, schema, and plugin match"]
+    H --> I["Select plugin from explicit registry"]
+    I --> J["Construct runtime without network access"]
+    J --> K["Register only selected plugin tools"]
+    K --> L["Start FastMCP over stdin/stdout"]
 
-    C -->|"parse failure"| X["CONFIG_ERROR on stderr; exit"]
-    E -->|"missing secret"| X
-    F -->|"invalid config"| X
-    G -->|"unknown plugin"| X
+    D -->|"parse failure"| X["CONFIG_ERROR on stderr; exit"]
+    E -->|"missing required var"| X
+    G -->|"missing secret"| X
+    H -->|"invalid config"| X
+    I -->|"unknown plugin"| X
 ```
 
 Startup validation is local. An unreachable HiveServer2 or REST server does not prevent the MCP process from starting; the first tool call that needs the backend reports the connection failure.
@@ -114,7 +120,7 @@ Approved statement families are `SHOW DATABASES`, `SHOW TABLES`, `DESCRIBE`, and
 
 ## Zeppelin Request Flow
 
-Zeppelin is execution-capable and therefore has a stricter trust boundary.
+Zeppelin is execution-capable and therefore has a stricter trust boundary. The Zeppelin plugin is **deferred** to a follow-up change; the flow below describes the planned behavior for reference.
 
 ```mermaid
 stateDiagram-v2
@@ -136,7 +142,7 @@ Opaque notebook and paragraph IDs are size-checked and URL-encoded. Large output
 
 ## DolphinScheduler Request Flow
 
-The v1 DolphinScheduler plugin exposes only `get_server_status`.
+The v1 DolphinScheduler plugin exposes only `get_server_status`. This plugin is **deferred** to a follow-up change; the flow below describes the planned behavior for reference.
 
 ```text
 get_server_status
@@ -199,6 +205,6 @@ The implementation must provide automated evidence for:
 - secret-safe errors through the actual MCP serialization path;
 - cleanup on success, failure, cancellation, and EOF;
 - Hive connection isolation and cache behavior;
-- Zeppelin interpreter denial before network access;
-- DolphinScheduler status-only endpoint access;
 - subprocess startup and shutdown behavior.
+
+Zeppelin interpreter denial and DolphinScheduler status-only access are required only once those deferred plugins ship.

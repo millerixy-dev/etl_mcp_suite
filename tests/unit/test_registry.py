@@ -45,6 +45,10 @@ class RecordingRuntime:
     def name(self) -> BuiltinPluginName:
         return self._name
 
+    @property
+    def redaction_values(self) -> tuple[str, ...]:
+        return ()
+
     def register_tools(self, registrar: ToolRegistrar) -> None:
         registrar.add_tool(self._tool, name="recording_tool")
 
@@ -99,11 +103,11 @@ def test_unknown_plugin_fails_with_a_fixed_config_error_before_import(
 def test_definition_bridges_registration_and_async_cleanup_without_mcp_types(
     tmp_path: Path,
 ) -> None:
-    calls: list[tuple[Path, Mapping[str, str] | None]] = []
+    calls: list[tuple[Path | None, Mapping[str, str] | None]] = []
     runtime = RecordingRuntime("hive")
 
     def build(
-        config_path: Path,
+        config_path: Path | None,
         environ: Mapping[str, str] | None,
     ) -> PluginRuntime:
         calls.append((config_path, environ))

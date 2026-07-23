@@ -495,3 +495,199 @@ def test_unsupported_file_extension_is_rejected(tmp_path: Path) -> None:
 
     assert exc_info.value.category == "CONFIG_ERROR"
     assert ".toml" in str(exc_info.value)
+
+
+# --- Environment-variable-only startup and prefix overrides ---
+
+
+def _load_env_only(
+    environ: dict[str, str],
+    *,
+    env_prefix: str = "EXAMPLE",
+) -> LoadedConfig[ExampleSettings, ExampleSecrets]:
+    return load_config(
+        None,
+        expected_plugin="hive",
+        settings_type=ExampleSettings,
+        secrets_type=ExampleSecrets,
+        environ=environ,
+        env_prefix=env_prefix,
+    )
+
+
+def test_env_only_mode_loads_all_fields_from_prefix_variables() -> None:
+    environ = {
+        "EXAMPLE_HOST": "hive.from.env",
+        "EXAMPLE_PORT": "9090",
+        "EXAMPLE_TLS": "true",
+        "EXAMPLE_USERNAME": "env-user",
+        "EXAMPLE_PASSWORD": "env-password",
+    }
+
+    loaded = _load_env_only(environ)
+
+    assert loaded.plugin == "hive"
+    assert loaded.version == 1
+    assert loaded.settings == ExampleSettings(host="hive.from.env", port=9090, tls=True)
+    assert loaded.secrets.username.get_secret_value() == "env-user"
+    assert loaded.secrets.password.get_secret_value() == "env-password"
+
+
+def test_env_only_mode_optional_setting_uses_default_when_absent() -> None:
+    environ = {
+        "EXAMPLE_HOST": "hive.from.env",
+        "EXAMPLE_USERNAME": "env-user",
+        "EXAMPLE_PASSWORD": "env-password",
+    }
+
+    loaded = _load_env_only(environ)
+
+    assert loaded.settings.port == 10_000
+    assert loaded.settings.tls is False
+
+
+def test_env_only_mode_without_prefix_raises_config_error() -> None:
+    with pytest.raises(ConfigError) as exc_info:
+        load_config(
+            None,
+            expected_plugin="hive",
+            settings_type=ExampleSettings,
+            secrets_type=ExampleSecrets,
+            environ={"EXAMPLE_HOST": "x", "EXAMPLE_USERNAME": "u", "EXAMPLE_PASSWORD": "p"},
+        )
+
+    assert exc_info.value.category == "CONFIG_ERROR"
+    assert "configuration file or plugin environment variables" in str(exc_info.value)
+
+
+def test_env_only_mode_missing_required_setting_variable_is_named() -> None:
+    environ = {
+        "EXAMPLE_USERNAME": "env-user",
+        "EXAMPLE_PASSWORD": "env-password",
+    }
+
+    with pytest.raises(ConfigError) as exc_info:
+        _load_env_only(environ)
+
+    error = str(exc_info.value)
+    assert exc_info.value.category == "CONFIG_ERROR"
+    assert "EXAMPLE_HOST" in error
+
+
+def test_env_only_mode_missing_required_secret_variable_is_named_without_value() -> None:
+    secret_sentinel = "present-password-sentinel"
+    environ = {
+        "EXAMPLE_HOST": "hive.from.env",
+        "EXAMPLE_PASSWORD": secret_sentinel,
+    }
+
+    with pytest.raises(ConfigError) as exc_info:
+        _load_env_only(environ)
+
+    error = str(exc_info.value)
+    assert exc_info.value.category == "CONFIG_ERROR"
+    assert "EXAMPLE_USERNAME" in error
+    assert secret_sentinel not in error
+
+
+def test_env_only_mode_invalid_setting_type_is_safe_config_error() -> None:
+    environ = {
+        "EXAMPLE_HOST": "hive.from.env",
+        "EXAMPLE_PORT": "not-a-port",
+        "EXAMPLE_USERNAME": "env-user",
+        "EXAMPLE_PASSWORD": "env-password",
+    }
+
+    with pytest.raises(ConfigError) as exc_info:
+        _load_env_only(environ)
+
+    assert exc_info.value.category == "CONFIG_ERROR"
+    assert "settings.port" in str(exc_info.value)
+
+
+def test_env_only_mode_secret_validation_error_does_not_echo_value() -> None:
+    secret_sentinel = "short-secret-sentinel"
+    environ = {
+        "EXAMPLE_HOST": "hive.from.env",
+        "EXAMPLE_USERNAME": "env-user",
+        "EXAMPLE_PASSWORD": secret_sentinel,
+    }
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_config(
+            None,
+            expected_plugin="hive",
+            settings_type=ExampleSettings,
+            secrets_type=LengthCheckedSecrets,
+            environ=environ,
+            env_prefix="EXAMPLE",
+        )
+
+    rendered_traceback = "".join(traceback.format_exception(exc_info.value))
+    assert secret_sentinel not in rendered_traceback
+    assert secret_sentinel not in str(exc_info.value)
+
+
+def test_prefix_setting_overrides_file_value(tmp_path: Path) -> None:
+    config_path = _write_json(tmp_path / "config.json", _valid_document())
+    environ = {
+        "HIVE_USERNAME": "resolved-username-sentinel",
+        "HIVE_PASSWORD": "resolved-password-sentinel",
+        "EXAMPLE_PORT": "20002",
+    }
+
+    loaded = load_config(
+        config_path,
+        expected_plugin="hive",
+        settings_type=ExampleSettings,
+        secrets_type=ExampleSecrets,
+        environ=environ,
+        env_prefix="EXAMPLE",
+    )
+
+    assert loaded.settings.port == 20_002
+
+
+def test_prefix_setting_overrides_generic_override(tmp_path: Path) -> None:
+    config_path = _write_json(tmp_path / "config.json", _valid_document())
+    environ = {
+        "HIVE_USERNAME": "resolved-username-sentinel",
+        "HIVE_PASSWORD": "resolved-password-sentinel",
+        "MCP_STDIO__SETTINGS__PORT": "20001",
+        "EXAMPLE_PORT": "20002",
+    }
+
+    loaded = load_config(
+        config_path,
+        expected_plugin="hive",
+        settings_type=ExampleSettings,
+        secrets_type=ExampleSecrets,
+        environ=environ,
+        env_prefix="EXAMPLE",
+    )
+
+    assert loaded.settings.port == 20_002
+
+
+def test_prefix_secret_overrides_file_reference(tmp_path: Path) -> None:
+    document = _valid_document()
+    secrets = document["secrets"]
+    assert isinstance(secrets, dict)
+    secrets["username"] = "OTHER_USERNAME"
+    config_path = _write_json(tmp_path / "config.json", document)
+    environ = {
+        "OTHER_USERNAME": "file-referenced-user",
+        "HIVE_PASSWORD": "resolved-password-sentinel",
+        "EXAMPLE_USERNAME": "prefix-override-user",
+    }
+
+    loaded = load_config(
+        config_path,
+        expected_plugin="hive",
+        settings_type=ExampleSettings,
+        secrets_type=ExampleSecrets,
+        environ=environ,
+        env_prefix="EXAMPLE",
+    )
+
+    assert loaded.secrets.username.get_secret_value() == "prefix-override-user"

@@ -54,46 +54,89 @@ class LoadedConfig(Generic[SettingsT, SecretsT]):
 
 
 def load_config(
-    path: str | Path,
+    path: str | Path | None,
     *,
     expected_plugin: str,
     settings_type: type[SettingsT],
     secrets_type: type[SecretsT],
     environ: Mapping[str, str] | None = None,
+    env_prefix: str = "",
 ) -> LoadedConfig[SettingsT, SecretsT]:
-    """Load and validate one plugin's local configuration without network access."""
+    """Load and validate one plugin's local configuration without network access.
 
-    config_path = Path(path)
-    document = _read_document(config_path)
-    root = _require_string_mapping(document, location="configuration root")
-    _reject_unknown_fields(root, allowed=_ROOT_FIELDS, location="configuration root")
+    When *path* is ``None`` the configuration is synthesized entirely from
+    ``<env_prefix>_<FIELD>`` environment variables (environment-variable-only
+    startup). When a path is supplied, environment variables override file
+    values: ``<env_prefix>_<FIELD>`` takes precedence over
+    ``MCP_STDIO__SETTINGS__<FIELD>`` for settings and over file secret
+    references for secrets.
+    """
 
-    version = root.get("version")
-    if not isinstance(version, int) or isinstance(version, bool):
-        raise ConfigError("configuration version must be an integer")
-    if version != _SUPPORTED_VERSION:
-        raise ConfigError(f"unsupported configuration version {version}")
-
-    plugin = root.get("plugin")
-    if not isinstance(plugin, str) or not plugin:
-        raise ConfigError("plugin must be a non-empty string")
-    if plugin != expected_plugin:
-        raise ConfigError(
-            f"configuration plugin {plugin!r} does not match selected plugin {expected_plugin!r}"
-        )
-
-    raw_settings = _require_string_mapping(root.get("settings"), location="settings")
-    _validate_strict_model_schema(settings_type, location="settings")
-    _reject_unknown_model_fields(raw_settings, settings_type, location="settings")
-    settings_data = dict(raw_settings)
     environment = os.environ if environ is None else environ
-    _apply_settings_overrides(settings_data, settings_type, environment)
-    settings = _validate_model(settings_type, settings_data, location="settings")
+    env_only = path is None
+
+    if env_only and not env_prefix:
+        raise ConfigError("a configuration file or plugin environment variables are required")
+
+    raw_settings: dict[str, object]
+    raw_secret_references: dict[str, object]
+    plugin = expected_plugin
+
+    if path is not None:
+        config_path = Path(path)
+        document = _read_document(config_path)
+        root = _require_string_mapping(document, location="configuration root")
+        _reject_unknown_fields(root, allowed=_ROOT_FIELDS, location="configuration root")
+
+        version = root.get("version")
+        if not isinstance(version, int) or isinstance(version, bool):
+            raise ConfigError("configuration version must be an integer")
+        if version != _SUPPORTED_VERSION:
+            raise ConfigError(f"unsupported configuration version {version}")
+
+        plugin = root.get("plugin")
+        if not isinstance(plugin, str) or not plugin:
+            raise ConfigError("plugin must be a non-empty string")
+        if plugin != expected_plugin:
+            raise ConfigError(
+                f"configuration plugin {plugin!r} does not match"
+                f" selected plugin {expected_plugin!r}"
+            )
+
+        raw_settings = _require_string_mapping(root.get("settings"), location="settings")
+        _validate_strict_model_schema(settings_type, location="settings")
+        _reject_unknown_model_fields(raw_settings, settings_type, location="settings")
+
+        raw_secret_references = _require_string_mapping(root.get("secrets"), location="secrets")
+        _reject_unknown_model_fields(raw_secret_references, secrets_type, location="secrets")
+    else:
+        _validate_strict_model_schema(settings_type, location="settings")
+        raw_settings = {}
+        raw_secret_references = {}
 
     _validate_secret_model_schema(secrets_type)
-    raw_secret_references = _require_string_mapping(root.get("secrets"), location="secrets")
-    _reject_unknown_model_fields(raw_secret_references, secrets_type, location="secrets")
+
+    settings_data = dict(raw_settings)
+    _apply_settings_overrides(settings_data, settings_type, environment)
+    if env_prefix:
+        _apply_prefix_overrides(
+            settings_data,
+            settings_type,
+            environment,
+            env_prefix,
+            required=env_only,
+        )
+    settings = _validate_model(settings_type, settings_data, location="settings")
+
     resolved_secrets = _resolve_secret_references(raw_secret_references, environment)
+    if env_prefix:
+        _apply_secret_prefix_overrides(
+            resolved_secrets,
+            secrets_type,
+            environment,
+            env_prefix,
+            required=env_only,
+        )
     secrets = _validate_model(secrets_type, resolved_secrets, location="secrets")
 
     return LoadedConfig(version=1, plugin=plugin, settings=settings, secrets=secrets)
@@ -213,6 +256,44 @@ def _apply_settings_overrides(
             settings[field_name] = _parse_environment_override(
                 environ[environment_name], annotation=model_field.annotation
             )
+
+
+def _prefix_variable(prefix: str, field_name: str) -> str:
+    return f"{prefix}_{field_name.upper()}"
+
+
+def _apply_prefix_overrides(
+    settings: dict[str, object],
+    settings_type: type[BaseModel],
+    environ: Mapping[str, str],
+    prefix: str,
+    *,
+    required: bool,
+) -> None:
+    for field_name, model_field in settings_type.model_fields.items():
+        environment_name = _prefix_variable(prefix, field_name)
+        if environment_name in environ:
+            settings[field_name] = _parse_environment_override(
+                environ[environment_name], annotation=model_field.annotation
+            )
+        elif required and model_field.is_required() and field_name not in settings:
+            raise ConfigError(f"required environment variable {environment_name} is not set")
+
+
+def _apply_secret_prefix_overrides(
+    secrets: dict[str, str],
+    secrets_type: type[BaseModel],
+    environ: Mapping[str, str],
+    prefix: str,
+    *,
+    required: bool,
+) -> None:
+    for field_name, model_field in secrets_type.model_fields.items():
+        environment_name = _prefix_variable(prefix, field_name)
+        if environment_name in environ:
+            secrets[field_name] = environ[environment_name]
+        elif required and model_field.is_required() and field_name not in secrets:
+            raise ConfigError(f"required environment variable {environment_name} is not set")
 
 
 def _parse_environment_override(value: str, *, annotation: object) -> object:

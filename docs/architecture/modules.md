@@ -6,6 +6,8 @@ This document describes the package structure, module responsibilities, dependen
 
 The active OpenSpec proposal, specs, design, and tasks are the normative source of truth. This document is an explanatory architecture view and must be synchronized after approved OpenSpec changes.
 
+The first deliverable slice (`deliver-hive-plugin-slice`) ships the Hive plugin and the shared runtime. Zeppelin and DolphinScheduler modules are described for reference but are deferred to separate follow-up changes; their registry loaders are placeholders that reject runtime construction until implemented.
+
 ## Architectural Style
 
 The project is a modular monolith with vertical plugin slices and Clean Architecture dependency direction.
@@ -31,9 +33,9 @@ There is one installable Python distribution and one `mcp-stdio` entry point. At
 ```text
 One installed package
 └── mcp-stdio entry point
-    ├── process A: shared runtime + Hive plugin
-    ├── process B: shared runtime + Zeppelin plugin
-    └── process C: shared runtime + DolphinScheduler plugin
+├── process A: shared runtime + Hive plugin
+├── process B: shared runtime + Zeppelin plugin        (deferred)
+└── process C: shared runtime + DolphinScheduler plugin (deferred)
 ```
 
 The package boundary simplifies installation and versioning. The process boundary isolates credentials, failures, connections, caches, and mutable state.
@@ -91,7 +93,7 @@ Files may become subpackages when they grow, but their responsibility and depend
 | `__main__.py` | Console entry point; delegates to bootstrap | `bootstrap` | Backend APIs and business behavior |
 | `bootstrap.py` | CLI parsing, composition, lifecycle, cleanup | `core`, `contracts`, `registry`, MCP SDK | PyHive statements or REST endpoint details |
 | `registry.py` | Explicit mapping of fixed plugin names to factories | Concrete `plugin.py` modules | Dynamic module names or filesystem discovery |
-| `core/config.py` | Safe YAML/JSON loading, versioning, overrides, secret references | Standard library, Pydantic, PyYAML | Plugin tool behavior or network clients |
+| `core/config.py` | Safe YAML/JSON loading (optional file), versioning, env-var-only startup, prefix overrides, secret references | Standard library, Pydantic, PyYAML | Plugin tool behavior or network clients |
 | `core/errors.py` | Stable safe error categories and correlation metadata | Standard library/domain types | Raw backend-specific responses |
 | `core/logging.py` | stderr logging and redaction | Standard library | MCP stdout writing |
 | `core/server.py` | FastMCP stdio lifecycle and boundary error conversion | MCP SDK, plugin contract | Concrete backend adapters |
@@ -178,6 +180,8 @@ The cache is plugin-local. It may use shared generic utilities only if those uti
 
 ## Zeppelin Module Responsibilities
 
+> **Deferred.** The Zeppelin plugin is not delivered by the Hive slice. The responsibilities below describe the planned shape for a follow-up change.
+
 - `config.py` models base URL, authentication references, timeouts, result limits, and interpreter allowlist.
 - `models.py` contains notebook IDs, paragraph IDs, normalized states, bounded outputs, and safe failures.
 - `service.py` enforces use-case sequencing and interpreter authorization.
@@ -188,6 +192,8 @@ The cache is plugin-local. It may use shared generic utilities only if those uti
 Interpreter authorization belongs in application policy so it is enforced before the external adapter receives paragraph content.
 
 ## DolphinScheduler Module Responsibilities
+
+> **Deferred.** The DolphinScheduler plugin is not delivered by the Hive slice. The responsibilities below describe the planned shape for a follow-up change.
 
 - `config.py` models base URL, fixed status path, authentication references, and timeout.
 - `service.py` implements only server-status inspection.
@@ -201,7 +207,7 @@ The configured status path is deployment input, not MCP caller input.
 
 ### Configuration
 
-Shared configuration code handles file format, version, unknown-field rejection, overrides, and secret references. Each plugin owns its settings schema. Configuration validation makes no network requests.
+Shared configuration code handles the optional file format, version, unknown-field rejection, environment-variable-only startup, prefix overrides (`<PREFIX>_<FIELD>`), generic overrides (`MCP_STDIO__SETTINGS__<FIELD>`), and secret references. Environment variables take precedence over file values. Each plugin owns its settings schema and declares its prefix. Configuration validation makes no network requests.
 
 ### Errors
 

@@ -118,7 +118,14 @@ MCP SDK v2 is excluded until it has a stable release and a separate compatibilit
 
 ### 5. Use versioned YAML/JSON configuration with environment-backed secrets
 
-`--config` is required. Files ending in `.yaml` or `.yml` use safe YAML loading; `.json` uses the standard JSON parser. The root schema contains `version`, `plugin`, `settings`, and `secrets`.
+ Files ending in `.yaml` or `.yml` use safe YAML loading; `.json` uses the standard JSON parser. The root schema contains `version`, `plugin`, `settings`, and `secrets`.
+ 
+ > **SUPERSEDED:** `--config` is now **optional**; a plugin process may start from
+ > `<PREFIX>_<FIELD>` environment variables alone. Environment variables take the
+ > highest precedence over file values. See
+ > `openspec/changes/support-env-var-configuration/` for the authoritative
+ > decision; the text below reflects the original v1 position retained for
+ > history.
 
 Example:
 
@@ -140,6 +147,11 @@ Values under `secrets` are environment variable names, never credential values. 
 Non-sensitive settings may be overridden with `MCP_STDIO__SETTINGS__<FIELD>`, using uppercase field names. The CLI `--plugin` value and the file's `plugin` value must match. Unknown fields, unsupported config versions, unknown plugins, literal objects under `secrets`, and invalid types fail closed before MCP serving begins. Configuration validation performs no network calls.
 
 This model was selected over environment-only configuration because REST plugins have more non-secret settings and users requested portable YAML/JSON files. Storing credential values in configuration was rejected because local files are commonly committed, copied, or logged accidentally.
+
+> **SUPERSEDED:** The "selected over environment-only configuration" decision is
+> reversed by `openspec/changes/support-env-var-configuration/`. Both a `--config`
+> file **and** environment-variable-only startup are now supported. The
+> credential-storing rejection above remains in force.
 
 ### 6. Keep runtime lifecycle and protocol output deterministic
 

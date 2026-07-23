@@ -1,0 +1,24 @@
+# The --config file is OPTIONAL. You can start with environment variables
+# only (HIVE_HOST, HIVE_PORT, HIVE_DATABASE, HIVE_USERNAME, HIVE_PASSWORD,
+# HIVE_CACHE_TTL_SECONDS) and omit --config entirely. When both are present,
+# environment variables take precedence over these file values.
+# Hive plugin configuration example (YAML).
+#
+# Values under `secrets` are ENVIRONMENT VARIABLE NAMES, never credential
+# values. The runtime reads the actual username/password from those variables
+# at startup and never writes them to stdout, logs, or MCP results.
+#
+# Export before starting:
+#   export HIVE_USERNAME=<your-ldap-user>
+#   export HIVE_PASSWORD=<your-ldap-password>
+
+version: 1
+plugin: hive
+settings:
+  host: hive.example.internal
+  port: 10001
+  database: catalog
+  cache_ttl_seconds: 60
+secrets:
+  username: HIVE_USERNAME
+  password: HIVE_PASSWORD
