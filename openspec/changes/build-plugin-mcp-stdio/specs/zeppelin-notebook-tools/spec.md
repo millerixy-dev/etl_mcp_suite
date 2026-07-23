@@ -1,5 +1,86 @@
 ## ADDED Requirements
 
+### Requirement: Validate a fixed Zeppelin V1 configuration
+The Zeppelin plugin SHALL accept only these non-sensitive settings: `base_url`, `request_timeout_seconds`, `max_response_bytes`, `max_result_bytes`, `max_notebook_name_chars`, `max_paragraph_title_chars`, `max_paragraph_body_bytes`, `max_opaque_id_chars`, and `allowed_interpreters`. `base_url` MUST be an absolute HTTP or HTTPS URL without user information, query, or fragment; it MAY include a reverse-proxy path and SHALL be normalized without a trailing slash. Numeric settings SHALL use strict numeric types and the following inclusive ranges and defaults: timeout greater than zero and at most 300 seconds (default 30), response bytes 1 through 8 MiB (default 1 MiB), result bytes 1 through 1 MiB (default 65,536), notebook and paragraph-title characters 1 through 1,024 (default 256 each), paragraph-body bytes 1 through 1 MiB (default 65,536), and opaque-ID characters 1 through 4,096 (default 512).
+
+`allowed_interpreters` SHALL default to an immutable empty sequence. Each entry MUST match `[A-Za-z][A-Za-z0-9_.-]{0,63}`. Exact duplicate entries are invalid; matching and uniqueness are case-sensitive. The configuration SHALL reject unknown fields and coercion from strings, booleans, or other incompatible scalar types.
+
+#### Scenario: Load equivalent Zeppelin settings
+- **WHEN** equivalent valid Zeppelin settings are supplied in version 1 YAML and JSON files
+- **THEN** they produce equivalent validated settings without making a network request
+
+#### Scenario: Default to deny
+- **WHEN** `allowed_interpreters` is omitted
+- **THEN** the validated value is an empty immutable sequence
+
+#### Scenario: Reject unsafe configuration
+- **WHEN** a URL contains credentials, query, fragment, or unsupported scheme, a limit is outside its approved range, an interpreter is malformed or duplicated, or an unknown field is present
+- **THEN** startup fails with a safe `CONFIG_ERROR` that does not echo the rejected value
+
+### Requirement: Support only optional paired Zeppelin session credentials
+The Zeppelin V1 secret schema SHALL contain only optional `username` and `password` environment-backed secret references. Both fields MUST be absent for unauthenticated access or both MUST be present for adapter-managed Zeppelin session login; a partial pair is invalid. An empty `secrets` object is valid. Token, basic-auth, cookie, and caller-supplied authentication modes are not supported in V1.
+
+#### Scenario: Resolve a configured login pair
+- **WHEN** both secret fields reference existing environment variables
+- **THEN** the resolved values are available only to the adapter and are redacted from representations and validation failures
+
+#### Scenario: Use no authentication
+- **WHEN** `secrets` is an empty object
+- **THEN** configuration validation succeeds without creating an HTTP client or making a request
+
+#### Scenario: Reject a partial login pair
+- **WHEN** only `username` or only `password` is configured
+- **THEN** startup fails with a safe `CONFIG_ERROR`
+
+### Requirement: Validate bounded Zeppelin tool inputs without normalization
+Notebook names MUST contain at least one non-whitespace character and fit `max_notebook_name_chars`; their original text SHALL be preserved. Paragraph titles MAY be empty and MUST fit `max_paragraph_title_chars`; their original text SHALL be preserved. Paragraph bodies MUST be non-empty and fit `max_paragraph_body_bytes` when encoded as UTF-8. Interpreter names MUST use the configured safe syntax and SHALL later be matched exactly against the case-sensitive allowlist.
+
+Opaque notebook and paragraph IDs MUST be non-empty, fit `max_opaque_id_chars`, and contain no Unicode control character. Other opaque syntax, including slash, traversal, query, and fragment characters, is permitted as data and MUST later be percent-encoded by the adapter as one path segment with no safe characters. Validation failures SHALL use fixed messages and MUST NOT echo rejected input.
+
+#### Scenario: Preserve valid caller text
+- **WHEN** a valid notebook name or paragraph title contains leading or trailing whitespace
+- **THEN** validation returns the original text unchanged
+
+#### Scenario: Bound UTF-8 paragraph content
+- **WHEN** a non-ASCII paragraph body exceeds its configured byte limit after UTF-8 encoding
+- **THEN** the request is rejected before any network access
+
+#### Scenario: Preserve opaque syntax for safe encoding
+- **WHEN** a bounded opaque ID contains slash, traversal, query, or fragment syntax but no control character
+- **THEN** input validation preserves it and path-segment encoding escapes all of that syntax
+
+### Requirement: Use fixed normalized Zeppelin result models
+The Zeppelin plugin SHALL use strict immutable JSON-serializable result models with these exact public fields:
+
+- create notebook: `notebook_id`, `name`;
+- add paragraph: `notebook_id`, `paragraph_id`, `title`, `interpreter`;
+- run acknowledgement: `notebook_id`, `paragraph_id`, `status`;
+- paragraph status: `notebook_id`, `paragraph_id`, `status`;
+- output item: `kind`, `text`, where `kind` is exactly `TEXT`, `HTML`, `TABLE`, `IMAGE`, or `UNKNOWN` and text is bounded;
+- safe failure detail: `message`, bounded to 4,096 UTF-8 bytes;
+- paragraph result: `notebook_id`, `paragraph_id`, `status`, `outputs`, `error`, and `truncated`.
+
+Result fields SHALL reject unknown fields and coercion. A paragraph result SHALL represent only terminal states: `FINISHED` has no error, while `ERROR` or `CANCELLED` has no successful outputs and includes safe failure detail. Output text is individually bounded by the absolute 1 MiB V1 ceiling, while the adapter SHALL enforce the configured total `max_result_bytes`. Public models MUST NOT contain raw upstream state, headers, cookies, credentials, or authorization data.
+
+#### Scenario: Serialize a safe result
+- **WHEN** a typed Zeppelin result is serialized for an MCP response
+- **THEN** it contains only the fixed public fields and normalized enum values
+
+#### Scenario: Reject an inconsistent paragraph result
+- **WHEN** a result combines a non-terminal state, successful output with an error state, or an error with `FINISHED`
+- **THEN** model validation fails before MCP serialization
+
+### Requirement: Normalize Zeppelin paragraph states with a closed mapping
+Public paragraph status SHALL be exactly `PENDING`, `RUNNING`, `FINISHED`, `ERROR`, `CANCELLED`, or `UNKNOWN`. Matching SHALL ignore surrounding whitespace and ASCII case. Upstream `READY` and `PENDING` map to `PENDING`; `RUNNING` maps to `RUNNING`; `FINISHED` maps to `FINISHED`; `ERROR` maps to `ERROR`; and `ABORT`, `ABORTED`, `CANCEL`, and `CANCELLED` map to `CANCELLED`. Every other value maps to `UNKNOWN`. Raw upstream state SHALL NOT be returned in a public model; an adapter may log only a separately bounded, control-free state value.
+
+#### Scenario: Normalize a known state
+- **WHEN** Zeppelin reports any state in the fixed mapping
+- **THEN** the corresponding normalized status is returned
+
+#### Scenario: Normalize an unfamiliar or malformed state
+- **WHEN** Zeppelin reports any other string or a non-string state
+- **THEN** normalization returns `UNKNOWN` without including the raw value in a result
+
 ### Requirement: Expose exactly the Zeppelin notebook lifecycle tools
 The Zeppelin plugin SHALL expose exactly `create_notebook`, `add_paragraph`, `run_paragraph`, `get_paragraph_status`, and `get_paragraph_result`.
 

@@ -204,6 +204,14 @@ The default allowed interpreter list is empty, forcing deployment configuration 
 
 Automatic wait-until-complete behavior was rejected because it can consume the MCP host's entire tool timeout. Separate run, status, and result tools let the agent control polling.
 
+The V1 Zeppelin settings surface is closed: `base_url`; timeout (default 30 seconds, maximum 300); raw-response bound (default 1 MiB, maximum 8 MiB); normalized-result bound (default 65,536 bytes, maximum 1 MiB); notebook-name and paragraph-title character bounds (default 256, maximum 1,024); paragraph-body byte bound (default 65,536, maximum 1 MiB); opaque-ID character bound (default 512, maximum 4,096); and a case-sensitive interpreter allowlist. Interpreter names use `[A-Za-z][A-Za-z0-9_.-]{0,63}` and exact duplicates fail validation. The base URL is limited to HTTP(S), permits a reverse-proxy path, rejects user information/query/fragment, and is stored without a trailing slash.
+
+V1 supports either no authentication or one environment-resolved `username`/`password` pair used for Zeppelin session login. Partial pairs and additional authentication fields fail closed. This intentionally excludes token, basic-auth, and caller-supplied cookie modes until a later spec validates their upstream behavior.
+
+Caller text is validated without silent normalization: notebook names must be non-blank, titles may be empty, bodies are limited by UTF-8 bytes, and all original valid text is preserved. Opaque IDs reject empty/control-character values but otherwise preserve URL-like syntax; the HTTP adapter must encode each ID with path-segment quoting whose safe set is empty. The public status mapping is closed: `READY`/`PENDING` to `PENDING`, `RUNNING`, `FINISHED`, `ERROR`, `ABORT`/`ABORTED`/`CANCEL`/`CANCELLED` to `CANCELLED`, and every unfamiliar value to `UNKNOWN`. Raw upstream states never enter public result models.
+
+Zeppelin result values are strict immutable models. Create, add, run, and status results contain only their approved IDs and caller-facing fields. Paragraph output kinds normalize to `TEXT`, `HTML`, `TABLE`, `IMAGE`, or `UNKNOWN`; output text is bounded by the 1 MiB absolute ceiling and the adapter applies the smaller configured aggregate result bound. Safe failure detail contains only a message bounded to 4,096 UTF-8 bytes. A terminal paragraph result contains outputs only for `FINISHED`, or safe error detail only for `ERROR`/`CANCELLED`, plus an accurate `truncated` flag.
+
 ### 10. Keep DolphinScheduler v1 observational
 
 The DolphinScheduler adapter exposes a single `get_server_status` tool. It calls the configured status path relative to the configured base URL and returns a normalized result containing availability, reported status, and safe version/details fields when present. It must not return raw headers, tokens, cookies, or unbounded upstream bodies.
