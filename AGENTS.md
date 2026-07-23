@@ -10,19 +10,35 @@
 
 ## Required Apply Workflow
 
-- Start or resume implementation through `opsx-superpowered-apply`; do not bypass the official OpenSpec Apply protocol.
-- Before editing implementation code, run:
+### Default skill
 
-  ```bash
-  openspec status --change "<change>" --json
-  openspec instructions apply --change "<change>" --json
-  ```
+The default skill for the OpenSpec apply phase is `opsx-superpowered-apply`, used as a **bridge**:
+
+- **OpenSpec is the orchestrator.** Preserve the official `openspec-apply-change` behavior for change selection, status, apply instructions, preflight, context-file reading, progress display, and output format. Do not bypass the official OpenSpec Apply protocol.
+- **Superpowers is the per-task execution engine.** Implement each task through a Superpowers micro-plan (`superpowers:writing-plans`) followed by TDD execution (`superpowers:executing-plans`, or `superpowers:subagent-driven-development` when subagent tools are available), debugging via `superpowers:systematic-debugging` on failure, and completion evidence via `superpowers:verification-before-completion`. Delegate to these skills; do not restate their rules in the bridge.
+
+### Preflight (before editing implementation code)
+
+Keep the store-selection handling from `openspec-apply-change` verbatim (discover a store id with `openspec store list --json` and pass `--store <id>` on every spec-reading/writing command when applicable). Run:
+
+```bash
+openspec status --change "<change>" --json
+openspec instructions apply --change "<change>" --json
+openspec validate "<change>"
+```
+
+`openspec validate` is required in preflight to catch delta-internal contradictions and cross-change spec conflicts before any code is written.
 
 - Use `changeRoot`, `artifactPaths`, `contextFiles`, progress, and instructions returned by the CLI. Do not assume paths.
 - Read every returned context file before coding.
 - Work in `tasks.md` order unless dependencies and the Apply instructions explicitly permit another order.
-- Mark an OpenSpec task complete only after its implementation, required docs, and task-specific verification have all passed.
+- Decide the default execution mode (subagent-driven vs inline executing-plans) once in preflight. Tightly-coupled and shared-contract tasks still run serial TDD first regardless of the chosen mode, per Development Discipline.
+
+### Per-task loop
+
+For each pending task: read the directly relevant files; write a micro-plan scoped to that single task; execute it RED -> GREEN -> REFACTOR; run fresh verification this turn; then gate the OpenSpec checkbox. Mark an OpenSpec task complete only after its implementation, required docs, and task-specific verification have all passed - code-done is not task-done.
 - If implementation reveals a missing or ambiguous requirement, stop that task and update the OpenSpec artifacts first.
+- Before claiming change completion, run `openspec validate --changes` and `openspec validate --specs` to catch spec overlaps with other active or archived changes.
 
 ## Development Discipline
 
