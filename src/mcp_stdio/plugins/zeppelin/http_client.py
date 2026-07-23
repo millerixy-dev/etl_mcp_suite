@@ -50,6 +50,7 @@ class ZeppelinHttpClient:
                 base_url=self._settings.base_url,
                 timeout=self._settings.request_timeout_seconds,
                 transport=self._transport,
+                trust_env=False,
             )
         return self._client
 
