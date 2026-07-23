@@ -13,7 +13,7 @@ from mcp_stdio.plugins.zeppelin.models import (
     ParagraphStatusResult,
     RunParagraphResult,
     SafeErrorDetail,
-    validate_interpreter_name,
+    parse_paragraph_interpreter,
     validate_notebook_name,
     validate_opaque_id,
     validate_paragraph_body,
@@ -86,17 +86,16 @@ class ZeppelinNotebookService:
         self,
         notebook_id: object,
         title: object,
-        interpreter: object,
         body: object,
     ) -> AddParagraphResult:
         try:
             nb = validate_opaque_id(notebook_id, max_chars=self._max_id)
             ttl = validate_paragraph_title(title, max_chars=self._max_title)
-            intr = validate_interpreter_name(interpreter)
             bdy = validate_paragraph_body(body, max_bytes=self._max_body)
+            intr = parse_paragraph_interpreter(bdy)
         except ValueError:
             raise _invalid_input(ToolOperation.ADD_PARAGRAPH) from None
-        if intr not in self._allowed:
+        if intr is None or intr not in self._allowed:
             raise _invalid_input(ToolOperation.ADD_PARAGRAPH)
         try:
             _gate_paragraph_content(
@@ -107,7 +106,7 @@ class ZeppelinNotebookService:
             )
         except ValueError:
             raise _invalid_input(ToolOperation.ADD_PARAGRAPH) from None
-        paragraph_id = await self._gateway.add_paragraph(nb, ttl, intr, bdy)
+        paragraph_id = await self._gateway.add_paragraph(nb, ttl, bdy)
         return AddParagraphResult(
             notebook_id=nb,
             paragraph_id=paragraph_id,

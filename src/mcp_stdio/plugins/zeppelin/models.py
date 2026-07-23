@@ -401,6 +401,28 @@ def validate_sql_write_target(body: str, allowed_databases: tuple[str, ...]) -> 
     return body
 
 
+def parse_paragraph_interpreter(body: str) -> str | None:
+    """Return the interpreter declared by the body's leading shebang.
+
+    The shebang is the first non-empty line when it has the form
+    ``%<interpreter>`` (no space between ``%`` and the interpreter name).
+    Returns ``None`` when the first non-empty line is not a shebang. Raises
+    ``ValueError`` for a present-but-malformed shebang so callers fail closed.
+    """
+
+    for line in body.splitlines():
+        if not line.strip():
+            continue
+        stripped = line.lstrip()
+        if not stripped.startswith("%"):
+            return None
+        rest = stripped[1:]
+        if not _INTERPRETER_PATTERN.fullmatch(rest):
+            raise ValueError("interpreter shebang is malformed")
+        return rest
+    return None
+
+
 def validate_sh_command(body: str, allowed_commands: tuple[str, ...]) -> str:
     """Reject sh paragraph bodies whose first command is not allowlisted."""
 

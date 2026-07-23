@@ -70,7 +70,7 @@ async def test_complete_zeppelin_lifecycle() -> None:
         notebook_id = await adapter.create_notebook(notebook_name)
         assert notebook_id
 
-        paragraph_id = await adapter.add_paragraph(notebook_id, "probe", "sh", "echo hello")
+        paragraph_id = await adapter.add_paragraph(notebook_id, "probe", "%sh\necho hello")
         assert paragraph_id
 
         run_status = await adapter.run_paragraph(notebook_id, paragraph_id)

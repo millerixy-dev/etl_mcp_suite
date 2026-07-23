@@ -75,13 +75,12 @@ class ZeppelinToolAdapter:
         self,
         notebook_id: ZeppelinToolString,
         title: ZeppelinToolString,
-        interpreter: ZeppelinToolString,
         body: ZeppelinToolString,
     ) -> AddParagraphResult:
         """Add an allowlisted paragraph to an existing notebook."""
 
         try:
-            return await self._service.add_paragraph(notebook_id, title, interpreter, body)
+            return await self._service.add_paragraph(notebook_id, title, body)
         except ZeppelinGatewayError as error:
             self._raise_tool_error(error.tool_error)
         except Exception as error:
@@ -114,9 +113,7 @@ class ZeppelinToolAdapter:
             self._raise_tool_error(error.tool_error)
         except Exception as error:
             self._raise_tool_error(
-                unexpected_tool_error(
-                    error, operation=ToolOperation.GET_PARAGRAPH_STATUS
-                )
+                unexpected_tool_error(error, operation=ToolOperation.GET_PARAGRAPH_STATUS)
             )
 
     async def get_paragraph_result(
@@ -130,14 +127,10 @@ class ZeppelinToolAdapter:
             self._raise_tool_error(error.tool_error)
         except Exception as error:
             self._raise_tool_error(
-                unexpected_tool_error(
-                    error, operation=ToolOperation.GET_PARAGRAPH_RESULT
-                )
+                unexpected_tool_error(error, operation=ToolOperation.GET_PARAGRAPH_RESULT)
             )
 
     def _raise_tool_error(self, error: ToolError) -> NoReturn:
         payload = error.to_dict(secret_values=self._secret_values)
-        serialized = json.dumps(
-            payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")
-        )
+        serialized = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
         raise FastMCPToolError(serialized)

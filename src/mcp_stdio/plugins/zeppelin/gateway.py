@@ -38,7 +38,6 @@ class ZeppelinGateway(Protocol):
         self,
         notebook_id: str,
         title: str,
-        interpreter: str,
         body: str,
     ) -> str:
         """Add a paragraph and return its opaque ID."""
@@ -50,9 +49,7 @@ class ZeppelinGateway(Protocol):
 
         ...
 
-    async def get_paragraph_status(
-        self, notebook_id: str, paragraph_id: str
-    ) -> ParagraphStatus:
+    async def get_paragraph_status(self, notebook_id: str, paragraph_id: str) -> ParagraphStatus:
         """Return the current normalized paragraph status."""
 
         ...

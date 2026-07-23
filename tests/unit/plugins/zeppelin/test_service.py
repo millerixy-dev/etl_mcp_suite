@@ -25,7 +25,9 @@ class FakeGateway:
         self.list_notebooks_result: tuple = ()
         self.run_status = ParagraphStatus.PENDING
         self.status_result = ParagraphStatus.FINISHED
-        self.result_outputs: tuple[OutputItem, ...] = (OutputItem(kind=OutputKind.TEXT, text="ok"),)
+        self.result_outputs: tuple[OutputItem, ...] = (
+            OutputItem(kind=OutputKind.TEXT, text="ok"),
+        )
         self.result_error: SafeErrorDetail | None = None
         self.result_truncated = False
 
@@ -37,15 +39,17 @@ class FakeGateway:
         self.calls.append(("create_notebook", name))
         return self.create_result
 
-    async def add_paragraph(self, notebook_id: str, title: str, interpreter: str, body: str) -> str:
-        self.calls.append(("add_paragraph", notebook_id, title, interpreter, body))
+    async def add_paragraph(self, notebook_id: str, title: str, body: str) -> str:
+        self.calls.append(("add_paragraph", notebook_id, title, body))
         return self.add_result
 
     async def run_paragraph(self, notebook_id: str, paragraph_id: str) -> ParagraphStatus:
         self.calls.append(("run_paragraph", notebook_id, paragraph_id))
         return self.run_status
 
-    async def get_paragraph_status(self, notebook_id: str, paragraph_id: str) -> ParagraphStatus:
+    async def get_paragraph_status(
+        self, notebook_id: str, paragraph_id: str
+    ) -> ParagraphStatus:
         self.calls.append(("get_paragraph_status", notebook_id, paragraph_id))
         return self.status_result
 
@@ -101,26 +105,42 @@ async def test_create_notebook_rejects_empty_name() -> None:
 async def test_add_paragraph_rejects_non_allowlisted_interpreter_before_network() -> None:
     service, gateway = _service(allowed_interpreters=("spark",))
     with pytest.raises(ZeppelinGatewayError) as exc_info:
-        await service.add_paragraph("nb-1", "title", "sh", "body")
+        await service.add_paragraph("nb-1", "title", "%sh\nbody")
+    assert exc_info.value.tool_error.category == ErrorCategory.INVALID_INPUT
+    assert gateway.calls == []
+
+
+async def test_add_paragraph_rejects_body_without_shebang_before_network() -> None:
+    service, gateway = _service(allowed_interpreters=("spark",))
+    with pytest.raises(ZeppelinGatewayError) as exc_info:
+        await service.add_paragraph("nb-1", "title", "SELECT 1")
     assert exc_info.value.tool_error.category == ErrorCategory.INVALID_INPUT
     assert gateway.calls == []
 
 
 async def test_add_paragraph_returns_result() -> None:
     service, gateway = _service()
-    result = await service.add_paragraph("nb-1", "title", "spark", "body")
+    result = await service.add_paragraph("nb-1", "title", "%spark\nbody")
     assert result.notebook_id == "nb-1"
     assert result.paragraph_id == "p-1"
     assert result.title == "title"
     assert result.interpreter == "spark"
 
 
+async def test_add_paragraph_sends_body_verbatim() -> None:
+    service, gateway = _service()
+    body = "%spark\nval x = 1"
+    await service.add_paragraph("nb-1", "title", body)
+    assert gateway.calls == [("add_paragraph", "nb-1", "title", body)]
+
+
 async def test_add_paragraph_allows_sql_write_to_approved_database() -> None:
     service, gateway = _service(allowed_interpreters=("spark.sql",))
     result = await service.add_paragraph(
-        "nb-1", "title", "spark.sql", "INSERT INTO tmp_dc_ep.my_table VALUES (1)"
+        "nb-1", "title", "%spark.sql\nINSERT INTO tmp_dc_ep.my_table VALUES (1)"
     )
     assert result.paragraph_id == "p-1"
+    assert result.interpreter == "spark.sql"
     assert any(call[0] == "add_paragraph" for call in gateway.calls)
 
 
@@ -128,7 +148,7 @@ async def test_add_paragraph_rejects_sql_write_to_non_approved_database_before_n
     service, gateway = _service(allowed_interpreters=("spark.sql",))
     with pytest.raises(ZeppelinGatewayError) as exc_info:
         await service.add_paragraph(
-            "nb-1", "title", "spark.sql", "INSERT INTO other_db.my_table VALUES (1)"
+            "nb-1", "title", "%spark.sql\nINSERT INTO other_db.my_table VALUES (1)"
         )
     assert exc_info.value.tool_error.category == ErrorCategory.INVALID_INPUT
     assert gateway.calls == []
@@ -136,37 +156,46 @@ async def test_add_paragraph_rejects_sql_write_to_non_approved_database_before_n
 
 async def test_add_paragraph_allows_sql_read_against_any_database() -> None:
     service, gateway = _service(allowed_interpreters=("spark.sql",))
-    result = await service.add_paragraph("nb-1", "title", "spark.sql", "SELECT * FROM any_db.t")
+    result = await service.add_paragraph(
+        "nb-1", "title", "%spark.sql\nSELECT * FROM any_db.t"
+    )
     assert result.paragraph_id == "p-1"
 
 
 async def test_add_paragraph_rejects_unqualified_sql_write_before_network() -> None:
     service, gateway = _service(allowed_interpreters=("spark.sql",))
     with pytest.raises(ZeppelinGatewayError) as exc_info:
-        await service.add_paragraph("nb-1", "title", "spark.sql", "INSERT INTO my_table VALUES (1)")
+        await service.add_paragraph(
+            "nb-1", "title", "%spark.sql\nINSERT INTO my_table VALUES (1)"
+        )
     assert exc_info.value.tool_error.category == ErrorCategory.INVALID_INPUT
     assert gateway.calls == []
 
 
 async def test_add_paragraph_rejects_non_allowlisted_sh_command_before_network() -> None:
-    service, gateway = _service(allowed_interpreters=("sh",), sh_allowed_commands=("echo", "cat"))
+    service, gateway = _service(
+        allowed_interpreters=("sh",), sh_allowed_commands=("echo", "cat")
+    )
     with pytest.raises(ZeppelinGatewayError) as exc_info:
-        await service.add_paragraph("nb-1", "title", "sh", "rm -rf /tmp/x")
+        await service.add_paragraph("nb-1", "title", "%sh\nrm -rf /tmp/x")
     assert exc_info.value.tool_error.category == ErrorCategory.INVALID_INPUT
     assert gateway.calls == []
 
 
 async def test_add_paragraph_allows_allowlisted_sh_command() -> None:
-    service, gateway = _service(allowed_interpreters=("sh",), sh_allowed_commands=("echo", "cat"))
-    result = await service.add_paragraph("nb-1", "title", "sh", "echo hello")
+    service, gateway = _service(
+        allowed_interpreters=("sh",), sh_allowed_commands=("echo", "cat")
+    )
+    result = await service.add_paragraph("nb-1", "title", "%sh\necho hello")
     assert result.paragraph_id == "p-1"
+    assert result.interpreter == "sh"
     assert any(call[0] == "add_paragraph" for call in gateway.calls)
 
 
 async def test_add_paragraph_denies_all_sh_commands_by_default() -> None:
     service, gateway = _service(allowed_interpreters=("sh",))
     with pytest.raises(ZeppelinGatewayError) as exc_info:
-        await service.add_paragraph("nb-1", "title", "sh", "echo hello")
+        await service.add_paragraph("nb-1", "title", "%sh\necho hello")
     assert exc_info.value.tool_error.category == ErrorCategory.INVALID_INPUT
     assert gateway.calls == []
 
@@ -197,16 +226,9 @@ async def test_list_notebooks_returns_tree() -> None:
 
     service, gateway = _service()
     gateway.list_notebooks_result = (
-        NotebookTreeNode(
-            name="team",
-            path="/team",
-            notebook_id=None,
-            children=(
-                NotebookTreeNode(
-                    name="note-a", path="/team/note-a", notebook_id="nb-1", children=()
-                ),
-            ),
-        ),
+        NotebookTreeNode(name="team", path="/team", notebook_id=None, children=(
+            NotebookTreeNode(name="note-a", path="/team/note-a", notebook_id="nb-1", children=()),
+        )),
     )
     result = await service.list_notebooks()
     assert len(result.nodes) == 1

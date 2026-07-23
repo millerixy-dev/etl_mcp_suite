@@ -53,3 +53,12 @@ def test_zeppelin_registers_exact_five_tool_set(tmp_path: Path) -> None:
         "run_paragraph",
     ]
     builtins.__import__ = original_import
+
+
+def test_add_paragraph_takes_no_interpreter_input() -> None:
+    import inspect
+
+    from mcp_stdio.plugins.zeppelin.tools import ZeppelinToolAdapter
+
+    params = set(inspect.signature(ZeppelinToolAdapter.add_paragraph).parameters) - {"self"}
+    assert params == {"notebook_id", "title", "body"}

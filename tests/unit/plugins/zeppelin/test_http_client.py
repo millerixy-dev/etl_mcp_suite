@@ -72,9 +72,26 @@ async def test_add_paragraph_encodes_opaque_notebook_id_in_path() -> None:
         return _ok("paragraph_123")
 
     adapter = _adapter(_mock_transport(handler))
-    pid = await adapter.add_paragraph("note/1", "title", "spark", "body")
+    pid = await adapter.add_paragraph("note/1", "title", "%spark\nbody")
     assert pid == "paragraph_123"
     assert seen_paths[-1] == "/api/notebook/note%2F1/paragraph"
+    await adapter.close()
+
+
+async def test_add_paragraph_sends_body_verbatim_without_injecting_shebang() -> None:
+    seen_payloads: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json as _json
+
+        seen_payloads.append(_json.loads(request.content))
+        return _ok("paragraph_456")
+
+    adapter = _adapter(_mock_transport(handler))
+    body = "%spark.sql\nSELECT 1"
+    pid = await adapter.add_paragraph("note-1", "title", body)
+    assert pid == "paragraph_456"
+    assert seen_payloads[-1] == {"title": "title", "text": body}
     await adapter.close()
 
 

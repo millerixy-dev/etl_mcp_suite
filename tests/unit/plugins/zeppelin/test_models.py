@@ -19,6 +19,7 @@ from mcp_stdio.plugins.zeppelin.models import (
     SafeErrorDetail,
     encode_opaque_id,
     normalize_paragraph_status,
+    parse_paragraph_interpreter,
     truncate_utf8,
     validate_interpreter_name,
     validate_notebook_name,
@@ -345,3 +346,21 @@ def test_validate_sh_command_denies_all_commands_by_default() -> None:
 def test_validate_sh_command_skips_comment_lines_before_first_token() -> None:
     body = "# a comment\necho hello"
     assert validate_sh_command(body, ("echo",)) == body
+
+
+def test_parse_paragraph_interpreter_extracts_leading_shebang() -> None:
+    assert parse_paragraph_interpreter("%spark.sql\nSELECT 1") == "spark.sql"
+    assert parse_paragraph_interpreter("%sh\necho hello") == "sh"
+    assert parse_paragraph_interpreter("  %md\n# title") == "md"
+
+
+def test_parse_paragraph_interpreter_returns_none_without_shebang() -> None:
+    assert parse_paragraph_interpreter("SELECT * FROM t") is None
+    assert parse_paragraph_interpreter("# comment\necho hi") is None
+
+
+def test_parse_paragraph_interpreter_rejects_malformed_shebang() -> None:
+    with pytest.raises(ValueError):
+        parse_paragraph_interpreter("%1bad\nbody")
+    with pytest.raises(ValueError):
+        parse_paragraph_interpreter("% spark\nbody")

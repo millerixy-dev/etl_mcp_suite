@@ -119,17 +119,15 @@ class ZeppelinHttpClient:
         self,
         notebook_id: str,
         title: str,
-        interpreter: str,
         body: str,
     ) -> str:
         encoded_nb = self._encode_id(notebook_id)
         client = await self._ensure_authenticated()
-        text = body if not interpreter else f"%{interpreter}\n{body}"
         result = await self._request_json(
             client,
             "POST",
             f"/notebook/{encoded_nb}/paragraph",
-            json_payload={"title": title, "text": text},
+            json_payload={"title": title, "text": body},
             operation=ToolOperation.ADD_PARAGRAPH,
             identifiers={"notebook": notebook_id},
         )
@@ -149,9 +147,7 @@ class ZeppelinHttpClient:
         )
         return ParagraphStatus.PENDING
 
-    async def get_paragraph_status(
-        self, notebook_id: str, paragraph_id: str
-    ) -> ParagraphStatus:
+    async def get_paragraph_status(self, notebook_id: str, paragraph_id: str) -> ParagraphStatus:
         paragraph = await self._fetch_paragraph(notebook_id, paragraph_id)
         return normalize_paragraph_status(paragraph.get("status"))
 
@@ -186,9 +182,7 @@ class ZeppelinHttpClient:
             outputs = tuple(items)
         raw_exception = results.get("exception")
         if raw_exception is not None:
-            exc_text, was_truncated = truncate_utf8(
-                str(raw_exception), max_bytes=max_bytes
-            )
+            exc_text, was_truncated = truncate_utf8(str(raw_exception), max_bytes=max_bytes)
             if was_truncated:
                 truncated = True
             error = SafeErrorDetail(message=exc_text)
@@ -273,13 +267,9 @@ class ZeppelinHttpClient:
                 headers=headers,
             )
         except httpx.ConnectTimeout:
-            raise self._gateway_error(
-                ErrorCategory.TIMEOUT, operation, identifiers
-            ) from None
+            raise self._gateway_error(ErrorCategory.TIMEOUT, operation, identifiers) from None
         except httpx.ReadTimeout:
-            raise self._gateway_error(
-                ErrorCategory.TIMEOUT, operation, identifiers
-            ) from None
+            raise self._gateway_error(ErrorCategory.TIMEOUT, operation, identifiers) from None
         except (httpx.ConnectError, httpx.RemoteProtocolError):
             raise self._gateway_error(
                 ErrorCategory.CONNECTION_FAILED, operation, identifiers
@@ -292,12 +282,14 @@ class ZeppelinHttpClient:
         bounded = await self._bound_response(response)
         if bounded.status_code == 401 or bounded.status_code == 403:
             raise self._gateway_error(
-                ErrorCategory.AUTHENTICATION_FAILED, operation,
+                ErrorCategory.AUTHENTICATION_FAILED,
+                operation,
                 identifiers,
             )
         if bounded.status_code >= 400:
             raise self._gateway_error(
-                ErrorCategory.UPSTREAM_ERROR, operation,
+                ErrorCategory.UPSTREAM_ERROR,
+                operation,
                 identifiers,
             )
         if not expect_body:
@@ -306,7 +298,8 @@ class ZeppelinHttpClient:
             document = bounded.json()
         except Exception:
             raise self._gateway_error(
-                ErrorCategory.UNEXPECTED_RESPONSE, operation,
+                ErrorCategory.UNEXPECTED_RESPONSE,
+                operation,
                 identifiers,
             ) from None
         typed_doc = cast(dict[str, Any], document)
@@ -317,7 +310,8 @@ class ZeppelinHttpClient:
             ) from None
         if status != _ZEPPELIN_STATUS_OK:
             raise self._gateway_error(
-                ErrorCategory.UPSTREAM_ERROR, operation,
+                ErrorCategory.UPSTREAM_ERROR,
+                operation,
                 identifiers,
             )
         return typed_doc.get("body")
