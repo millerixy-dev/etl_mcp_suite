@@ -31,12 +31,16 @@
 
 ## 4. Zeppelin Notebook Plugin
 
-- [ ] 4.1 Add failing tests for Zeppelin configuration, default-empty interpreter allowlist, input size limits, opaque ID encoding, authentication secret resolution, result-size limits, and status normalization.
-- [ ] 4.2 Implement Zeppelin configuration and typed notebook, paragraph, status, output, and error models.
-- [ ] 4.3 Define the Zeppelin gateway and add mock-transport adapter tests for authentication, notebook creation, paragraph creation, execution acknowledgement, status retrieval, result parsing/truncation, HTTP timeouts, and resource cleanup.
-- [ ] 4.4 Implement the asynchronous Zeppelin HTTP adapter with encoded path segments, bounded responses, safe error mapping, and one lazy client per process.
-- [ ] 4.5 Implement and contract-test `create_notebook`, `add_paragraph`, `run_paragraph`, `get_paragraph_status`, and `get_paragraph_result`, including allowlist rejection before network access and the exact five-tool set.
-- [ ] 4.6 Add an opt-in Zeppelin integration test using a dedicated notebook namespace and explicitly allowed test interpreter to cover the complete create/add/run/status/result lifecycle.
+> **SUPERSEDED:** Tasks 4.1-4.6 are delivered by the independent slice
+> `deliver-zeppelin-plugin-slice`. The Zeppelin spec deltas were moved there and
+> the 0.10.1 REST API facts are recorded in that change's design.md.
+
+- [x] 4.1 ~~Add failing tests for Zeppelin configuration...~~ superseded by deliver-zeppelin-plugin-slice
+- [x] 4.2 ~~Implement Zeppelin configuration and typed models...~~ superseded by deliver-zeppelin-plugin-slice
+- [x] 4.3 ~~Define the Zeppelin gateway and mock-transport tests...~~ superseded by deliver-zeppelin-plugin-slice
+- [x] 4.4 ~~Implement the asynchronous Zeppelin HTTP adapter...~~ superseded by deliver-zeppelin-plugin-slice
+- [x] 4.5 ~~Implement and contract-test the five tools...~~ superseded by deliver-zeppelin-plugin-slice
+- [x] 4.6 ~~Add an opt-in Zeppelin integration test...~~ superseded by deliver-zeppelin-plugin-slice
 
 ## 5. DolphinScheduler Status Plugin
 
