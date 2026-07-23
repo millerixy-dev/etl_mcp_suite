@@ -1,0 +1,153 @@
+"""Zeppelin application service tests with a fake gateway."""
+
+from __future__ import annotations
+
+import pytest
+
+from mcp_stdio.core.errors import ErrorCategory
+from mcp_stdio.plugins.zeppelin.gateway import ZeppelinGatewayError
+from mcp_stdio.plugins.zeppelin.models import (
+    OutputItem,
+    OutputKind,
+    ParagraphStatus,
+    SafeErrorDetail,
+)
+from mcp_stdio.plugins.zeppelin.service import ZeppelinNotebookService
+
+
+class FakeGateway:
+    """Stub gateway returning canned results like the HTTP adapter would."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[object, ...]] = []
+        self.create_result = "nb-1"
+        self.add_result = "p-1"
+        self.list_notebooks_result: tuple = ()
+        self.run_status = ParagraphStatus.PENDING
+        self.status_result = ParagraphStatus.FINISHED
+        self.result_outputs: tuple[OutputItem, ...] = (
+            OutputItem(kind=OutputKind.TEXT, text="ok"),
+        )
+        self.result_error: SafeErrorDetail | None = None
+        self.result_truncated = False
+
+    async def list_notebooks(self) -> tuple:
+        self.calls.append(("list_notebooks",))
+        return self.list_notebooks_result
+
+    async def create_notebook(self, name: str) -> str:
+        self.calls.append(("create_notebook", name))
+        return self.create_result
+
+    async def add_paragraph(
+        self, notebook_id: str, title: str, interpreter: str, body: str
+    ) -> str:
+        self.calls.append(("add_paragraph", notebook_id, title, interpreter, body))
+        return self.add_result
+
+    async def run_paragraph(self, notebook_id: str, paragraph_id: str) -> ParagraphStatus:
+        self.calls.append(("run_paragraph", notebook_id, paragraph_id))
+        return self.run_status
+
+    async def get_paragraph_status(
+        self, notebook_id: str, paragraph_id: str
+    ) -> ParagraphStatus:
+        self.calls.append(("get_paragraph_status", notebook_id, paragraph_id))
+        return self.status_result
+
+    async def get_paragraph_result(
+        self, notebook_id: str, paragraph_id: str
+    ) -> tuple[ParagraphStatus, tuple[OutputItem, ...], SafeErrorDetail | None, bool]:
+        self.calls.append(("get_paragraph_result", notebook_id, paragraph_id))
+        return self.status_result, self.result_outputs, self.result_error, self.result_truncated
+
+    async def close(self) -> None:
+        pass
+
+
+def _service(
+    *,
+    allowed_interpreters: tuple[str, ...] = ("spark",),
+    max_notebook_name_chars: int = 256,
+    max_paragraph_title_chars: int = 256,
+    max_paragraph_body_bytes: int = 65_536,
+    max_opaque_id_chars: int = 512,
+) -> tuple[ZeppelinNotebookService, FakeGateway]:
+    gateway = FakeGateway()
+    service = ZeppelinNotebookService(
+        gateway=gateway,
+        allowed_interpreters=allowed_interpreters,
+        max_notebook_name_chars=max_notebook_name_chars,
+        max_paragraph_title_chars=max_paragraph_title_chars,
+        max_paragraph_body_bytes=max_paragraph_body_bytes,
+        max_opaque_id_chars=max_opaque_id_chars,
+    )
+    return service, gateway
+
+
+async def test_create_notebook_returns_result() -> None:
+    service, gateway = _service()
+    result = await service.create_notebook("  my-note  ")
+    assert result.notebook_id == "nb-1"
+    assert result.name == "  my-note  "
+    assert gateway.calls == [("create_notebook", "  my-note  ")]
+
+
+async def test_create_notebook_rejects_empty_name() -> None:
+    service, _ = _service()
+    with pytest.raises(ZeppelinGatewayError) as exc_info:
+        await service.create_notebook("   ")
+    assert exc_info.value.tool_error.category == ErrorCategory.INVALID_INPUT
+
+
+async def test_add_paragraph_rejects_non_allowlisted_interpreter_before_network() -> None:
+    service, gateway = _service(allowed_interpreters=("spark",))
+    with pytest.raises(ZeppelinGatewayError) as exc_info:
+        await service.add_paragraph("nb-1", "title", "sh", "body")
+    assert exc_info.value.tool_error.category == ErrorCategory.INVALID_INPUT
+    assert gateway.calls == []
+
+
+async def test_add_paragraph_returns_result() -> None:
+    service, gateway = _service()
+    result = await service.add_paragraph("nb-1", "title", "spark", "body")
+    assert result.notebook_id == "nb-1"
+    assert result.paragraph_id == "p-1"
+    assert result.title == "title"
+    assert result.interpreter == "spark"
+
+
+async def test_run_paragraph_returns_status() -> None:
+    service, _ = _service()
+    result = await service.run_paragraph("nb-1", "p-1")
+    assert result.status is ParagraphStatus.PENDING
+
+
+async def test_get_paragraph_status_returns_status() -> None:
+    service, _ = _service()
+    result = await service.get_paragraph_status("nb-1", "p-1")
+    assert result.status is ParagraphStatus.FINISHED
+
+
+async def test_get_paragraph_result_returns_result() -> None:
+    service, _ = _service()
+    result = await service.get_paragraph_result("nb-1", "p-1")
+    assert result.status is ParagraphStatus.FINISHED
+    assert len(result.outputs) == 1
+    assert result.error is None
+    assert result.truncated is False
+
+
+async def test_list_notebooks_returns_tree() -> None:
+    from mcp_stdio.plugins.zeppelin.models import NotebookTreeNode
+
+    service, gateway = _service()
+    gateway.list_notebooks_result = (
+        NotebookTreeNode(name="team", path="/team", notebook_id=None, children=(
+            NotebookTreeNode(name="note-a", path="/team/note-a", notebook_id="nb-1", children=()),
+        )),
+    )
+    result = await service.list_notebooks()
+    assert len(result.nodes) == 1
+    assert result.nodes[0].name == "team"
+    assert result.nodes[0].children[0].notebook_id == "nb-1"

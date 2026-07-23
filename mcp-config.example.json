@@ -1,0 +1,38 @@
+{
+  "mcpServers": {
+    "hive": {
+      "command": "/Users/liji/Documents/hive_cli_mcp_stdio/.venv/bin/python",
+      "args": [
+        "-m",
+        "mcp_stdio",
+        "--plugin",
+        "hive"
+      ],
+      "env": {
+        "PYTHONPATH": "/Users/liji/Documents/hive_cli_mcp_stdio/src",
+        "HIVE_HOST": "<hive-host>",
+        "HIVE_PORT": "10000",
+        "HIVE_DATABASE": "default",
+        "HIVE_USERNAME": "<your-ldap-user>",
+        "HIVE_PASSWORD": "<your-ldap-password>"
+      }
+    },
+    "zeppelin": {
+      "command": "/Users/liji/Documents/hive_cli_mcp_stdio/.venv/bin/python",
+      "args": [
+        "-m",
+        "mcp_stdio",
+        "--plugin",
+        "zeppelin"
+      ],
+      "env": {
+        "PYTHONPATH": "/Users/liji/Documents/hive_cli_mcp_stdio/src",
+        "ZEPPELIN_BASE_URL": "http://<zeppelin-host>:<port>/api",
+        "ZEPPELIN_USERNAME": "<your-zeppelin-user>",
+        "ZEPPELIN_PASSWORD": "<your-zeppelin-password>",
+        "ZEPPELIN_ALLOWED_INTERPRETERS": "[\"sh\",\"spark\"]",
+        "NO_PROXY": "<zeppelin-host>"
+      }
+    }
+  }
+}

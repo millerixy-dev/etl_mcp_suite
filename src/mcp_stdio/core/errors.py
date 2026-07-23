@@ -31,6 +31,7 @@ class ToolOperation(str, Enum):
     LIST_DATABASES = "list_databases"
     LIST_TABLES = "list_tables"
     GET_TABLE_SCHEMA = "get_table_schema"
+    LIST_NOTEBOOKS = "list_notebooks"
     CREATE_NOTEBOOK = "create_notebook"
     ADD_PARAGRAPH = "add_paragraph"
     RUN_PARAGRAPH = "run_paragraph"
@@ -58,6 +59,7 @@ _ALLOWED_IDENTIFIER_KEYS: Mapping[ToolOperation, frozenset[str]] = MappingProxyT
         ToolOperation.LIST_DATABASES: frozenset(),
         ToolOperation.LIST_TABLES: frozenset({"database"}),
         ToolOperation.GET_TABLE_SCHEMA: frozenset({"database", "table"}),
+        ToolOperation.LIST_NOTEBOOKS: frozenset(),
         ToolOperation.CREATE_NOTEBOOK: frozenset(),
         ToolOperation.ADD_PARAGRAPH: frozenset({"notebook_id"}),
         ToolOperation.RUN_PARAGRAPH: frozenset({"notebook_id", "paragraph_id"}),

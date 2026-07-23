@@ -51,6 +51,7 @@ def test_tool_operations_are_closed_to_v1_tools_plus_internal_fallback() -> None
 
     assert public_operations == {
         "list_databases",
+        "list_notebooks",
         "list_tables",
         "get_table_schema",
         "create_notebook",

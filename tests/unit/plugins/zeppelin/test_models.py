@@ -74,7 +74,10 @@ def test_opaque_ids_reject_empty_control_or_oversized_values(value: str) -> None
     with pytest.raises(ValueError) as exc_info:
         validate_opaque_id(value, max_chars=512)
 
-    assert value not in str(exc_info.value)
+    # An empty string is trivially a substring of any message; the intent is
+    # that non-empty rejected values are never echoed back.
+    if value:
+        assert value not in str(exc_info.value)
 
 
 @pytest.mark.parametrize(
@@ -240,3 +243,48 @@ def test_output_and_error_text_use_utf8_byte_bounds() -> None:
 def test_utf8_truncation_never_returns_partial_characters() -> None:
     assert truncate_utf8("ab你cd", max_bytes=5) == ("ab你", True)
     assert truncate_utf8("ab你", max_bytes=5) == ("ab你", False)
+
+
+def test_notebook_tree_node_builds_from_flat_paths() -> None:
+    from mcp_stdio.plugins.zeppelin.models import build_notebook_tree
+
+    entries = [
+        ("nb-1", "/team/note-a"),
+        ("nb-2", "/team/note-b"),
+        ("nb-3", "/Untitled Note"),
+    ]
+    tree = build_notebook_tree(entries)
+
+    assert isinstance(tree, tuple)
+    # Root should have "team" folder and "Untitled Note" leaf
+    root_names = {node.name for node in tree}
+    assert root_names == {"team", "Untitled Note"}
+
+    team = next(n for n in tree if n.name == "team")
+    assert team.notebook_id is None
+    assert len(team.children) == 2
+    child_names = {c.name for c in team.children}
+    assert child_names == {"note-a", "note-b"}
+    for child in team.children:
+        assert child.notebook_id is not None
+        assert child.children == ()
+
+    untitled = next(n for n in tree if n.name == "Untitled Note")
+    assert untitled.notebook_id == "nb-3"
+    assert untitled.children == ()
+
+
+def test_notebook_tree_node_empty_list() -> None:
+    from mcp_stdio.plugins.zeppelin.models import build_notebook_tree
+
+    assert build_notebook_tree(()) == ()
+
+
+def test_notebook_tree_node_is_frozen_and_json_serializable() -> None:
+    from mcp_stdio.plugins.zeppelin.models import build_notebook_tree
+
+    tree = build_notebook_tree((("nb-1", "/a/b"),))
+    data = [node.model_dump(mode="json") for node in tree]
+    assert data[0]["name"] == "a"
+    assert data[0]["notebook_id"] is None
+    assert data[0]["children"][0]["notebook_id"] == "nb-1"
