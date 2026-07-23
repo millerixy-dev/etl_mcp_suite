@@ -25,6 +25,8 @@ from mcp_stdio.plugins.zeppelin.models import (
     validate_opaque_id,
     validate_paragraph_body,
     validate_paragraph_title,
+    validate_sh_command,
+    validate_sql_write_target,
 )
 
 
@@ -288,3 +290,58 @@ def test_notebook_tree_node_is_frozen_and_json_serializable() -> None:
     assert data[0]["name"] == "a"
     assert data[0]["notebook_id"] is None
     assert data[0]["children"][0]["notebook_id"] == "nb-1"
+
+
+def test_validate_sql_write_target_allows_approved_database_write() -> None:
+    body = "INSERT INTO tmp_dc_ep.my_table VALUES (1)"
+    assert validate_sql_write_target(body, ("tmp_dc_ep",)) == body
+
+
+def test_validate_sql_write_target_allows_insert_overwrite_approved() -> None:
+    body = "INSERT OVERWRITE TABLE tmp_dc_ep.my_table SELECT 1"
+    assert validate_sql_write_target(body, ("tmp_dc_ep",)) == body
+
+
+def test_validate_sql_write_target_rejects_non_approved_database_write() -> None:
+    with pytest.raises(ValueError):
+        validate_sql_write_target("INSERT INTO other_db.my_table VALUES (1)", ("tmp_dc_ep",))
+
+
+def test_validate_sql_write_target_allows_read_against_any_database() -> None:
+    body = "SELECT * FROM any_db.my_table"
+    assert validate_sql_write_target(body, ("tmp_dc_ep",)) == body
+
+
+def test_validate_sql_write_target_fails_closed_on_unqualified_write() -> None:
+    with pytest.raises(ValueError):
+        validate_sql_write_target("INSERT INTO my_table VALUES (1)", ("tmp_dc_ep",))
+
+
+def test_validate_sql_write_target_rejects_mixed_statement_set() -> None:
+    with pytest.raises(ValueError):
+        validate_sql_write_target("SELECT 1; INSERT INTO other_db.t VALUES (1)", ("tmp_dc_ep",))
+
+
+def test_validate_sql_write_target_is_case_insensitive_and_ignores_comments() -> None:
+    body = "-- drop comment\ninsert into tmp_dc_ep.t values (1)"
+    assert validate_sql_write_target(body, ("tmp_dc_ep",)) == body
+
+
+def test_validate_sh_command_allows_allowlisted_command() -> None:
+    body = "echo hello"
+    assert validate_sh_command(body, ("echo", "cat")) == body
+
+
+def test_validate_sh_command_rejects_non_allowlisted_command() -> None:
+    with pytest.raises(ValueError):
+        validate_sh_command("rm -rf /tmp/x", ("echo", "cat"))
+
+
+def test_validate_sh_command_denies_all_commands_by_default() -> None:
+    with pytest.raises(ValueError):
+        validate_sh_command("echo hello", ())
+
+
+def test_validate_sh_command_skips_comment_lines_before_first_token() -> None:
+    body = "# a comment\necho hello"
+    assert validate_sh_command(body, ("echo",)) == body

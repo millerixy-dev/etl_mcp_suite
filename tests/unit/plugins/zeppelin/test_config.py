@@ -69,6 +69,8 @@ def test_yaml_and_json_load_equivalent_defaults_without_authentication(
     assert expected.max_opaque_id_chars == 512
     assert expected.allowed_interpreters == ()
     assert isinstance(expected.allowed_interpreters, tuple)
+    assert expected.sql_write_allowed_databases == ("tmp_dc_ep",)
+    assert expected.sh_allowed_commands == ()
     assert yaml_config.secrets.username is None
     assert yaml_config.secrets.password is None
 
@@ -97,9 +99,7 @@ def test_configuration_resolves_optional_paired_session_credentials(tmp_path: Pa
 
 
 @pytest.mark.parametrize("field", ["username", "password"])
-def test_configuration_rejects_partial_credentials_safely(
-    tmp_path: Path, field: str
-) -> None:
+def test_configuration_rejects_partial_credentials_safely(tmp_path: Path, field: str) -> None:
     secret_value = "credential-sentinel"
     document = _document()
     document["secrets"] = {field: f"ZEPPELIN_{field.upper()}"}
@@ -163,6 +163,13 @@ def test_allowed_interpreters_are_case_sensitive_unique_and_immutable(
         ("allowed_interpreters", ["1spark"]),
         ("allowed_interpreters", ["s" * 65]),
         ("allowed_interpreters", ["spark", "spark"]),
+        ("sql_write_allowed_databases", "tmp_dc_ep"),
+        ("sql_write_allowed_databases", ["1bad"]),
+        ("sql_write_allowed_databases", ["tmp_dc_ep", "tmp_dc_ep"]),
+        ("sql_write_allowed_databases", ["bad db"]),
+        ("sh_allowed_commands", "echo"),
+        ("sh_allowed_commands", ["bad cmd"]),
+        ("sh_allowed_commands", ["echo", "echo"]),
     ],
 )
 def test_settings_reject_invalid_or_non_strict_values(
@@ -184,9 +191,7 @@ def test_settings_reject_invalid_or_non_strict_values(
     ("section", "field"),
     [("settings", "token"), ("secrets", "cookie")],
 )
-def test_configuration_rejects_unknown_fields(
-    tmp_path: Path, section: str, field: str
-) -> None:
+def test_configuration_rejects_unknown_fields(tmp_path: Path, section: str, field: str) -> None:
     document = _document()
     values = document[section]
     assert isinstance(values, dict)
@@ -211,6 +216,38 @@ def test_non_sensitive_environment_overrides_use_the_same_validation(
     assert loaded.settings.allowed_interpreters == ("spark.sql",)
 
 
+def test_write_safety_settings_load_case_sensitive_unique_and_immutable(
+    tmp_path: Path,
+) -> None:
+    document = _document()
+    settings = document["settings"]
+    assert isinstance(settings, dict)
+    settings["sql_write_allowed_databases"] = ["tmp_dc_ep", "staging_db"]
+    settings["sh_allowed_commands"] = ["echo", "cat"]
+
+    loaded = _load(_write_json(tmp_path / "zeppelin.json", document))
+
+    assert loaded.settings.sql_write_allowed_databases == ("tmp_dc_ep", "staging_db")
+    assert loaded.settings.sh_allowed_commands == ("echo", "cat")
+    assert isinstance(loaded.settings.sql_write_allowed_databases, tuple)
+    assert isinstance(loaded.settings.sh_allowed_commands, tuple)
+
+
+def test_write_safety_settings_support_environment_overrides(
+    tmp_path: Path,
+) -> None:
+    loaded = _load(
+        _write_json(tmp_path / "zeppelin.json", _document()),
+        {
+            "MCP_STDIO__SETTINGS__SQL_WRITE_ALLOWED_DATABASES": '["tmp_dc_ep","staging_db"]',
+            "MCP_STDIO__SETTINGS__SH_ALLOWED_COMMANDS": '["echo"]',
+        },
+    )
+
+    assert loaded.settings.sql_write_allowed_databases == ("tmp_dc_ep", "staging_db")
+    assert loaded.settings.sh_allowed_commands == ("echo",)
+
+
 def test_schema_contains_only_the_approved_v1_fields() -> None:
     assert set(ZeppelinSettings.model_fields) == {
         "base_url",
@@ -222,5 +259,7 @@ def test_schema_contains_only_the_approved_v1_fields() -> None:
         "max_paragraph_body_bytes",
         "max_opaque_id_chars",
         "allowed_interpreters",
+        "sql_write_allowed_databases",
+        "sh_allowed_commands",
     }
     assert set(ZeppelinSecrets.model_fields) == {"username", "password"}

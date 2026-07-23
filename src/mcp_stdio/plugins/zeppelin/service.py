@@ -18,6 +18,8 @@ from mcp_stdio.plugins.zeppelin.models import (
     validate_opaque_id,
     validate_paragraph_body,
     validate_paragraph_title,
+    validate_sh_command,
+    validate_sql_write_target,
 )
 
 
@@ -29,6 +31,19 @@ def _invalid_input(operation: ToolOperation) -> ZeppelinGatewayError:
             retryable=False,
         )
     )
+
+
+def _gate_paragraph_content(
+    interpreter: str,
+    body: str,
+    sql_write_allowed_databases: tuple[str, ...],
+    sh_allowed_commands: tuple[str, ...],
+) -> None:
+    name = interpreter.lower()
+    if "sql" in name:
+        validate_sql_write_target(body, sql_write_allowed_databases)
+    elif interpreter == "sh":
+        validate_sh_command(body, sh_allowed_commands)
 
 
 class ZeppelinNotebookService:
@@ -43,6 +58,8 @@ class ZeppelinNotebookService:
         max_paragraph_title_chars: int,
         max_paragraph_body_bytes: int,
         max_opaque_id_chars: int,
+        sql_write_allowed_databases: tuple[str, ...] = (),
+        sh_allowed_commands: tuple[str, ...] = (),
     ) -> None:
         self._gateway = gateway
         self._allowed = frozenset(allowed_interpreters)
@@ -50,6 +67,8 @@ class ZeppelinNotebookService:
         self._max_title = max_paragraph_title_chars
         self._max_body = max_paragraph_body_bytes
         self._max_id = max_opaque_id_chars
+        self._sql_write_allowed_databases = sql_write_allowed_databases
+        self._sh_allowed_commands = sh_allowed_commands
 
     async def list_notebooks(self) -> NotebookTreeResult:
         nodes = await self._gateway.list_notebooks()
@@ -79,6 +98,15 @@ class ZeppelinNotebookService:
             raise _invalid_input(ToolOperation.ADD_PARAGRAPH) from None
         if intr not in self._allowed:
             raise _invalid_input(ToolOperation.ADD_PARAGRAPH)
+        try:
+            _gate_paragraph_content(
+                intr,
+                bdy,
+                self._sql_write_allowed_databases,
+                self._sh_allowed_commands,
+            )
+        except ValueError:
+            raise _invalid_input(ToolOperation.ADD_PARAGRAPH) from None
         paragraph_id = await self._gateway.add_paragraph(nb, ttl, intr, bdy)
         return AddParagraphResult(
             notebook_id=nb,
@@ -87,18 +115,14 @@ class ZeppelinNotebookService:
             interpreter=intr,
         )
 
-    async def run_paragraph(
-        self, notebook_id: object, paragraph_id: object
-    ) -> RunParagraphResult:
+    async def run_paragraph(self, notebook_id: object, paragraph_id: object) -> RunParagraphResult:
         try:
             nb = validate_opaque_id(notebook_id, max_chars=self._max_id)
             pid = validate_opaque_id(paragraph_id, max_chars=self._max_id)
         except ValueError:
             raise _invalid_input(ToolOperation.RUN_PARAGRAPH) from None
         status = await self._gateway.run_paragraph(nb, pid)
-        return RunParagraphResult(
-            notebook_id=nb, paragraph_id=pid, status=status
-        )
+        return RunParagraphResult(notebook_id=nb, paragraph_id=pid, status=status)
 
     async def get_paragraph_status(
         self, notebook_id: object, paragraph_id: object
@@ -109,9 +133,7 @@ class ZeppelinNotebookService:
         except ValueError:
             raise _invalid_input(ToolOperation.GET_PARAGRAPH_STATUS) from None
         status = await self._gateway.get_paragraph_status(nb, pid)
-        return ParagraphStatusResult(
-            notebook_id=nb, paragraph_id=pid, status=status
-        )
+        return ParagraphStatusResult(notebook_id=nb, paragraph_id=pid, status=status)
 
     async def get_paragraph_result(
         self, notebook_id: object, paragraph_id: object

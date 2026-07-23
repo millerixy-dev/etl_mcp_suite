@@ -80,6 +80,8 @@ def _create_runtime(
         max_paragraph_title_chars=loaded.settings.max_paragraph_title_chars,
         max_paragraph_body_bytes=loaded.settings.max_paragraph_body_bytes,
         max_opaque_id_chars=loaded.settings.max_opaque_id_chars,
+        sql_write_allowed_databases=loaded.settings.sql_write_allowed_databases,
+        sh_allowed_commands=loaded.settings.sh_allowed_commands,
     )
     secrets = _secret_values(loaded.secrets)
     tools = ZeppelinToolAdapter(service=service, secret_values=secrets)

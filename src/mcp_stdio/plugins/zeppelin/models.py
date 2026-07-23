@@ -223,9 +223,7 @@ class ParagraphResult(BaseModel):
             if has_output:
                 raise ValueError("error status must not carry outputs")
         else:
-            raise ValueError(
-                "paragraph result requires FINISHED or ERROR status"
-            )
+            raise ValueError("paragraph result requires FINISHED or ERROR status")
         return self
 
 
@@ -290,3 +288,129 @@ def build_notebook_tree(
     for name, data in root_children.items():
         result.append(to_node(name, f"/{name}", data))
     return tuple(result)
+
+
+_SQL_LINE_COMMENT = re.compile(r"--[^\n]*")
+_SQL_BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
+_SQL_SHEBANG_LINE = re.compile(r"(?m)^[^\S\n]*%[^\n]*$")
+_SQL_IDENTIFIER = r"[A-Za-z_][A-Za-z0-9_]*"
+
+
+def _strip_sql_noise(body: str) -> str:
+    cleaned = _SQL_LINE_COMMENT.sub("", body)
+    cleaned = _SQL_BLOCK_COMMENT.sub("", cleaned)
+    return _SQL_SHEBANG_LINE.sub("", cleaned)
+
+
+_SQL_WRITE_TARGET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (
+        "INSERT",
+        re.compile(
+            r"\bINSERT\s+(?:INTO\s+(?:TABLE\s+)?|OVERWRITE\s+TABLE\s+)"
+            r"(?:IF\s+NOT\s+EXISTS\s+)?(" + _SQL_IDENTIFIER + r")\.(" + _SQL_IDENTIFIER + r")",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "UPDATE",
+        re.compile(
+            r"\bUPDATE\s+(" + _SQL_IDENTIFIER + r")\.(" + _SQL_IDENTIFIER + r")",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "DELETE",
+        re.compile(
+            r"\bDELETE\s+FROM\s+(" + _SQL_IDENTIFIER + r")\.(" + _SQL_IDENTIFIER + r")",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "MERGE",
+        re.compile(
+            r"\bMERGE\s+INTO\s+(" + _SQL_IDENTIFIER + r")\.(" + _SQL_IDENTIFIER + r")",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "CREATE",
+        re.compile(
+            r"\bCREATE\s+(?:OR\s+REPLACE\s+)?(?:TABLE|VIEW)\s+"
+            r"(?:IF\s+NOT\s+EXISTS\s+)?(" + _SQL_IDENTIFIER + r")\.(" + _SQL_IDENTIFIER + r")",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "ALTER",
+        re.compile(
+            r"\bALTER\s+(?:TABLE|VIEW)\s+(" + _SQL_IDENTIFIER + r")\.(" + _SQL_IDENTIFIER + r")",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "DROP",
+        re.compile(
+            r"\bDROP\s+(?:TABLE|VIEW)\s+(?:IF\s+EXISTS\s+)?("
+            + _SQL_IDENTIFIER
+            + r")\.("
+            + _SQL_IDENTIFIER
+            + r")",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "TRUNCATE",
+        re.compile(
+            r"\bTRUNCATE\s+TABLE\s+(" + _SQL_IDENTIFIER + r")\.(" + _SQL_IDENTIFIER + r")",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "LOAD",
+        re.compile(
+            r"\bLOAD\s+DATA[\s\S]*?INTO\s+TABLE\s+("
+            + _SQL_IDENTIFIER
+            + r")\.("
+            + _SQL_IDENTIFIER
+            + r")",
+            re.IGNORECASE,
+        ),
+    ),
+)
+
+_SQL_WRITE_KEYWORDS = frozenset(keyword for keyword, _ in _SQL_WRITE_TARGET_PATTERNS)
+_SQL_WRITE_TARGET_BY_KEYWORD: dict[str, re.Pattern[str]] = dict(_SQL_WRITE_TARGET_PATTERNS)
+_SQL_LEADING_KEYWORD = re.compile(r"\s*([A-Za-z]+)")
+
+
+def validate_sql_write_target(body: str, allowed_databases: tuple[str, ...]) -> str:
+    """Reject SQL write statements whose target database is not allowlisted."""
+
+    allowed = frozenset(allowed_databases)
+    cleaned = _strip_sql_noise(body)
+    for statement in cleaned.split(";"):
+        match = _SQL_LEADING_KEYWORD.match(statement)
+        keyword = match.group(1).upper() if match else ""
+        if keyword not in _SQL_WRITE_KEYWORDS:
+            continue
+        target_match = _SQL_WRITE_TARGET_BY_KEYWORD[keyword].search(statement)
+        if target_match is None:
+            raise ValueError("sql write target database cannot be determined")
+        if target_match.group(1) not in allowed:
+            raise ValueError("sql write target database is not allowlisted")
+    return body
+
+
+def validate_sh_command(body: str, allowed_commands: tuple[str, ...]) -> str:
+    """Reject sh paragraph bodies whose first command is not allowlisted."""
+
+    allowed = frozenset(allowed_commands)
+    for line in body.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or stripped.startswith("%"):
+            continue
+        command = stripped.split()[0]
+        if command not in allowed:
+            raise ValueError("sh command is not allowlisted")
+        return body
+    raise ValueError("sh command is not allowlisted")

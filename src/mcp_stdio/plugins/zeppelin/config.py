@@ -19,6 +19,27 @@ def _to_tuple(value: object) -> tuple[str, ...] | object:
 
 
 _INTERPRETER_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9_.-]{0,63}")
+_DATABASE_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _validate_unique_tokens(
+    value: tuple[str, ...] | list[str],
+    pattern: re.Pattern[str],
+    *,
+    item_label: str,
+) -> tuple[str, ...]:
+    if isinstance(value, str):
+        raise ValueError(f"{item_label} list must not be a string")
+    seen: set[str] = set()
+    normalized: list[str] = []
+    for entry in tuple(value):
+        if not pattern.fullmatch(entry):
+            raise ValueError(f"{item_label} is malformed")
+        if entry in seen:
+            raise ValueError(f"{item_label} entries must be unique")
+        seen.add(entry)
+        normalized.append(entry)
+    return tuple(normalized)
 
 
 class ZeppelinSettings(StrictConfigModel):
@@ -33,6 +54,10 @@ class ZeppelinSettings(StrictConfigModel):
     max_paragraph_body_bytes: Annotated[int, Field(ge=1, le=1_048_576)] = 65_536
     max_opaque_id_chars: Annotated[int, Field(ge=1, le=4_096)] = 512
     allowed_interpreters: Annotated[tuple[str, ...], BeforeValidator(_to_tuple)] = ()
+    sql_write_allowed_databases: Annotated[tuple[str, ...], BeforeValidator(_to_tuple)] = (
+        "tmp_dc_ep",
+    )
+    sh_allowed_commands: Annotated[tuple[str, ...], BeforeValidator(_to_tuple)] = ()
 
     @field_validator("base_url")
     @classmethod
@@ -51,22 +76,20 @@ class ZeppelinSettings(StrictConfigModel):
 
     @field_validator("allowed_interpreters")
     @classmethod
-    def validate_allowed_interpreters(
+    def validate_allowed_interpreters(cls, value: tuple[str, ...] | list[str]) -> tuple[str, ...]:
+        return _validate_unique_tokens(value, _INTERPRETER_PATTERN, item_label="interpreter")
+
+    @field_validator("sql_write_allowed_databases")
+    @classmethod
+    def validate_sql_write_allowed_databases(
         cls, value: tuple[str, ...] | list[str]
     ) -> tuple[str, ...]:
-        if isinstance(value, str):
-            raise ValueError("allowed_interpreters must be a list")
-        seen: set[str] = set()
-        normalized: list[str] = []
-        entries: tuple[str, ...] = tuple(value)
-        for entry in entries:
-            if not _INTERPRETER_PATTERN.fullmatch(entry):
-                raise ValueError("interpreter name is malformed")
-            if entry in seen:
-                raise ValueError("interpreter names must be unique")
-            seen.add(entry)
-            normalized.append(entry)
-        return tuple(normalized)
+        return _validate_unique_tokens(value, _DATABASE_PATTERN, item_label="database name")
+
+    @field_validator("sh_allowed_commands")
+    @classmethod
+    def validate_sh_allowed_commands(cls, value: tuple[str, ...] | list[str]) -> tuple[str, ...]:
+        return _validate_unique_tokens(value, _INTERPRETER_PATTERN, item_label="command name")
 
 
 class ZeppelinSecrets(SecretConfigModel):
