@@ -38,3 +38,8 @@
 ## 8. Verification
 
 - [x] 8.1 Run the full unit/contract suite, Ruff, Pyright, console-entry-point smoke test, and strict OpenSpec validation; report exact commands and results.
+
+## 9. Interpreter From Body Shebang
+
+- [x] 9.1 Add failing tests: parse interpreter from body leading shebang, fail-closed on missing shebang, allowlist on parsed interpreter, body sent verbatim (no shebang injection), gateway `add_paragraph` drops the interpreter parameter, tool schema drops the `interpreter` input.
+- [x] 9.2 Implement shebang parsing in models.py, update the service/gateway/HTTP adapter/tool adapter so the body is the single source of truth and is sent verbatim, until all tests pass.

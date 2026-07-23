@@ -115,14 +115,18 @@ The `create_notebook` tool SHALL create a Zeppelin notebook with the requested v
 - **THEN** the tool returns `INVALID_INPUT` without calling Zeppelin
 
 ### Requirement: Add an allowlisted paragraph
-The `add_paragraph` tool SHALL accept an opaque notebook ID, title, interpreter name, and paragraph body, and SHALL add the paragraph only when the interpreter is present in the configured allowlist.
+The `add_paragraph` tool SHALL accept an opaque notebook ID, title, and paragraph body. The interpreter SHALL be parsed from the paragraph body's first-line shebang (a line of the form `%<interpreter>`); the tool SHALL NOT inject or modify the shebang. When the body has no leading shebang, the tool SHALL return `INVALID_INPUT` without sending the body to Zeppelin. The parsed interpreter SHALL be matched exactly against the case-sensitive `allowed_interpreters`; a non-allowlisted interpreter SHALL return `INVALID_INPUT` without sending the body to Zeppelin. The body SHALL be sent to Zeppelin verbatim.
 
 #### Scenario: Add an allowed paragraph
-- **WHEN** the interpreter is explicitly allowlisted and Zeppelin accepts the paragraph
-- **THEN** the tool returns the notebook ID, paragraph ID, title, and interpreter
+- **WHEN** the body begins with a shebang whose interpreter is explicitly allowlisted and Zeppelin accepts the paragraph
+- **THEN** the tool returns the notebook ID, paragraph ID, title, and the parsed interpreter, and sends the body verbatim
 
 #### Scenario: Reject a non-allowlisted interpreter
-- **WHEN** the requested interpreter is absent from `allowed_interpreters`
+- **WHEN** the body's shebang names an interpreter absent from `allowed_interpreters`
+- **THEN** the tool returns `INVALID_INPUT` without sending the paragraph body to Zeppelin
+
+#### Scenario: Reject a body without a shebang
+- **WHEN** the paragraph body has no leading shebang line
 - **THEN** the tool returns `INVALID_INPUT` without sending the paragraph body to Zeppelin
 
 #### Scenario: Default deny interpreter execution
