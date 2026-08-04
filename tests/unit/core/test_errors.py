@@ -130,6 +130,71 @@ def test_tool_error_message_is_fixed_by_category(category: str, message: str) ->
     assert error.message == message
 
 
+def test_tool_error_includes_concise_explanation_when_provided() -> None:
+    from mcp_stdio.core.errors import ErrorCategory, ToolError, ToolOperation
+
+    error = ToolError.create(
+        category=ErrorCategory.INVALID_INPUT,
+        operation=ToolOperation.ADD_PARAGRAPH,
+        retryable=False,
+        explanation="sql write target database 'other_db' is not allowlisted",
+    )
+
+    payload = error.to_dict(secret_values=())
+
+    assert payload["explanation"] == "sql write target database 'other_db' is not allowlisted"
+    assert payload["message"] == "The request input is invalid."
+
+
+def test_tool_error_omits_explanation_when_absent() -> None:
+    from mcp_stdio.core.errors import ErrorCategory, ToolError, ToolOperation
+
+    error = ToolError.create(
+        category=ErrorCategory.INVALID_INPUT,
+        operation=ToolOperation.ADD_PARAGRAPH,
+        retryable=False,
+    )
+
+    payload = error.to_dict(secret_values=())
+
+    assert "explanation" not in payload
+
+
+def test_tool_error_explanation_is_none_by_default() -> None:
+    from mcp_stdio.core.errors import ErrorCategory, ToolError, ToolOperation
+
+    error = ToolError.create(
+        category=ErrorCategory.INVALID_INPUT,
+        operation=ToolOperation.ADD_PARAGRAPH,
+        retryable=False,
+    )
+
+    assert error.explanation is None
+
+
+def test_tool_error_explanation_is_a_constructor_field() -> None:
+    from mcp_stdio.core.errors import ToolError
+
+    assert "explanation" in inspect.signature(ToolError).parameters
+
+
+def test_tool_error_omits_explanation_containing_a_known_secret() -> None:
+    from mcp_stdio.core.errors import ErrorCategory, ToolError, ToolOperation
+
+    secret = "explanation-secret-sentinel"
+    error = ToolError.create(
+        category=ErrorCategory.INVALID_INPUT,
+        operation=ToolOperation.ADD_PARAGRAPH,
+        retryable=False,
+        explanation=f"detail {secret} detail",
+    )
+
+    payload = error.to_dict(secret_values=(secret,))
+
+    assert "explanation" not in payload
+    assert secret not in json.dumps(payload)
+
+
 def test_direct_construction_cannot_inject_message_or_correlation_id() -> None:
     from mcp_stdio.core.errors import ToolError
 

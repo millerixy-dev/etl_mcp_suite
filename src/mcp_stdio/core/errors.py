@@ -97,6 +97,7 @@ class ToolError:
     operation: ToolOperation
     retryable: bool
     identifiers: Mapping[str, str] = field(default_factory=_empty_identifiers)
+    explanation: str | None = None
     message: str = field(init=False)
     correlation_id: str = field(default_factory=_new_correlation_id, init=False)
 
@@ -112,6 +113,9 @@ class ToolError:
             raise ValueError("operation must be a supported ToolOperation")
         if type(retryable) is not bool:
             raise ValueError("retryable must be a boolean")
+        explanation = cast(object, self.explanation)
+        if explanation is not None and not isinstance(explanation, str):
+            raise ValueError("explanation must be a string or None")
 
         try:
             identifier_items = dict(raw_identifiers)
@@ -146,6 +150,7 @@ class ToolError:
         operation: ToolOperation,
         retryable: bool,
         identifiers: Mapping[str, str] | None = None,
+        explanation: str | None = None,
     ) -> ToolError:
         """Create one error with a fresh diagnostic correlation identifier."""
 
@@ -154,6 +159,7 @@ class ToolError:
             operation=operation,
             retryable=retryable,
             identifiers={} if identifiers is None else identifiers,
+            explanation=explanation,
         )
 
     def to_dict(self, *, secret_values: Iterable[str]) -> dict[str, object]:
@@ -165,7 +171,7 @@ class ToolError:
             for key, value in self.identifiers.items()
             if not any(secret in value for secret in secrets)
         }
-        return {
+        result: dict[str, object] = {
             "category": self.category.value,
             "operation": self.operation.value,
             "message": self.message,
@@ -173,6 +179,11 @@ class ToolError:
             "identifiers": safe_identifiers,
             "correlation_id": self.correlation_id,
         }
+        if self.explanation and not any(
+            secret in self.explanation for secret in secrets
+        ):
+            result["explanation"] = self.explanation
+        return result
 
 
 def unexpected_tool_error(
