@@ -18,9 +18,8 @@ from mcp_stdio.plugins.zeppelin.models import (
     validate_opaque_id,
     validate_paragraph_body,
     validate_paragraph_title,
-    validate_sh_command,
-    validate_sql_write_target,
 )
+from mcp_stdio.plugins.zeppelin.safety import ParagraphSafetyHook
 
 
 def _invalid_input(operation: ToolOperation) -> ZeppelinGatewayError:
@@ -33,19 +32,6 @@ def _invalid_input(operation: ToolOperation) -> ZeppelinGatewayError:
     )
 
 
-def _gate_paragraph_content(
-    interpreter: str,
-    body: str,
-    sql_write_allowed_databases: tuple[str, ...],
-    sh_allowed_commands: tuple[str, ...],
-) -> None:
-    name = interpreter.lower()
-    if "sql" in name:
-        validate_sql_write_target(body, sql_write_allowed_databases)
-    elif interpreter == "sh":
-        validate_sh_command(body, sh_allowed_commands)
-
-
 class ZeppelinNotebookService:
     """Coordinate validated Zeppelin notebook use cases."""
 
@@ -53,22 +39,18 @@ class ZeppelinNotebookService:
         self,
         *,
         gateway: ZeppelinGateway,
-        allowed_interpreters: tuple[str, ...],
+        safety_hook: ParagraphSafetyHook,
         max_notebook_name_chars: int,
         max_paragraph_title_chars: int,
         max_paragraph_body_bytes: int,
         max_opaque_id_chars: int,
-        sql_write_allowed_databases: tuple[str, ...] = (),
-        sh_allowed_commands: tuple[str, ...] = (),
     ) -> None:
         self._gateway = gateway
-        self._allowed = frozenset(allowed_interpreters)
+        self._safety_hook = safety_hook
         self._max_nb = max_notebook_name_chars
         self._max_title = max_paragraph_title_chars
         self._max_body = max_paragraph_body_bytes
         self._max_id = max_opaque_id_chars
-        self._sql_write_allowed_databases = sql_write_allowed_databases
-        self._sh_allowed_commands = sh_allowed_commands
 
     async def list_notebooks(self) -> NotebookTreeResult:
         nodes = await self._gateway.list_notebooks()
@@ -95,15 +77,10 @@ class ZeppelinNotebookService:
             intr = parse_paragraph_interpreter(bdy)
         except ValueError:
             raise _invalid_input(ToolOperation.ADD_PARAGRAPH) from None
-        if intr is None or intr not in self._allowed:
+        if intr is None:
             raise _invalid_input(ToolOperation.ADD_PARAGRAPH)
         try:
-            _gate_paragraph_content(
-                intr,
-                bdy,
-                self._sql_write_allowed_databases,
-                self._sh_allowed_commands,
-            )
+            self._safety_hook.enforce(intr, bdy)
         except ValueError:
             raise _invalid_input(ToolOperation.ADD_PARAGRAPH) from None
         paragraph_id = await self._gateway.add_paragraph(nb, ttl, bdy)

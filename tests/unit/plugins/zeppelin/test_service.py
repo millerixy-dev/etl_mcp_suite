@@ -12,6 +12,7 @@ from mcp_stdio.plugins.zeppelin.models import (
     ParagraphStatus,
     SafeErrorDetail,
 )
+from mcp_stdio.plugins.zeppelin.safety import build_default_safety_hook
 from mcp_stdio.plugins.zeppelin.service import ZeppelinNotebookService
 
 
@@ -72,17 +73,22 @@ def _service(
     max_opaque_id_chars: int = 512,
     sql_write_allowed_databases: tuple[str, ...] = ("tmp_dc_ep",),
     sh_allowed_commands: tuple[str, ...] = (),
+    sql_forbidden_keywords: tuple[str, ...] = ("DROP", "TRUNCATE"),
 ) -> tuple[ZeppelinNotebookService, FakeGateway]:
     gateway = FakeGateway()
+    safety_hook = build_default_safety_hook(
+        allowed_interpreters=allowed_interpreters,
+        sql_forbidden_keywords=sql_forbidden_keywords,
+        sql_write_allowed_databases=sql_write_allowed_databases,
+        sh_allowed_commands=sh_allowed_commands,
+    )
     service = ZeppelinNotebookService(
         gateway=gateway,
-        allowed_interpreters=allowed_interpreters,
+        safety_hook=safety_hook,
         max_notebook_name_chars=max_notebook_name_chars,
         max_paragraph_title_chars=max_paragraph_title_chars,
         max_paragraph_body_bytes=max_paragraph_body_bytes,
         max_opaque_id_chars=max_opaque_id_chars,
-        sql_write_allowed_databases=sql_write_allowed_databases,
-        sh_allowed_commands=sh_allowed_commands,
     )
     return service, gateway
 
@@ -198,6 +204,42 @@ async def test_add_paragraph_denies_all_sh_commands_by_default() -> None:
         await service.add_paragraph("nb-1", "title", "%sh\necho hello")
     assert exc_info.value.tool_error.category == ErrorCategory.INVALID_INPUT
     assert gateway.calls == []
+
+
+async def test_add_paragraph_rejects_forbidden_drop_on_approved_database() -> None:
+    service, gateway = _service(allowed_interpreters=("spark.sql",))
+    with pytest.raises(ZeppelinGatewayError) as exc_info:
+        await service.add_paragraph(
+            "nb-1", "title", "%spark.sql\nDROP TABLE tmp_dc_ep.my_table"
+        )
+    assert exc_info.value.tool_error.category == ErrorCategory.INVALID_INPUT
+    assert gateway.calls == []
+
+
+async def test_add_paragraph_rejects_forbidden_truncate_on_approved_database() -> None:
+    service, gateway = _service(allowed_interpreters=("spark.sql",))
+    with pytest.raises(ZeppelinGatewayError) as exc_info:
+        await service.add_paragraph(
+            "nb-1", "title", "%spark.sql\nTRUNCATE TABLE tmp_dc_ep.my_table"
+        )
+    assert exc_info.value.tool_error.category == ErrorCategory.INVALID_INPUT
+    assert gateway.calls == []
+
+
+async def test_add_paragraph_allows_create_on_approved_database() -> None:
+    service, gateway = _service(allowed_interpreters=("spark.sql",))
+    result = await service.add_paragraph(
+        "nb-1", "title", "%spark.sql\nCREATE TABLE tmp_dc_ep.my_table (id int)"
+    )
+    assert result.paragraph_id == "p-1"
+
+
+async def test_add_paragraph_allows_alter_on_approved_database() -> None:
+    service, gateway = _service(allowed_interpreters=("spark.sql",))
+    result = await service.add_paragraph(
+        "nb-1", "title", "%spark.sql\nALTER TABLE tmp_dc_ep.my_table ADD COLUMNS (x int)"
+    )
+    assert result.paragraph_id == "p-1"
 
 
 async def test_run_paragraph_returns_status() -> None:

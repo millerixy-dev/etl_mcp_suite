@@ -14,6 +14,7 @@ from mcp_stdio.contracts.plugin import (
 from mcp_stdio.core.config import load_config
 from mcp_stdio.plugins.zeppelin.config import ZeppelinSecrets, ZeppelinSettings
 from mcp_stdio.plugins.zeppelin.http_client import ZeppelinHttpClient
+from mcp_stdio.plugins.zeppelin.safety import build_default_safety_hook
 from mcp_stdio.plugins.zeppelin.service import ZeppelinNotebookService
 from mcp_stdio.plugins.zeppelin.tools import ZeppelinToolAdapter
 
@@ -73,15 +74,19 @@ def _create_runtime(
         env_prefix="ZEPPELIN",
     )
     gateway = ZeppelinHttpClient(settings=loaded.settings, secrets=loaded.secrets)
+    safety_hook = build_default_safety_hook(
+        allowed_interpreters=loaded.settings.allowed_interpreters,
+        sql_forbidden_keywords=loaded.settings.sql_forbidden_keywords,
+        sql_write_allowed_databases=loaded.settings.sql_write_allowed_databases,
+        sh_allowed_commands=loaded.settings.sh_allowed_commands,
+    )
     service = ZeppelinNotebookService(
         gateway=gateway,
-        allowed_interpreters=loaded.settings.allowed_interpreters,
+        safety_hook=safety_hook,
         max_notebook_name_chars=loaded.settings.max_notebook_name_chars,
         max_paragraph_title_chars=loaded.settings.max_paragraph_title_chars,
         max_paragraph_body_bytes=loaded.settings.max_paragraph_body_bytes,
         max_opaque_id_chars=loaded.settings.max_opaque_id_chars,
-        sql_write_allowed_databases=loaded.settings.sql_write_allowed_databases,
-        sh_allowed_commands=loaded.settings.sh_allowed_commands,
     )
     secrets = _secret_values(loaded.secrets)
     tools = ZeppelinToolAdapter(service=service, secret_values=secrets)
