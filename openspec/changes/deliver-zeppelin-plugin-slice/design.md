@@ -120,6 +120,9 @@ Captured against a live Zeppelin 0.10.1 server. These are the authoritative upst
 ### Interpreter selection
 0.10.1 selects the interpreter per-paragraph via a shebang prefix in the paragraph text (e.g. `%sh\necho hi`) or falls back to the notebook's `defaultInterpreterGroup`. The V1 allowlist validates the interpreter name BEFORE the paragraph is sent; the adapter prepends the shebang to the body when the caller-supplied interpreter differs from the notebook default. This is captured as an adapter detail, not a spec-level requirement, since the spec speaks of "interpreter name" validation generically.
 
+### Failure-output preservation on ERROR
+Zeppelin 0.10.1 returns the error text/traceback in `results.msg[]` (type TEXT) while `results.exception` is frequently an empty string. The adapter therefore treats an empty/whitespace `exception` as absent (no empty `SafeErrorDetail`), and the service no longer discards `msg[]` on `ERROR`: the failure outputs are returned as `outputs` (each bounded by `max_result_bytes` with the `truncated` flag), and `exception` (when non-empty) is returned as `error.message` (bounded to 4,096 bytes). The `ParagraphResult` invariant is relaxed so `ERROR` may carry failure outputs; `FINISHED` still carries no error. This preserves the complete error context needed to plan a fix without exposing credentials, cookies, or unbounded upstream bodies.
+
 ### Result normalization
 `results.msg[]` entries are flattened into bounded output items preserving `type` and `data` (UTF-8 byte-bounded, truncated at `max_result_bytes` with the `truncated` flag). `results.code == "ERROR"` drives the `ERROR` status with safe failure details from `results.exception` (bounded, no credentials).
 

@@ -60,14 +60,14 @@ The Zeppelin plugin SHALL use strict immutable JSON-serializable result models w
 - safe failure detail: `message`, bounded to 4,096 UTF-8 bytes;
 - paragraph result: `notebook_id`, `paragraph_id`, `status`, `outputs`, `error`, and `truncated`.
 
-Result fields SHALL reject unknown fields and coercion. A paragraph result SHALL represent only terminal states: `FINISHED` has no error, while `ERROR` or `CANCELLED` has no successful outputs and includes safe failure detail. Output text is individually bounded by the absolute 1 MiB V1 ceiling, while the adapter SHALL enforce the configured total `max_result_bytes`. Public models MUST NOT contain raw upstream state, headers, cookies, credentials, or authorization data.
+Result fields SHALL reject unknown fields and coercion. A paragraph result SHALL represent only terminal states: `FINISHED` has no error; `ERROR` MAY carry failure outputs (the upstream error text and traceback) and includes safe failure detail; an empty upstream `exception` SHALL NOT produce an empty failure detail. `CANCELLED` has no successful outputs and includes safe failure detail. Output text is individually bounded by the absolute 1 MiB V1 ceiling, while the adapter SHALL enforce the configured total `max_result_bytes`. Public models MUST NOT contain raw upstream state, headers, cookies, credentials, or authorization data.
 
 #### Scenario: Serialize a safe result
 - **WHEN** a typed Zeppelin result is serialized for an MCP response
 - **THEN** it contains only the fixed public fields and normalized enum values
 
 #### Scenario: Reject an inconsistent paragraph result
-- **WHEN** a result combines a non-terminal state, successful output with an error state, or an error with `FINISHED`
+- **WHEN** a result combines a non-terminal state, or an error with `FINISHED`
 - **THEN** model validation fails before MCP serialization
 
 ### Requirement: Normalize Zeppelin paragraph states with a closed mapping
@@ -206,7 +206,7 @@ The `get_paragraph_result` tool SHALL return normalized paragraph outputs or saf
 
 #### Scenario: Retrieve a failed result
 - **WHEN** a paragraph is in an error state
-- **THEN** the tool returns `ERROR`, no successful output, and safe failure details without credentials, cookies, headers, or an unbounded upstream body
+- **THEN** the tool returns `ERROR`, the upstream failure outputs (error text/traceback) bounded by `max_result_bytes`, and safe failure details without credentials, cookies, headers, or an unbounded upstream body
 
 ### Requirement: Keep Zeppelin authentication out of tool inputs
 The Zeppelin adapter SHALL source configured authentication credentials from environment-backed secrets and SHALL reuse authentication state only inside the selected Zeppelin process.

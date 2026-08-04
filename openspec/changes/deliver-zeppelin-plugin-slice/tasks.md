@@ -43,3 +43,8 @@
 
 - [x] 9.1 Add failing tests: parse interpreter from body leading shebang, fail-closed on missing shebang, allowlist on parsed interpreter, body sent verbatim (no shebang injection), gateway `add_paragraph` drops the interpreter parameter, tool schema drops the `interpreter` input.
 - [x] 9.2 Implement shebang parsing in models.py, update the service/gateway/HTTP adapter/tool adapter so the body is the single source of truth and is sent verbatim, until all tests pass.
+
+## 10. Preserve Failure Outputs on ERROR
+
+- [x] 10.1 Add failing tests: adapter treats empty `exception` as absent and preserves `msg[]` on ERROR; model allows ERROR to carry failure outputs; service returns failure outputs and non-empty error on ERROR without discarding `msg[]`.
+- [x] 10.2 Fix the adapter (empty exception -> None), relax the `ParagraphResult` invariant, and update the service ERROR branch to return failure outputs plus the exception as safe failure detail, until all tests pass.
