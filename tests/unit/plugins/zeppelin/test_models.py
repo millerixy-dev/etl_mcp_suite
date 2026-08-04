@@ -27,6 +27,7 @@ from mcp_stdio.plugins.zeppelin.models import (
     validate_paragraph_body,
     validate_paragraph_title,
     validate_sh_command,
+    validate_sql_forbidden_keywords,
     validate_sql_write_target,
 )
 
@@ -331,6 +332,55 @@ def test_validate_sql_write_target_rejects_mixed_statement_set() -> None:
 def test_validate_sql_write_target_is_case_insensitive_and_ignores_comments() -> None:
     body = "-- drop comment\ninsert into tmp_dc_ep.t values (1)"
     assert validate_sql_write_target(body, ("tmp_dc_ep",)) == body
+
+
+def test_validate_sql_forbidden_keywords_rejects_drop_regardless_of_database() -> None:
+    with pytest.raises(ValueError):
+        validate_sql_forbidden_keywords(
+            "DROP TABLE tmp_dc_ep.my_table", frozenset({"DROP", "TRUNCATE"})
+        )
+
+
+def test_validate_sql_forbidden_keywords_rejects_truncate_regardless_of_database() -> None:
+    with pytest.raises(ValueError):
+        validate_sql_forbidden_keywords(
+            "TRUNCATE TABLE tmp_dc_ep.my_table", frozenset({"DROP", "TRUNCATE"})
+        )
+
+
+def test_validate_sql_forbidden_keywords_allows_non_forbidden_write() -> None:
+    body = "INSERT INTO tmp_dc_ep.my_table VALUES (1)"
+    assert validate_sql_forbidden_keywords(body, frozenset({"DROP", "TRUNCATE"})) == body
+
+
+def test_validate_sql_forbidden_keywords_allows_create_on_approved_database() -> None:
+    body = "CREATE TABLE tmp_dc_ep.my_table (id int)"
+    assert validate_sql_forbidden_keywords(body, frozenset({"DROP", "TRUNCATE"})) == body
+
+
+def test_validate_sql_forbidden_keywords_allows_alter_on_approved_database() -> None:
+    body = "ALTER TABLE tmp_dc_ep.my_table ADD COLUMNS (x int)"
+    assert validate_sql_forbidden_keywords(body, frozenset({"DROP", "TRUNCATE"})) == body
+
+
+def test_validate_sql_forbidden_keywords_is_case_insensitive() -> None:
+    with pytest.raises(ValueError):
+        validate_sql_forbidden_keywords("drop table tmp_dc_ep.my_table", frozenset({"DROP"}))
+
+
+def test_validate_sql_forbidden_keywords_rejects_mixed_statement_set() -> None:
+    with pytest.raises(ValueError):
+        validate_sql_forbidden_keywords("SELECT 1; DROP TABLE tmp_dc_ep.t", frozenset({"DROP"}))
+
+
+def test_validate_sql_forbidden_keywords_allows_reads() -> None:
+    body = "SELECT * FROM any_db.my_table"
+    assert validate_sql_forbidden_keywords(body, frozenset({"DROP", "TRUNCATE"})) == body
+
+
+def test_validate_sql_forbidden_keywords_allows_all_when_empty() -> None:
+    body = "DROP TABLE tmp_dc_ep.my_table"
+    assert validate_sql_forbidden_keywords(body, frozenset()) == body
 
 
 def test_validate_sh_command_allows_allowlisted_command() -> None:

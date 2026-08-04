@@ -71,6 +71,7 @@ def test_yaml_and_json_load_equivalent_defaults_without_authentication(
     assert isinstance(expected.allowed_interpreters, tuple)
     assert expected.sql_write_allowed_databases == ("tmp_dc_ep",)
     assert expected.sh_allowed_commands == ()
+    assert expected.sql_forbidden_keywords == ("DROP", "TRUNCATE")
     assert yaml_config.secrets.username is None
     assert yaml_config.secrets.password is None
 
@@ -170,6 +171,10 @@ def test_allowed_interpreters_are_case_sensitive_unique_and_immutable(
         ("sh_allowed_commands", "echo"),
         ("sh_allowed_commands", ["bad cmd"]),
         ("sh_allowed_commands", ["echo", "echo"]),
+        ("sql_forbidden_keywords", "DROP"),
+        ("sql_forbidden_keywords", ["1bad"]),
+        ("sql_forbidden_keywords", ["DROP", "drop"]),
+        ("sql_forbidden_keywords", ["bad kw"]),
     ],
 )
 def test_settings_reject_invalid_or_non_strict_values(
@@ -248,6 +253,35 @@ def test_write_safety_settings_support_environment_overrides(
     assert loaded.settings.sh_allowed_commands == ("echo",)
 
 
+def test_sql_forbidden_keywords_default_to_drop_and_truncate(
+    tmp_path: Path,
+) -> None:
+    loaded = _load(_write_json(tmp_path / "zeppelin.json", _document()))
+    assert loaded.settings.sql_forbidden_keywords == ("DROP", "TRUNCATE")
+    assert isinstance(loaded.settings.sql_forbidden_keywords, tuple)
+
+
+def test_sql_forbidden_keywords_normalize_to_uppercase(tmp_path: Path) -> None:
+    document = _document()
+    settings = document["settings"]
+    assert isinstance(settings, dict)
+    settings["sql_forbidden_keywords"] = ["drop", "Truncate", "CREATE"]
+    loaded = _load(_write_json(tmp_path / "zeppelin.json", document))
+    assert loaded.settings.sql_forbidden_keywords == ("DROP", "TRUNCATE", "CREATE")
+
+
+def test_sql_forbidden_keywords_support_environment_override(
+    tmp_path: Path,
+) -> None:
+    loaded = _load(
+        _write_json(tmp_path / "zeppelin.json", _document()),
+        {
+            "MCP_STDIO__SETTINGS__SQL_FORBIDDEN_KEYWORDS": '["DROP","CREATE"]',
+        },
+    )
+    assert loaded.settings.sql_forbidden_keywords == ("DROP", "CREATE")
+
+
 def test_schema_contains_only_the_approved_v1_fields() -> None:
     assert set(ZeppelinSettings.model_fields) == {
         "base_url",
@@ -261,5 +295,6 @@ def test_schema_contains_only_the_approved_v1_fields() -> None:
         "allowed_interpreters",
         "sql_write_allowed_databases",
         "sh_allowed_commands",
+        "sql_forbidden_keywords",
     }
     assert set(ZeppelinSecrets.model_fields) == {"username", "password"}

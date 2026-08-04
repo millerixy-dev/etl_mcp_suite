@@ -20,6 +20,7 @@ def _to_tuple(value: object) -> tuple[str, ...] | object:
 
 _INTERPRETER_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9_.-]{0,63}")
 _DATABASE_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_SQL_KEYWORD_PATTERN = re.compile(r"[A-Z][A-Z_]*")
 
 
 def _validate_unique_tokens(
@@ -58,6 +59,10 @@ class ZeppelinSettings(StrictConfigModel):
         "tmp_dc_ep",
     )
     sh_allowed_commands: Annotated[tuple[str, ...], BeforeValidator(_to_tuple)] = ()
+    sql_forbidden_keywords: Annotated[tuple[str, ...], BeforeValidator(_to_tuple)] = (
+        "DROP",
+        "TRUNCATE",
+    )
 
     @field_validator("base_url")
     @classmethod
@@ -90,6 +95,16 @@ class ZeppelinSettings(StrictConfigModel):
     @classmethod
     def validate_sh_allowed_commands(cls, value: tuple[str, ...] | list[str]) -> tuple[str, ...]:
         return _validate_unique_tokens(value, _INTERPRETER_PATTERN, item_label="command name")
+
+    @field_validator("sql_forbidden_keywords")
+    @classmethod
+    def validate_sql_forbidden_keywords(
+        cls, value: tuple[str, ...] | list[str]
+    ) -> tuple[str, ...]:
+        uppered = tuple(str(entry).upper() for entry in value)
+        return _validate_unique_tokens(
+            uppered, _SQL_KEYWORD_PATTERN, item_label="forbidden keyword"
+        )
 
 
 class ZeppelinSecrets(SecretConfigModel):

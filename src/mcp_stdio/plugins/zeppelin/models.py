@@ -400,6 +400,24 @@ def validate_sql_write_target(body: str, allowed_databases: tuple[str, ...]) -> 
     return body
 
 
+def validate_sql_forbidden_keywords(body: str, forbidden_keywords: frozenset[str]) -> str:
+    """Reject SQL statements whose leading keyword is forbidden.
+
+    Unlike :func:`validate_sql_write_target`, this check ignores the target
+    database entirely: a forbidden leading keyword (e.g. ``DROP``,
+    ``TRUNCATE``) is rejected regardless of where it points.
+    """
+
+    forbidden = frozenset(keyword.upper() for keyword in forbidden_keywords)
+    cleaned = _strip_sql_noise(body)
+    for statement in cleaned.split(";"):
+        match = _SQL_LEADING_KEYWORD.match(statement)
+        keyword = match.group(1).upper() if match else ""
+        if keyword in forbidden:
+            raise ValueError("sql operation is forbidden")
+    return body
+
+
 def parse_paragraph_interpreter(body: str) -> str | None:
     """Return the interpreter declared by the body's leading shebang.
 
