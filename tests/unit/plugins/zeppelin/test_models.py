@@ -378,6 +378,21 @@ def test_validate_sql_forbidden_keywords_allows_reads() -> None:
     assert validate_sql_forbidden_keywords(body, frozenset({"DROP", "TRUNCATE"})) == body
 
 
+def test_validate_sql_forbidden_keywords_message_names_keyword() -> None:
+    with pytest.raises(ValueError, match="DROP"):
+        validate_sql_forbidden_keywords("DROP TABLE tmp_dc_ep.t", frozenset({"DROP"}))
+
+
+def test_validate_sql_write_target_message_names_database() -> None:
+    with pytest.raises(ValueError, match="other_db"):
+        validate_sql_write_target("INSERT INTO other_db.t VALUES (1)", ("tmp_dc_ep",))
+
+
+def test_validate_sh_command_message_names_command() -> None:
+    with pytest.raises(ValueError, match="rm"):
+        validate_sh_command("rm -rf /tmp", ("echo",))
+
+
 def test_validate_sql_forbidden_keywords_allows_all_when_empty() -> None:
     body = "DROP TABLE tmp_dc_ep.my_table"
     assert validate_sql_forbidden_keywords(body, frozenset()) == body

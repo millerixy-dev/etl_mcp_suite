@@ -22,12 +22,15 @@ from mcp_stdio.plugins.zeppelin.models import (
 from mcp_stdio.plugins.zeppelin.safety import ParagraphSafetyHook
 
 
-def _invalid_input(operation: ToolOperation) -> ZeppelinGatewayError:
+def _invalid_input(
+    operation: ToolOperation, explanation: str | None = None
+) -> ZeppelinGatewayError:
     return ZeppelinGatewayError(
         ToolError.create(
             category=ErrorCategory.INVALID_INPUT,
             operation=operation,
             retryable=False,
+            explanation=explanation,
         )
     )
 
@@ -75,14 +78,17 @@ class ZeppelinNotebookService:
             ttl = validate_paragraph_title(title, max_chars=self._max_title)
             bdy = validate_paragraph_body(body, max_bytes=self._max_body)
             intr = parse_paragraph_interpreter(bdy)
-        except ValueError:
-            raise _invalid_input(ToolOperation.ADD_PARAGRAPH) from None
+        except ValueError as exc:
+            raise _invalid_input(ToolOperation.ADD_PARAGRAPH, explanation=str(exc)) from None
         if intr is None:
-            raise _invalid_input(ToolOperation.ADD_PARAGRAPH)
+            raise _invalid_input(
+                ToolOperation.ADD_PARAGRAPH,
+                explanation="paragraph body has no interpreter shebang",
+            )
         try:
             self._safety_hook.enforce(intr, bdy)
-        except ValueError:
-            raise _invalid_input(ToolOperation.ADD_PARAGRAPH) from None
+        except ValueError as exc:
+            raise _invalid_input(ToolOperation.ADD_PARAGRAPH, explanation=str(exc)) from None
         paragraph_id = await self._gateway.add_paragraph(nb, ttl, bdy)
         return AddParagraphResult(
             notebook_id=nb,

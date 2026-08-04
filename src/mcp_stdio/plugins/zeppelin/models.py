@@ -394,9 +394,10 @@ def validate_sql_write_target(body: str, allowed_databases: tuple[str, ...]) -> 
             continue
         target_match = _SQL_WRITE_TARGET_BY_KEYWORD[keyword].search(statement)
         if target_match is None:
-            raise ValueError("sql write target database cannot be determined")
+            raise ValueError("sql write target database cannot be determined from the statement")
         if target_match.group(1) not in allowed:
-            raise ValueError("sql write target database is not allowlisted")
+            database = target_match.group(1)
+            raise ValueError(f"sql write target database '{database}' is not allowlisted")
     return body
 
 
@@ -414,7 +415,7 @@ def validate_sql_forbidden_keywords(body: str, forbidden_keywords: frozenset[str
         match = _SQL_LEADING_KEYWORD.match(statement)
         keyword = match.group(1).upper() if match else ""
         if keyword in forbidden:
-            raise ValueError("sql operation is forbidden")
+            raise ValueError(f"sql keyword '{keyword}' is forbidden by the blacklist")
     return body
 
 
@@ -450,6 +451,6 @@ def validate_sh_command(body: str, allowed_commands: tuple[str, ...]) -> str:
             continue
         command = stripped.split()[0]
         if command not in allowed:
-            raise ValueError("sh command is not allowlisted")
+            raise ValueError(f"sh command '{command}' is not allowlisted")
         return body
     raise ValueError("sh command is not allowlisted")

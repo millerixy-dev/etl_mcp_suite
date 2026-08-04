@@ -35,7 +35,7 @@ class InterpreterAllowlistChecker:
 
     def check(self, interpreter: str, body: str) -> None:
         if interpreter not in self.allowed:
-            raise ValueError("interpreter is not allowlisted")
+            raise ValueError(f"interpreter '{interpreter}' is not allowlisted")
 
 
 @dataclass(frozen=True)

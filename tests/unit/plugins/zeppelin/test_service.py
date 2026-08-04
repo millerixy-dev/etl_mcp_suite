@@ -242,6 +242,46 @@ async def test_add_paragraph_allows_alter_on_approved_database() -> None:
     assert result.paragraph_id == "p-1"
 
 
+async def test_add_paragraph_explanation_names_forbidden_keyword() -> None:
+    service, gateway = _service(allowed_interpreters=("spark.sql",))
+    with pytest.raises(ZeppelinGatewayError) as exc_info:
+        await service.add_paragraph(
+            "nb-1", "title", "%spark.sql\nDROP TABLE tmp_dc_ep.my_table"
+        )
+    assert exc_info.value.tool_error.explanation is not None
+    assert "DROP" in exc_info.value.tool_error.explanation
+    assert gateway.calls == []
+
+
+async def test_add_paragraph_explanation_names_rejected_database() -> None:
+    service, gateway = _service(allowed_interpreters=("spark.sql",))
+    with pytest.raises(ZeppelinGatewayError) as exc_info:
+        await service.add_paragraph(
+            "nb-1", "title", "%spark.sql\nINSERT INTO other_db.t VALUES (1)"
+        )
+    assert exc_info.value.tool_error.explanation is not None
+    assert "other_db" in exc_info.value.tool_error.explanation
+    assert gateway.calls == []
+
+
+async def test_add_paragraph_explanation_names_rejected_interpreter() -> None:
+    service, gateway = _service(allowed_interpreters=("spark.sql",))
+    with pytest.raises(ZeppelinGatewayError) as exc_info:
+        await service.add_paragraph("nb-1", "title", "%sh\necho hi")
+    assert exc_info.value.tool_error.explanation is not None
+    assert "sh" in exc_info.value.tool_error.explanation
+    assert gateway.calls == []
+
+
+async def test_add_paragraph_explains_missing_shebang() -> None:
+    service, gateway = _service(allowed_interpreters=("spark",))
+    with pytest.raises(ZeppelinGatewayError) as exc_info:
+        await service.add_paragraph("nb-1", "title", "SELECT 1")
+    assert exc_info.value.tool_error.explanation is not None
+    assert "shebang" in exc_info.value.tool_error.explanation
+    assert gateway.calls == []
+
+
 async def test_run_paragraph_returns_status() -> None:
     service, _ = _service()
     result = await service.run_paragraph("nb-1", "p-1")

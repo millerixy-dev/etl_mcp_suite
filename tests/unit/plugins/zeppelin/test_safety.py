@@ -25,6 +25,12 @@ def test_interpreter_allowlist_checker_allows_allowlisted() -> None:
     checker.check("spark.sql", "SELECT 1")
 
 
+def test_interpreter_allowlist_checker_message_names_interpreter() -> None:
+    checker = InterpreterAllowlistChecker(frozenset({"spark.sql", "sh"}))
+    with pytest.raises(ValueError, match="'spark'"):
+        checker.check("spark", "SELECT 1")
+
+
 def test_sql_forbidden_keyword_checker_rejects_drop_regardless_of_database() -> None:
     checker = SqlForbiddenKeywordChecker(frozenset({"DROP", "TRUNCATE"}))
     with pytest.raises(ValueError):
