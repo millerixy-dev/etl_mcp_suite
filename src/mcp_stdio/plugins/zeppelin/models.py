@@ -214,14 +214,13 @@ class ParagraphResult(BaseModel):
 
     @model_validator(mode="after")
     def check_state_consistency(self) -> ParagraphResult:
-        has_output = bool(self.outputs)
-        has_error = self.error is not None
         if self.status == ParagraphStatus.FINISHED:
-            if has_error:
+            if self.error is not None:
                 raise ValueError("finished status must not carry an error")
         elif self.status == ParagraphStatus.ERROR:
-            if has_output:
-                raise ValueError("error status must not carry outputs")
+            # ERROR may carry failure outputs (upstream error text/traceback)
+            # alongside an optional safe failure detail.
+            pass
         else:
             raise ValueError("paragraph result requires FINISHED or ERROR status")
         return self

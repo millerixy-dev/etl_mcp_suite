@@ -144,14 +144,16 @@ class ZeppelinNotebookService:
             raise _invalid_input(ToolOperation.GET_PARAGRAPH_RESULT) from None
         status, outputs, error, truncated = await self._gateway.get_paragraph_result(nb, pid)
         if status == ParagraphStatus.ERROR:
-            safe_error: SafeErrorDetail | None = error or SafeErrorDetail(
-                message="paragraph execution failed"
+            safe_error = (
+                error
+                if (error is not None and error.message)
+                else SafeErrorDetail(message="paragraph execution failed")
             )
             return ParagraphResult(
                 notebook_id=nb,
                 paragraph_id=pid,
                 status=status,
-                outputs=(),
+                outputs=outputs,
                 error=safe_error,
                 truncated=truncated,
             )

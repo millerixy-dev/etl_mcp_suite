@@ -181,7 +181,7 @@ class ZeppelinHttpClient:
                 items.append(OutputItem(kind=kind, text=text))
             outputs = tuple(items)
         raw_exception = results.get("exception")
-        if raw_exception is not None:
+        if raw_exception is not None and str(raw_exception).strip():
             exc_text, was_truncated = truncate_utf8(str(raw_exception), max_bytes=max_bytes)
             if was_truncated:
                 truncated = True

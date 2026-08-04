@@ -140,15 +140,15 @@ async def test_get_paragraph_result_parses_and_truncates() -> None:
     await adapter.close()
 
 
-async def test_get_paragraph_result_error_state() -> None:
+async def test_get_paragraph_result_error_state_preserves_outputs_and_exception() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return _ok(
             {
                 "status": "ERROR",
                 "results": {
                     "code": "ERROR",
-                    "msg": [],
-                    "exception": "boom",
+                    "msg": [{"type": "TEXT", "data": "Traceback: boom"}],
+                    "exception": "upstream exception",
                 },
             }
         )
@@ -156,9 +156,32 @@ async def test_get_paragraph_result_error_state() -> None:
     adapter = _adapter(_mock_transport(handler))
     status, outputs, error, truncated = await adapter.get_paragraph_result("nb1", "p1")
     assert status is ParagraphStatus.ERROR
-    assert outputs == ()
+    assert len(outputs) == 1
+    assert "Traceback: boom" in outputs[0].text
     assert error is not None
-    assert "boom" in error.message
+    assert "upstream exception" in error.message
+    await adapter.close()
+
+
+async def test_get_paragraph_result_error_ignores_empty_exception() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _ok(
+            {
+                "status": "ERROR",
+                "results": {
+                    "code": "ERROR",
+                    "msg": [{"type": "TEXT", "data": "ExitValue: 1"}],
+                    "exception": "",
+                },
+            }
+        )
+
+    adapter = _adapter(_mock_transport(handler))
+    status, outputs, error, truncated = await adapter.get_paragraph_result("nb1", "p1")
+    assert status is ParagraphStatus.ERROR
+    assert len(outputs) == 1
+    assert outputs[0].text == "ExitValue: 1"
+    assert error is None
     await adapter.close()
 
 

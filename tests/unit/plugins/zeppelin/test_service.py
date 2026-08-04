@@ -221,6 +221,36 @@ async def test_get_paragraph_result_returns_result() -> None:
     assert result.truncated is False
 
 
+async def test_get_paragraph_result_error_preserves_failure_outputs_and_exception() -> None:
+    from mcp_stdio.plugins.zeppelin.models import OutputItem, OutputKind, SafeErrorDetail
+
+    service, gateway = _service()
+    gateway.status_result = ParagraphStatus.ERROR
+    gateway.result_outputs = (OutputItem(kind=OutputKind.TEXT, text="Traceback: boom"),)
+    gateway.result_error = SafeErrorDetail(message="upstream exception")
+    result = await service.get_paragraph_result("nb-1", "p-1")
+    assert result.status is ParagraphStatus.ERROR
+    assert len(result.outputs) == 1
+    assert "Traceback: boom" in result.outputs[0].text
+    assert result.error is not None
+    assert result.error.message == "upstream exception"
+
+
+async def test_get_paragraph_result_error_with_empty_exception_keeps_outputs_and_summary() -> None:
+    from mcp_stdio.plugins.zeppelin.models import OutputItem, OutputKind
+
+    service, gateway = _service()
+    gateway.status_result = ParagraphStatus.ERROR
+    gateway.result_outputs = (OutputItem(kind=OutputKind.TEXT, text="ExitValue: 1"),)
+    gateway.result_error = None
+    result = await service.get_paragraph_result("nb-1", "p-1")
+    assert result.status is ParagraphStatus.ERROR
+    assert len(result.outputs) == 1
+    assert result.outputs[0].text == "ExitValue: 1"
+    assert result.error is not None
+    assert result.error.message  # non-empty summary, not the upstream empty exception
+
+
 async def test_list_notebooks_returns_tree() -> None:
     from mcp_stdio.plugins.zeppelin.models import NotebookTreeNode
 

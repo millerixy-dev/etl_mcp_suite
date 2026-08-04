@@ -188,14 +188,6 @@ def test_error_result_contains_only_bounded_safe_detail() -> None:
         lambda: ParagraphResult(
             notebook_id="note",
             paragraph_id="paragraph",
-            status=ParagraphStatus.ERROR,
-            outputs=(OutputItem(kind=OutputKind.TEXT, text="not allowed"),),
-            error=SafeErrorDetail(message="failed"),
-            truncated=False,
-        ),
-        lambda: ParagraphResult(
-            notebook_id="note",
-            paragraph_id="paragraph",
             status=ParagraphStatus.CANCELLED,
             outputs=(),
             error=None,
@@ -208,6 +200,19 @@ def test_paragraph_result_rejects_inconsistent_states(
 ) -> None:
     with pytest.raises(ValidationError):
         construct()
+
+
+def test_paragraph_result_allows_error_with_failure_outputs() -> None:
+    result = ParagraphResult(
+        notebook_id="note",
+        paragraph_id="paragraph",
+        status=ParagraphStatus.ERROR,
+        outputs=(OutputItem(kind=OutputKind.TEXT, text="Traceback: boom"),),
+        error=SafeErrorDetail(message="boom"),
+        truncated=False,
+    )
+    assert result.outputs[0].text == "Traceback: boom"
+    assert result.error is not None and result.error.message == "boom"
 
 
 def test_models_are_strict_frozen_and_reject_unknown_or_sensitive_fields() -> None:
