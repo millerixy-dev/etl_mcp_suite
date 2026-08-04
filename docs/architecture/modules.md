@@ -6,7 +6,7 @@ This document describes the package structure, module responsibilities, dependen
 
 The active OpenSpec proposal, specs, design, and tasks are the normative source of truth. This document is an explanatory architecture view and must be synchronized after approved OpenSpec changes.
 
-The first deliverable slice (`deliver-hive-plugin-slice`) ships the Hive plugin and the shared runtime. Zeppelin and DolphinScheduler modules are described for reference but are deferred to separate follow-up changes; their registry loaders are placeholders that reject runtime construction until implemented.
+The Hive plugin ships via `deliver-hive-plugin-slice` and the Zeppelin plugin via `deliver-zeppelin-plugin-slice`; both are delivered. The DolphinScheduler module is described for reference but remains deferred; its registry loader is a placeholder that rejects runtime construction until implemented.
 
 ## Architectural Style
 
@@ -26,6 +26,74 @@ Dependencies point toward application and domain policy. External systems and MC
 
 This is intentionally “Clean Architecture Lite”: responsibilities and import rules are strict, but v1 avoids a deeply nested directory for every conceptual layer.
 
+## Concentric Circle Layering
+
+The runtime is Clean Architecture concentric circles: dependencies point inward; an outer circle may know an inner circle, never the reverse.
+
+| Circle (outer → inner) | Modules |
+| --- | --- |
+| Frameworks & Drivers | `httpx`, `mcp`/`FastMCP`, `pydantic`, `pyhive`, argparse, asyncio, stdio transport, MCP host process, Hive/Zeppelin upstream servers |
+| Interface Adapters | Inbound: `core/server.py`, `tools.py` · Outbound: `http_client.py`, `plugins/hive/pyhive.py` · Config: `core/config.py`, `plugins/*/config.py` · Ports: `gateway.py`, `contracts/plugin.py` |
+| Use Cases / Application | `service.py` |
+| Entities / Domain | `models.py`, `core/errors.py` |
+
+Composition roots (`bootstrap.py`, `registry.py`, `plugin.py`) sit at the outermost edge and may import any inner circle to wire adapters to use cases at startup; every other module obeys inward-only dependency. `gateway.py` and `contracts/plugin.py` are port contracts — the dependency-inversion boundary between use cases and adapters.
+
+### Inbound to outbound trace
+
+A tool request crosses every circle from the MCP host to the upstream system and back. Using the Zeppelin `add_paragraph` tool as the example:
+
+```text
+① Frameworks & Drivers  MCP host process ──stdin JSON-RPC──►
+② Frameworks & Drivers  FastMCP.run_stdio_async()  decodes JSON-RPC, dispatches tool call
+③ Interface Adapters    core/server.py StdioMcpServer   registered tool, delegates
+④ Interface Adapters    tools.py ZeppelinToolAdapter    MCP args → service call
+⑤ Use Cases             service.py add_paragraph        validate opaque ID/title/body, parse shebang
+⑤ Use Cases             service.py (inline gate)         interpreter allowlist + SQL write-target / sh-command safety
+⑥ Port contract         gateway.py ZeppelinGateway.add_paragraph   ← dependency-inversion boundary
+⑦ Interface Adapters    http_client.py ZeppelinHttpClient   translate to POST /api/notebook/{id}/paragraph
+⑧ Frameworks & Drivers  httpx.AsyncClient                actual TCP/TLS/socket I/O
+⑨ Frameworks & Drivers  Zeppelin REST server              external system
+```
+
+The response returns through the same layers in reverse, each adapter translating back toward the MCP host:
+
+```text
+⑨ Zeppelin response
+  ← ⑧ httpx.Response
+  ← ⑦ http_client.py  parse JSON → domain models, truncate bytes, map exceptions → ZeppelinGatewayError
+  ← ⑥ port returns ParagraphStatus, etc.
+  ← ⑤ service.py  assemble AddParagraphResult
+  ← ④ tools.py  domain model → MCP result
+  ← ③ server.py
+  ← ② FastMCP  serialize JSON-RPC
+  ← ① stdout ──► MCP host process
+```
+
+### Startup wiring
+
+Before any request, the composition root wires every adapter to its use case in a single pass:
+
+```text
+bootstrap.py (parse_args) → registry.py (select zeppelin) → plugin.py (_create_runtime):
+  core/config.py load_config → config.py ZeppelinSettings/ZeppelinSecrets   [config adapter]
+  ├─► http_client.py ZeppelinHttpClient(settings)        [outbound adapter]
+  ├─► service.py ZeppelinNotebookService(gateway, …)     [use case]
+  └─► tools.py ZeppelinToolAdapter(service)              [inbound adapter]
+  → core/server.py StdioMcpServer(runtime) → FastMCP.run_stdio_async()      [driver]
+```
+
+### Dependency direction enforcement
+
+The inward dependency rule is enforced by `tests/contract/test_architecture.py` via `tests/contract/import_rules.py`, which defines four rules:
+
+- **core-to-plugin**: `core.*` must not import any `plugins.*`.
+- **service-to-infrastructure**: a `*.service` module must not import `httpx`, `mcp`, `pyhive`, or sibling modules `http_client`, `plugin`, `pyhive`, `tools`.
+- **shared-to-plugin**: only `registry.py` may import a concrete plugin from shared code.
+- **plugin-to-plugin**: one plugin must not import another.
+
+The use-case layer (`service.py`) therefore sees only ports (`gateway.py`) and domain models (`models.py`); it never imports `httpx`, `FastMCP`, or `http_client.py`. Swapping an HTTP library or MCP framework changes one adapter, leaving use cases and domain models untouched.
+
 ## Process and Package Boundaries
 
 There is one installable Python distribution and one `mcp-stdio` entry point. At runtime, each child process loads exactly one built-in plugin.
@@ -34,7 +102,7 @@ There is one installable Python distribution and one `mcp-stdio` entry point. At
 One installed package
 └── mcp-stdio entry point
 ├── process A: shared runtime + Hive plugin
-├── process B: shared runtime + Zeppelin plugin        (deferred)
+├── process B: shared runtime + Zeppelin plugin
 └── process C: shared runtime + DolphinScheduler plugin (deferred)
 ```
 
@@ -180,16 +248,16 @@ The cache is plugin-local. It may use shared generic utilities only if those uti
 
 ## Zeppelin Module Responsibilities
 
-> **Deferred.** The Zeppelin plugin is not delivered by the Hive slice. The responsibilities below describe the planned shape for a follow-up change.
+> **Delivered** by `deliver-zeppelin-plugin-slice`.
 
-- `config.py` models base URL, authentication references, timeouts, result limits, and interpreter allowlist.
-- `models.py` contains notebook IDs, paragraph IDs, normalized states, bounded outputs, and safe failures.
-- `service.py` enforces use-case sequencing and interpreter authorization.
-- `gateway.py` describes notebook creation, paragraph creation, execution, status, and result retrieval.
-- `http_client.py` owns authentication/session state, URL encoding, REST translation, response bounds, and cleanup.
-- `tools.py` exposes exactly the five approved notebook lifecycle tools.
+- `config.py` models base URL, authentication references, timeouts, result limits, the interpreter allowlist, the SQL write-allowed databases, and the sh allowed commands.
+- `models.py` contains notebook IDs, paragraph IDs, normalized states, bounded outputs, safe failures, and the pure validation functions for SQL write targets, sh commands, and interpreter shebang parsing.
+- `service.py` enforces use-case sequencing and the write-safety gate (interpreter allowlist, SQL write-target database check, sh command allowlist) before the external adapter receives paragraph content.
+- `gateway.py` describes notebook tree listing, notebook creation, paragraph creation, execution, status, and result retrieval.
+- `http_client.py` owns authentication/session state, URL encoding, REST translation, response bounds, `trust_env=False`, and cleanup.
+- `tools.py` exposes exactly the six approved notebook lifecycle tools: `list_notebooks`, `create_notebook`, `add_paragraph`, `run_paragraph`, `get_paragraph_status`, `get_paragraph_result`.
 
-Interpreter authorization belongs in application policy so it is enforced before the external adapter receives paragraph content.
+The interpreter is parsed from the paragraph body's leading `%<interpreter>` shebang and matched against the configured allowlist; the tool never injects or modifies the shebang. Write-safety rules are enforced at `add_paragraph` time, before the body is sent upstream.
 
 ## DolphinScheduler Module Responsibilities
 

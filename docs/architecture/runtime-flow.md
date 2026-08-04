@@ -9,6 +9,7 @@ The active OpenSpec change remains normative:
 - `openspec/changes/support-env-var-configuration/` (configuration source and precedence)
 - `openspec/specs/plugin-stdio-runtime/spec.md` (synced main spec)
 - `openspec/changes/build-plugin-mcp-stdio/` (multi-plugin runtime, partially deferred)
+- `openspec/changes/deliver-zeppelin-plugin-slice/` (Zeppelin notebook tools and write-safety)
 
 If this document differs from an active OpenSpec artifact, update the OpenSpec artifact first and then synchronize this explanation.
 
@@ -22,8 +23,8 @@ MCP Host
 ├── mcp-stdio --plugin hive [--config hive.yaml]   # --config optional; HIVE_* env vars may supply everything
 │     └── Hive plugin ── PyHive/Thrift/LDAP ── HiveServer2
 │
-├── mcp-stdio --plugin zeppelin --config zeppelin.yaml   (deferred)
-│     └── Zeppelin plugin ── REST ── Zeppelin Server      (deferred)
+├── mcp-stdio --plugin zeppelin [--config zeppelin.yaml]   # --config optional; ZEPPELIN_* env vars may supply everything
+│     └── Zeppelin plugin ── REST ── Zeppelin Server
 │
 └── mcp-stdio --plugin dolphinscheduler --config dolphinscheduler.json   (deferred)
       └── DolphinScheduler plugin ── REST ── DolphinScheduler             (deferred)
@@ -31,7 +32,7 @@ MCP Host
 
 Every child process has its own stdin/stdout MCP channel, configuration, secrets, clients, caches, failures, and shutdown lifecycle. Processes share installed package files only.
 
-The first deliverable slice (`deliver-hive-plugin-slice`) ships the Hive plugin and the shared runtime it depends on. The Zeppelin and DolphinScheduler processes shown above are deferred to separate follow-up changes; their registry loaders exist as placeholders that reject runtime construction until implemented.
+The Hive plugin ships via `deliver-hive-plugin-slice` and the Zeppelin plugin via `deliver-zeppelin-plugin-slice`; both are delivered. The DolphinScheduler process remains deferred; its registry loader is a placeholder that rejects runtime construction until implemented.
 
 ## Startup Flow
 
@@ -120,7 +121,7 @@ Approved statement families are `SHOW DATABASES`, `SHOW TABLES`, `DESCRIBE`, and
 
 ## Zeppelin Request Flow
 
-Zeppelin is execution-capable and therefore has a stricter trust boundary. The Zeppelin plugin is **deferred** to a follow-up change; the flow below describes the planned behavior for reference.
+Zeppelin is execution-capable and therefore has a stricter trust boundary. The Zeppelin plugin is **delivered** by `deliver-zeppelin-plugin-slice`.
 
 ```mermaid
 stateDiagram-v2
@@ -136,7 +137,7 @@ stateDiagram-v2
     ResultRead --> [*]
 ```
 
-`add_paragraph` validates the requested interpreter before sending paragraph content upstream. The default interpreter allowlist is empty. `run_paragraph` starts execution and returns promptly; it does not poll until completion. The MCP client controls polling through `get_paragraph_status`, then retrieves bounded output with `get_paragraph_result`.
+`add_paragraph` parses the interpreter from the paragraph body's leading `%<interpreter>` shebang, matches it against the configured allowlist, and enforces write-safety rules (SQL write-target database allowlist, sh command allowlist) before sending paragraph content upstream. `run_paragraph` starts execution and returns promptly; it does not poll until completion. The MCP client controls polling through `get_paragraph_status`, then retrieves bounded output with `get_paragraph_result`.
 
 Opaque notebook and paragraph IDs are size-checked and URL-encoded. Large output is truncated to the configured limit and marked with `truncated: true`.
 
@@ -207,4 +208,4 @@ The implementation must provide automated evidence for:
 - Hive connection isolation and cache behavior;
 - subprocess startup and shutdown behavior.
 
-Zeppelin interpreter denial and DolphinScheduler status-only access are required only once those deferred plugins ship.
+Zeppelin interpreter denial and write-safety gating are verified. DolphinScheduler status-only access is required once that deferred plugin ships.
