@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from mcp_stdio.plugins.zeppelin.safety import (
+    EmbeddedSqlChecker,
     InterpreterAllowlistChecker,
     ParagraphSafetyHook,
     ShCommandChecker,
@@ -141,11 +142,12 @@ def test_build_default_safety_hook_assembles_canonical_order() -> None:
         sql_write_allowed_databases=("tmp_dc_ep",),
         sh_allowed_commands=("echo",),
     )
-    assert len(hook.checkers) == 4
+    assert len(hook.checkers) == 5
     assert isinstance(hook.checkers[0], InterpreterAllowlistChecker)
     assert isinstance(hook.checkers[1], SqlForbiddenKeywordChecker)
     assert isinstance(hook.checkers[2], SqlWriteTargetChecker)
-    assert isinstance(hook.checkers[3], ShCommandChecker)
+    assert isinstance(hook.checkers[3], EmbeddedSqlChecker)
+    assert isinstance(hook.checkers[4], ShCommandChecker)
 
 
 def test_build_default_safety_hook_enforces_blacklist_before_whitelist() -> None:
@@ -158,3 +160,99 @@ def test_build_default_safety_hook_enforces_blacklist_before_whitelist() -> None
     with pytest.raises(ValueError):
         hook.enforce("spark.sql", "DROP TABLE tmp_dc_ep.my_table")
     hook.enforce("spark.sql", "CREATE TABLE tmp_dc_ep.my_table (id int)")
+
+
+def test_embedded_sql_checker_rejects_write_to_non_approved_database() -> None:
+    checker = EmbeddedSqlChecker(
+        forbidden_keywords=frozenset({"DROP", "TRUNCATE"}),
+        allowed_databases=frozenset({"tmp_dc_ep"}),
+    )
+    body = 'spark.sql("INSERT OVERWRITE TABLE dwd_dc_ep.x SELECT 1")'
+    with pytest.raises(ValueError, match="dwd_dc_ep"):
+        checker.check("spark", body)
+
+
+def test_embedded_sql_checker_rejects_forbidden_keyword_via_spark() -> None:
+    checker = EmbeddedSqlChecker(
+        forbidden_keywords=frozenset({"DROP", "TRUNCATE"}),
+        allowed_databases=frozenset({"tmp_dc_ep"}),
+    )
+    body = 'spark.sql("DROP TABLE dwd_dc_ep.x")'
+    with pytest.raises(ValueError, match="DROP"):
+        checker.check("spark", body)
+
+
+def test_embedded_sql_checker_allows_embedded_read() -> None:
+    checker = EmbeddedSqlChecker(
+        forbidden_keywords=frozenset({"DROP", "TRUNCATE"}),
+        allowed_databases=frozenset({"tmp_dc_ep"}),
+    )
+    body = 'spark.sql("SELECT * FROM tmp_dc_ep.t")'
+    checker.check("spark", body)
+
+
+def test_embedded_sql_checker_allows_embedded_write_to_approved_database() -> None:
+    checker = EmbeddedSqlChecker(
+        forbidden_keywords=frozenset({"DROP", "TRUNCATE"}),
+        allowed_databases=frozenset({"tmp_dc_ep"}),
+    )
+    body = 'spark.sql("INSERT INTO tmp_dc_ep.t VALUES (1)")'
+    checker.check("spark", body)
+
+
+def test_embedded_sql_checker_noop_when_no_sql_calls() -> None:
+    checker = EmbeddedSqlChecker(
+        forbidden_keywords=frozenset({"DROP", "TRUNCATE"}),
+        allowed_databases=frozenset({"tmp_dc_ep"}),
+    )
+    body = 'val df = spark.read.parquet("/path")'
+    checker.check("spark", body)
+
+
+def test_embedded_sql_checker_runs_for_spark_interpreter() -> None:
+    checker = EmbeddedSqlChecker(
+        forbidden_keywords=frozenset({"DROP"}),
+        allowed_databases=frozenset({"tmp_dc_ep"}),
+    )
+    body = 'spark.sql("DROP TABLE dwd_dc_ep.x")'
+    with pytest.raises(ValueError):
+        checker.check("spark", body)
+
+
+def test_embedded_sql_checker_rejects_triple_quoted_write() -> None:
+    checker = EmbeddedSqlChecker(
+        forbidden_keywords=frozenset({"DROP", "TRUNCATE"}),
+        allowed_databases=frozenset({"tmp_dc_ep"}),
+    )
+    body = 'spark.sql("""INSERT OVERWRITE TABLE dwd_dc_ep.x SELECT 1""")'
+    with pytest.raises(ValueError, match="dwd_dc_ep"):
+        checker.check("spark", body)
+
+
+def test_embedded_sql_checker_rejects_multiple_calls_when_any_unsafe() -> None:
+    checker = EmbeddedSqlChecker(
+        forbidden_keywords=frozenset({"DROP", "TRUNCATE"}),
+        allowed_databases=frozenset({"tmp_dc_ep"}),
+    )
+    body = 'spark.sql("SELECT 1")\nspark.sql("INSERT INTO other_db.t VALUES (1)")'
+    with pytest.raises(ValueError, match="other_db"):
+        checker.check("spark", body)
+
+
+def test_embedded_sql_checker_allows_multiple_safe_calls() -> None:
+    checker = EmbeddedSqlChecker(
+        forbidden_keywords=frozenset({"DROP", "TRUNCATE"}),
+        allowed_databases=frozenset({"tmp_dc_ep"}),
+    )
+    body = 'spark.sql("SELECT 1")\nspark.sql("SELECT * FROM tmp_dc_ep.t")'
+    checker.check("spark", body)
+
+
+def test_embedded_sql_checker_rejects_forbidden_truncate_via_spark() -> None:
+    checker = EmbeddedSqlChecker(
+        forbidden_keywords=frozenset({"DROP", "TRUNCATE"}),
+        allowed_databases=frozenset({"tmp_dc_ep"}),
+    )
+    body = 'spark.sql("TRUNCATE TABLE tmp_dc_ep.x")'
+    with pytest.raises(ValueError, match="TRUNCATE"):
+        checker.check("spark", body)

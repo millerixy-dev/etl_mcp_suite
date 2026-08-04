@@ -381,6 +381,12 @@ _SQL_WRITE_KEYWORDS = frozenset(keyword for keyword, _ in _SQL_WRITE_TARGET_PATT
 _SQL_WRITE_TARGET_BY_KEYWORD: dict[str, re.Pattern[str]] = dict(_SQL_WRITE_TARGET_PATTERNS)
 _SQL_LEADING_KEYWORD = re.compile(r"\s*([A-Za-z]+)")
 
+_EMBEDDED_SQL_PATTERN = re.compile(
+    r'\bsql\s*\(\s*(?:"""([\s\S]*?)"""|"((?:[^"\\]|\\.)*)"|'
+    r"\'((?:[^\'\\]|\\.)*)\')",
+    re.IGNORECASE,
+)
+
 
 def validate_sql_write_target(body: str, allowed_databases: tuple[str, ...]) -> str:
     """Reject SQL write statements whose target database is not allowlisted."""
@@ -417,6 +423,26 @@ def validate_sql_forbidden_keywords(body: str, forbidden_keywords: frozenset[str
         if keyword in forbidden:
             raise ValueError(f"sql keyword '{keyword}' is forbidden by the blacklist")
     return body
+
+
+def extract_embedded_sql(body: str) -> list[str]:
+    """Extract SQL text from ``sql("...")`` string-literal arguments.
+
+    Matches any ``sql(`` call at a word boundary - including ``spark.sql(``,
+    ``sqlContext.sql(``, and bare ``sql(`` - and extracts the string-literal
+    argument. Triple-quoted (prose triple-double-quote), double-quoted, and
+    single-quoted arguments are supported. Interpolated strings (Scala
+    ``s"..."``, Python ``f"..."``) and dynamically constructed SQL are not
+    statically extractable and are not returned.
+    """
+
+    results: list[str] = []
+    for match in _EMBEDDED_SQL_PATTERN.finditer(body):
+        for group in match.groups():
+            if group is not None:
+                results.append(group)
+                break
+    return results
 
 
 def parse_paragraph_interpreter(body: str) -> str | None:

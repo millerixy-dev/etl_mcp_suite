@@ -346,3 +346,87 @@ async def test_list_notebooks_returns_tree() -> None:
     assert len(result.nodes) == 1
     assert result.nodes[0].name == "team"
     assert result.nodes[0].children[0].notebook_id == "nb-1"
+
+
+async def test_add_paragraph_rejects_spark_sql_write_to_non_approved_db() -> None:
+    service, gateway = _service()
+    body = (
+        '%spark\n'
+        'spark.sql("INSERT OVERWRITE TABLE dwd_dc_ep.x SELECT 1")'
+    )
+    with pytest.raises(ZeppelinGatewayError) as exc_info:
+        await service.add_paragraph("nb-1", "title", body)
+    assert exc_info.value.tool_error.category == ErrorCategory.INVALID_INPUT
+    assert gateway.calls == []
+
+
+async def test_add_paragraph_rejects_spark_sql_forbidden_drop() -> None:
+    service, gateway = _service()
+    body = '%spark\nspark.sql("DROP TABLE dwd_dc_ep.x")'
+    with pytest.raises(ZeppelinGatewayError) as exc_info:
+        await service.add_paragraph("nb-1", "title", body)
+    assert exc_info.value.tool_error.category == ErrorCategory.INVALID_INPUT
+    assert exc_info.value.tool_error.explanation is not None
+    assert "DROP" in exc_info.value.tool_error.explanation
+    assert gateway.calls == []
+
+
+async def test_add_paragraph_explains_embedded_sql_write_target_rejection() -> None:
+    service, gateway = _service()
+    body = (
+        '%spark\n'
+        'spark.sql("INSERT OVERWRITE TABLE dwd_dc_ep.x SELECT 1")'
+    )
+    with pytest.raises(ZeppelinGatewayError) as exc_info:
+        await service.add_paragraph("nb-1", "title", body)
+    assert exc_info.value.tool_error.explanation is not None
+    assert "dwd_dc_ep" in exc_info.value.tool_error.explanation
+
+
+async def test_add_paragraph_allows_spark_sql_read() -> None:
+    service, gateway = _service()
+    body = '%spark\nspark.sql("SELECT * FROM tmp_dc_ep.t")'
+    result = await service.add_paragraph("nb-1", "title", body)
+    assert result.paragraph_id == "p-1"
+    assert result.interpreter == "spark"
+    assert any(call[0] == "add_paragraph" for call in gateway.calls)
+
+
+async def test_add_paragraph_allows_spark_code_without_sql_calls() -> None:
+    service, gateway = _service()
+    body = '%spark\nval df = spark.read.parquet("/path")'
+    result = await service.add_paragraph("nb-1", "title", body)
+    assert result.paragraph_id == "p-1"
+    assert any(call[0] == "add_paragraph" for call in gateway.calls)
+
+
+async def test_add_paragraph_allows_spark_sql_write_to_approved_database() -> None:
+    service, gateway = _service()
+    body = '%spark\nspark.sql("INSERT INTO tmp_dc_ep.t VALUES (1)")'
+    result = await service.add_paragraph("nb-1", "title", body)
+    assert result.paragraph_id == "p-1"
+    assert any(call[0] == "add_paragraph" for call in gateway.calls)
+
+
+async def test_add_paragraph_rejects_spark_sql_triple_quoted_write_to_non_approved() -> None:
+    service, gateway = _service()
+    body = (
+        '%spark\n'
+        'spark.sql("""INSERT OVERWRITE TABLE dwd_dc_ep.x\nSELECT 1""")'
+    )
+    with pytest.raises(ZeppelinGatewayError) as exc_info:
+        await service.add_paragraph("nb-1", "title", body)
+    assert exc_info.value.tool_error.category == ErrorCategory.INVALID_INPUT
+    assert gateway.calls == []
+
+
+async def test_add_paragraph_allows_multiple_safe_spark_sql_calls() -> None:
+    service, gateway = _service()
+    body = (
+        '%spark\n'
+        'spark.sql("SELECT 1")\n'
+        'spark.sql("SELECT * FROM tmp_dc_ep.t")'
+    )
+    result = await service.add_paragraph("nb-1", "title", body)
+    assert result.paragraph_id == "p-1"
+    assert any(call[0] == "add_paragraph" for call in gateway.calls)

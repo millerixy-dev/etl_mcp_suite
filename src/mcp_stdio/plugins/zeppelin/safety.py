@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from mcp_stdio.plugins.zeppelin.models import (
+    extract_embedded_sql,
     validate_sh_command,
     validate_sql_forbidden_keywords,
     validate_sql_write_target,
@@ -61,6 +62,28 @@ class SqlWriteTargetChecker:
 
 
 @dataclass(frozen=True)
+class EmbeddedSqlChecker:
+    """Reject SQL embedded in ``sql("...")`` calls from any interpreter.
+
+    Execution-capable interpreters (e.g. ``spark``) can run arbitrary code
+    including ``spark.sql("INSERT OVERWRITE TABLE dwd_dc_ep.x ...")``. The
+    SQL checkers above only gate interpreters whose name contains ``sql``,
+    so this checker scans every interpreter body for ``sql()`` string-literal
+    arguments and validates each through the same forbidden-keyword and
+    write-target rules. Interpolated strings and dynamically constructed SQL
+    are not statically extractable (see :func:`extract_embedded_sql`).
+    """
+
+    forbidden_keywords: frozenset[str]
+    allowed_databases: frozenset[str]
+
+    def check(self, interpreter: str, body: str) -> None:
+        for sql_text in extract_embedded_sql(body):
+            validate_sql_forbidden_keywords(sql_text, self.forbidden_keywords)
+            validate_sql_write_target(sql_text, tuple(self.allowed_databases))
+
+
+@dataclass(frozen=True)
 class ShCommandChecker:
     """Reject ``sh`` paragraphs whose first command is not allowlisted."""
 
@@ -105,6 +128,10 @@ def build_default_safety_hook(
             InterpreterAllowlistChecker(frozenset(allowed_interpreters)),
             SqlForbiddenKeywordChecker(frozenset(sql_forbidden_keywords)),
             SqlWriteTargetChecker(frozenset(sql_write_allowed_databases)),
+            EmbeddedSqlChecker(
+                forbidden_keywords=frozenset(sql_forbidden_keywords),
+                allowed_databases=frozenset(sql_write_allowed_databases),
+            ),
             ShCommandChecker(frozenset(sh_allowed_commands)),
         )
     )

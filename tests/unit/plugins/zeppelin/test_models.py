@@ -18,6 +18,7 @@ from mcp_stdio.plugins.zeppelin.models import (
     RunParagraphResult,
     SafeErrorDetail,
     encode_opaque_id,
+    extract_embedded_sql,
     normalize_paragraph_status,
     parse_paragraph_interpreter,
     truncate_utf8,
@@ -434,3 +435,81 @@ def test_parse_paragraph_interpreter_rejects_malformed_shebang() -> None:
         parse_paragraph_interpreter("%1bad\nbody")
     with pytest.raises(ValueError):
         parse_paragraph_interpreter("% spark\nbody")
+
+def test_extract_embedded_sql_triple_quoted() -> None:
+    body = '%spark\nspark.sql("""INSERT OVERWRITE TABLE dwd_dc_ep.x SELECT 1""")'
+    assert extract_embedded_sql(body) == ["INSERT OVERWRITE TABLE dwd_dc_ep.x SELECT 1"]
+
+
+def test_extract_embedded_sql_double_quoted() -> None:
+    body = '%spark\nspark.sql("INSERT INTO tmp_dc_ep.t VALUES (1)")'
+    assert extract_embedded_sql(body) == ["INSERT INTO tmp_dc_ep.t VALUES (1)"]
+
+
+def test_extract_embedded_sql_single_quoted() -> None:
+    body = "%spark\nspark.sql('SELECT * FROM tmp_dc_ep.t')"
+    assert extract_embedded_sql(body) == ["SELECT * FROM tmp_dc_ep.t"]
+
+
+def test_extract_embedded_sql_multiple_calls() -> None:
+    body = (
+        '%spark\n'
+        'spark.sql("SELECT 1")\n'
+        'spark.sql("INSERT INTO other_db.t VALUES (1)")'
+    )
+    assert extract_embedded_sql(body) == ["SELECT 1", "INSERT INTO other_db.t VALUES (1)"]
+
+
+def test_extract_embedded_sql_no_calls_returns_empty() -> None:
+    body = "%spark\nval df = spark.read.parquet(\"/path\")"
+    assert extract_embedded_sql(body) == []
+
+
+def test_extract_embedded_sql_word_boundary_excludes_mysql() -> None:
+    body = '%python\nmysql("INSERT INTO db.t VALUES (1)")'
+    assert extract_embedded_sql(body) == []
+
+
+def test_extract_embedded_sql_word_boundary_excludes_read_sql() -> None:
+    body = '%python\npd.read_sql("SELECT * FROM t")'
+    assert extract_embedded_sql(body) == []
+
+
+def test_extract_embedded_sql_word_boundary_excludes_do_sql() -> None:
+    body = '%python\ndo_sql("SELECT 1")'
+    assert extract_embedded_sql(body) == []
+
+
+def test_extract_embedded_sql_matches_sqlcontext_sql() -> None:
+    body = '%spark\nsqlContext.sql("DROP TABLE dwd_dc_ep.x")'
+    assert extract_embedded_sql(body) == ["DROP TABLE dwd_dc_ep.x"]
+
+
+def test_extract_embedded_sql_matches_bare_sql() -> None:
+    body = '%spark\nsql("SELECT 1")'
+    assert extract_embedded_sql(body) == ["SELECT 1"]
+
+
+def test_extract_embedded_sql_case_insensitive() -> None:
+    body = '%spark\nspark.SQL("DROP TABLE dwd_dc_ep.x")'
+    assert extract_embedded_sql(body) == ["DROP TABLE dwd_dc_ep.x"]
+
+
+def test_extract_embedded_sql_ignores_scala_interpolated_string() -> None:
+    body = '%spark\nspark.sql(s"INSERT INTO $db.$table VALUES (1)")'
+    assert extract_embedded_sql(body) == []
+
+
+def test_extract_embedded_sql_ignores_python_fstring() -> None:
+    body = '%spark\nspark.sql(f"INSERT INTO {db}.{table} VALUES (1)")'
+    assert extract_embedded_sql(body) == []
+
+
+def test_extract_embedded_sql_multiline_triple_quoted() -> None:
+    body = '%spark\nspark.sql("""\nINSERT OVERWRITE TABLE dwd_dc_ep.x\nSELECT 1\n""")'
+    assert extract_embedded_sql(body) == ["\nINSERT OVERWRITE TABLE dwd_dc_ep.x\nSELECT 1\n"]
+
+
+def test_extract_embedded_sql_handles_escaped_quotes_in_double_quoted() -> None:
+    body = '%spark\nspark.sql("SELECT \\"col\\" FROM t")'
+    assert extract_embedded_sql(body) == ['SELECT \\"col\\" FROM t']
