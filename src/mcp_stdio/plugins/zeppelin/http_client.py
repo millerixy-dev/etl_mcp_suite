@@ -15,6 +15,7 @@ from mcp_stdio.plugins.zeppelin.models import (
     OutputItem,
     OutputKind,
     ParagraphStatus,
+    RestartInterpreterResult,
     SafeErrorDetail,
     build_notebook_tree,
     normalize_paragraph_status,
@@ -207,6 +208,38 @@ class ZeppelinHttpClient:
                 {},
             )
         return cast(dict[str, Any], body)
+
+    async def restart_interpreter(self, setting_id: str) -> RestartInterpreterResult:
+        encoded_id = self._encode_id(setting_id)
+        client = await self._ensure_authenticated()
+        body = await self._request_json(
+            client,
+            "PUT",
+            f"/interpreter/setting/restart/{encoded_id}",
+            json_payload=None,
+            operation=ToolOperation.RESTART_INTERPRETER,
+            identifiers={"setting_id": setting_id},
+        )
+        if not isinstance(body, dict):
+            raise self._gateway_error(
+                ErrorCategory.UNEXPECTED_RESPONSE,
+                ToolOperation.RESTART_INTERPRETER,
+                {"setting_id": setting_id},
+            )
+        typed_body = cast(dict[str, Any], body)
+        try:
+            return RestartInterpreterResult(
+                setting_id=str(typed_body["id"]),
+                name=str(typed_body["name"]),
+                group=str(typed_body["group"]),
+                status=str(typed_body["status"]),
+            )
+        except KeyError:
+            raise self._gateway_error(
+                ErrorCategory.UNEXPECTED_RESPONSE,
+                ToolOperation.RESTART_INTERPRETER,
+                {"setting_id": setting_id},
+            ) from None
 
     async def close(self) -> None:
         if self._closed:

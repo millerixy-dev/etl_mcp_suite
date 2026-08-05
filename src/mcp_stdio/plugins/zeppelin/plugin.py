@@ -83,6 +83,7 @@ def _create_runtime(
     service = ZeppelinNotebookService(
         gateway=gateway,
         safety_hook=safety_hook,
+        restartable_interpreter_settings=loaded.settings.restartable_interpreter_settings,
         max_notebook_name_chars=loaded.settings.max_notebook_name_chars,
         max_paragraph_title_chars=loaded.settings.max_paragraph_title_chars,
         max_paragraph_body_bytes=loaded.settings.max_paragraph_body_bytes,

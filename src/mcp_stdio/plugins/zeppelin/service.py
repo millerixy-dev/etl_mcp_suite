@@ -11,9 +11,11 @@ from mcp_stdio.plugins.zeppelin.models import (
     ParagraphResult,
     ParagraphStatus,
     ParagraphStatusResult,
+    RestartInterpreterResult,
     RunParagraphResult,
     SafeErrorDetail,
     parse_paragraph_interpreter,
+    validate_interpreter_name,
     validate_notebook_name,
     validate_opaque_id,
     validate_paragraph_body,
@@ -43,6 +45,7 @@ class ZeppelinNotebookService:
         *,
         gateway: ZeppelinGateway,
         safety_hook: ParagraphSafetyHook,
+        restartable_interpreter_settings: tuple[str, ...],
         max_notebook_name_chars: int,
         max_paragraph_title_chars: int,
         max_paragraph_body_bytes: int,
@@ -50,6 +53,7 @@ class ZeppelinNotebookService:
     ) -> None:
         self._gateway = gateway
         self._safety_hook = safety_hook
+        self._restartable = frozenset(restartable_interpreter_settings)
         self._max_nb = max_notebook_name_chars
         self._max_title = max_paragraph_title_chars
         self._max_body = max_paragraph_body_bytes
@@ -58,6 +62,20 @@ class ZeppelinNotebookService:
     async def list_notebooks(self) -> NotebookTreeResult:
         nodes = await self._gateway.list_notebooks()
         return NotebookTreeResult(nodes=nodes)
+
+    async def restart_interpreter(self, setting_id: object) -> RestartInterpreterResult:
+        try:
+            sid = validate_interpreter_name(setting_id)
+        except ValueError as exc:
+            raise _invalid_input(
+                ToolOperation.RESTART_INTERPRETER, explanation=str(exc)
+            ) from None
+        if sid not in self._restartable:
+            raise _invalid_input(
+                ToolOperation.RESTART_INTERPRETER,
+                explanation=f"interpreter setting '{sid}' is not in the restart allowlist",
+            ) from None
+        return await self._gateway.restart_interpreter(sid)
 
     async def create_notebook(self, name: object) -> CreateNotebookResult:
         try:

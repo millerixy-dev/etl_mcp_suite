@@ -9,7 +9,7 @@ from mcp_stdio.core.errors import ErrorCategory
 from mcp_stdio.plugins.zeppelin.config import ZeppelinSecrets, ZeppelinSettings
 from mcp_stdio.plugins.zeppelin.gateway import ZeppelinGatewayError
 from mcp_stdio.plugins.zeppelin.http_client import ZeppelinHttpClient
-from mcp_stdio.plugins.zeppelin.models import ParagraphStatus
+from mcp_stdio.plugins.zeppelin.models import ParagraphStatus, RestartInterpreterResult
 
 
 def _settings(**overrides: object) -> ZeppelinSettings:
@@ -278,4 +278,98 @@ async def test_list_notebooks_builds_directory_tree() -> None:
     assert len(team.children) == 2
     solo = next(n for n in tree if n.name == "solo")
     assert solo.notebook_id == "nb-3"
+    await adapter.close()
+
+
+async def test_restart_interpreter_calls_put_restart_endpoint() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/login":
+            return httpx.Response(200)
+        assert request.url.path == "/api/interpreter/setting/restart/spark"
+        assert request.method == "PUT"
+        return _ok({
+            "id": "spark",
+            "name": "spark",
+            "group": "spark",
+            "status": "READY",
+            "properties": {"key": "value"},
+            "dependencies": ["jar1"],
+            "option": {"remote": True},
+            "interpreterGroup": [{"name": "spark", "class": "SparkInterpreter"}],
+        })
+
+    adapter = _adapter(_mock_transport(handler), secrets=_secrets())
+    result = await adapter.restart_interpreter("spark")
+    assert isinstance(result, RestartInterpreterResult)
+    assert result.setting_id == "spark"
+    assert result.name == "spark"
+    assert result.group == "spark"
+    assert result.status == "READY"
+    await adapter.close()
+
+
+async def test_restart_interpreter_discards_extra_fields() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/login":
+            return httpx.Response(200)
+        return _ok({
+            "id": "sh",
+            "name": "sh",
+            "group": "sh",
+            "status": "READY",
+            "properties": {"secret": "value"},
+            "dependencies": ["evil.jar"],
+        })
+
+    adapter = _adapter(_mock_transport(handler), secrets=_secrets())
+    result = await adapter.restart_interpreter("sh")
+    assert result.setting_id == "sh"
+    # Ensure model has only the 4 approved fields
+    assert set(type(result).model_fields) == {"setting_id", "name", "group", "status"}
+    await adapter.close()
+
+
+async def test_restart_interpreter_maps_500_to_upstream_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/login":
+            return httpx.Response(200)
+        return httpx.Response(500, json={
+            "exception": "NullPointerException",
+            "stacktrace": "java.lang.NullPointerException",
+        })
+
+    adapter = _adapter(_mock_transport(handler), secrets=_secrets())
+    with pytest.raises(ZeppelinGatewayError) as exc_info:
+        await adapter.restart_interpreter("nonexistent")
+    assert exc_info.value.tool_error.category == ErrorCategory.UPSTREAM_ERROR
+    assert exc_info.value.tool_error.identifiers == {"setting_id": "nonexistent"}
+    await adapter.close()
+
+
+async def test_restart_interpreter_encodes_setting_id_in_path() -> None:
+    seen_paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/login":
+            return httpx.Response(200)
+        raw = request.url.raw_path
+        seen_paths.append(raw.decode() if isinstance(raw, bytes) else raw)
+        return _ok({"id": "spark", "name": "spark", "group": "spark", "status": "READY"})
+
+    adapter = _adapter(_mock_transport(handler), secrets=_secrets())
+    await adapter.restart_interpreter("spark")
+    assert seen_paths[-1] == "/api/interpreter/setting/restart/spark"
+    await adapter.close()
+
+
+async def test_restart_interpreter_handles_unexpected_response_shape() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/login":
+            return httpx.Response(200)
+        return _ok("not-a-dict")
+
+    adapter = _adapter(_mock_transport(handler), secrets=_secrets())
+    with pytest.raises(ZeppelinGatewayError) as exc_info:
+        await adapter.restart_interpreter("spark")
+    assert exc_info.value.tool_error.category == ErrorCategory.UNEXPECTED_RESPONSE
     await adapter.close()

@@ -15,6 +15,7 @@ from mcp_stdio.plugins.zeppelin.models import (
     ParagraphResult,
     ParagraphStatus,
     ParagraphStatusResult,
+    RestartInterpreterResult,
     RunParagraphResult,
     SafeErrorDetail,
     encode_opaque_id,
@@ -513,3 +514,27 @@ def test_extract_embedded_sql_multiline_triple_quoted() -> None:
 def test_extract_embedded_sql_handles_escaped_quotes_in_double_quoted() -> None:
     body = '%spark\nspark.sql("SELECT \\"col\\" FROM t")'
     assert extract_embedded_sql(body) == ['SELECT \\"col\\" FROM t']
+
+
+def test_restart_interpreter_result_is_frozen_with_four_fields() -> None:
+    result = RestartInterpreterResult(
+        setting_id="spark",
+        name="spark",
+        group="spark",
+        status="READY",
+    )
+    assert result.setting_id == "spark"
+    assert result.name == "spark"
+    assert result.group == "spark"
+    assert result.status == "READY"
+
+
+def test_restart_interpreter_result_rejects_extra_fields() -> None:
+    with pytest.raises(ValidationError):
+        RestartInterpreterResult(
+            setting_id="spark",
+            name="spark",
+            group="spark",
+            status="READY",
+            properties={"key": "value"},
+        )

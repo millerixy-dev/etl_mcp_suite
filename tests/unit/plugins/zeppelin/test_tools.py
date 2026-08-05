@@ -28,7 +28,7 @@ def _write_zeppelin_config(path: Path) -> Path:
     return path
 
 
-def test_zeppelin_registers_exact_five_tool_set(tmp_path: Path) -> None:
+def test_zeppelin_registers_exact_seven_tool_set(tmp_path: Path) -> None:
     def reject_network(*args: object, **kwargs: object) -> object:
         del args, kwargs
         raise AssertionError("startup attempted network access")
@@ -50,6 +50,7 @@ def test_zeppelin_registers_exact_five_tool_set(tmp_path: Path) -> None:
         "get_paragraph_result",
         "get_paragraph_status",
         "list_notebooks",
+        "restart_interpreter",
         "run_paragraph",
     ]
     builtins.__import__ = original_import
@@ -62,3 +63,12 @@ def test_add_paragraph_takes_no_interpreter_input() -> None:
 
     params = set(inspect.signature(ZeppelinToolAdapter.add_paragraph).parameters) - {"self"}
     assert params == {"notebook_id", "title", "body"}
+
+
+def test_restart_interpreter_takes_setting_id_input() -> None:
+    import inspect
+
+    from mcp_stdio.plugins.zeppelin.tools import ZeppelinToolAdapter
+
+    params = set(inspect.signature(ZeppelinToolAdapter.restart_interpreter).parameters) - {"self"}
+    assert params == {"setting_id"}

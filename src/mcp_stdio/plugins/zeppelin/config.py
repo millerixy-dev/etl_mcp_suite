@@ -63,6 +63,7 @@ class ZeppelinSettings(StrictConfigModel):
         "DROP",
         "TRUNCATE",
     )
+    restartable_interpreter_settings: Annotated[tuple[str, ...], BeforeValidator(_to_tuple)] = ()
 
     @field_validator("base_url")
     @classmethod
@@ -104,6 +105,15 @@ class ZeppelinSettings(StrictConfigModel):
         uppered = tuple(str(entry).upper() for entry in value)
         return _validate_unique_tokens(
             uppered, _SQL_KEYWORD_PATTERN, item_label="forbidden keyword"
+        )
+
+    @field_validator("restartable_interpreter_settings")
+    @classmethod
+    def validate_restartable_interpreter_settings(
+        cls, value: tuple[str, ...] | list[str]
+    ) -> tuple[str, ...]:
+        return _validate_unique_tokens(
+            value, _INTERPRETER_PATTERN, item_label="restartable interpreter setting"
         )
 
 

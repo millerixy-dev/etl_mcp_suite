@@ -9,6 +9,7 @@ from mcp_stdio.plugins.zeppelin.models import (
     NotebookTreeNode,
     OutputItem,
     ParagraphStatus,
+    RestartInterpreterResult,
     SafeErrorDetail,
 )
 
@@ -58,6 +59,11 @@ class ZeppelinGateway(Protocol):
         self, notebook_id: str, paragraph_id: str
     ) -> tuple[ParagraphStatus, tuple[OutputItem, ...], SafeErrorDetail | None, bool]:
         """Return status, bounded outputs, optional error, and truncation flag."""
+
+        ...
+
+    async def restart_interpreter(self, setting_id: str) -> RestartInterpreterResult:
+        """Restart an interpreter setting and return bounded status."""
 
         ...
 

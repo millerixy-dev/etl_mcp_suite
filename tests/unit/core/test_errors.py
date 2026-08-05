@@ -60,7 +60,20 @@ def test_tool_operations_are_closed_to_v1_tools_plus_internal_fallback() -> None
         "get_paragraph_status",
         "get_paragraph_result",
         "get_server_status",
+        "restart_interpreter",
     }
+
+
+def test_restart_interpreter_operation_allows_setting_id_identifier() -> None:
+    from mcp_stdio.core.errors import ErrorCategory, ToolError, ToolOperation
+
+    error = ToolError.create(
+        category=ErrorCategory.UPSTREAM_ERROR,
+        operation=ToolOperation.RESTART_INTERPRETER,
+        retryable=False,
+        identifiers={"setting_id": "spark"},
+    )
+    assert error.to_dict(secret_values=())["identifiers"] == {"setting_id": "spark"}
 
 
 def test_tool_error_serializes_only_the_safe_structured_contract() -> None:

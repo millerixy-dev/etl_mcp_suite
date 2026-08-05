@@ -10,6 +10,7 @@ from mcp_stdio.plugins.zeppelin.models import (
     OutputItem,
     OutputKind,
     ParagraphStatus,
+    RestartInterpreterResult,
     SafeErrorDetail,
 )
 from mcp_stdio.plugins.zeppelin.safety import build_default_safety_hook
@@ -60,6 +61,15 @@ class FakeGateway:
         self.calls.append(("get_paragraph_result", notebook_id, paragraph_id))
         return self.status_result, self.result_outputs, self.result_error, self.result_truncated
 
+    async def restart_interpreter(self, setting_id: str) -> RestartInterpreterResult:
+        self.calls.append(("restart_interpreter", setting_id))
+        return RestartInterpreterResult(
+            setting_id=setting_id,
+            name=setting_id,
+            group=setting_id,
+            status="READY",
+        )
+
     async def close(self) -> None:
         pass
 
@@ -74,6 +84,7 @@ def _service(
     sql_write_allowed_databases: tuple[str, ...] = ("tmp_dc_ep",),
     sh_allowed_commands: tuple[str, ...] = (),
     sql_forbidden_keywords: tuple[str, ...] = ("DROP", "TRUNCATE"),
+    restartable_interpreter_settings: tuple[str, ...] = (),
 ) -> tuple[ZeppelinNotebookService, FakeGateway]:
     gateway = FakeGateway()
     safety_hook = build_default_safety_hook(
@@ -85,6 +96,7 @@ def _service(
     service = ZeppelinNotebookService(
         gateway=gateway,
         safety_hook=safety_hook,
+        restartable_interpreter_settings=restartable_interpreter_settings,
         max_notebook_name_chars=max_notebook_name_chars,
         max_paragraph_title_chars=max_paragraph_title_chars,
         max_paragraph_body_bytes=max_paragraph_body_bytes,
@@ -430,3 +442,35 @@ async def test_add_paragraph_allows_multiple_safe_spark_sql_calls() -> None:
     result = await service.add_paragraph("nb-1", "title", body)
     assert result.paragraph_id == "p-1"
     assert any(call[0] == "add_paragraph" for call in gateway.calls)
+
+
+async def test_restart_interpreter_rejects_non_allowlisted_before_network() -> None:
+    service, gateway = _service()
+    with pytest.raises(ZeppelinGatewayError) as exc_info:
+        await service.restart_interpreter("spark")
+    assert exc_info.value.tool_error.category == ErrorCategory.INVALID_INPUT
+    assert gateway.calls == []
+
+
+async def test_restart_interpreter_rejects_malformed_setting_id() -> None:
+    service, gateway = _service(restartable_interpreter_settings=("spark",))
+    with pytest.raises(ZeppelinGatewayError) as exc_info:
+        await service.restart_interpreter("bad setting!")
+    assert exc_info.value.tool_error.category == ErrorCategory.INVALID_INPUT
+    assert gateway.calls == []
+
+
+async def test_restart_interpreter_allowlisted_calls_gateway() -> None:
+    service, gateway = _service(restartable_interpreter_settings=("spark",))
+    result = await service.restart_interpreter("spark")
+    assert isinstance(result, RestartInterpreterResult)
+    assert result.setting_id == "spark"
+    assert result.status == "READY"
+    assert any(call[0] == "restart_interpreter" for call in gateway.calls)
+
+
+async def test_restart_interpreter_returns_result_from_gateway() -> None:
+    service, gateway = _service(restartable_interpreter_settings=("spark", "sh"))
+    result = await service.restart_interpreter("sh")
+    assert result.setting_id == "sh"
+    assert result.group == "sh"

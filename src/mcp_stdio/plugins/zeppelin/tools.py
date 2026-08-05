@@ -18,6 +18,7 @@ from mcp_stdio.plugins.zeppelin.models import (
     NotebookTreeResult,
     ParagraphResult,
     ParagraphStatusResult,
+    RestartInterpreterResult,
     RunParagraphResult,
 )
 from mcp_stdio.plugins.zeppelin.service import ZeppelinNotebookService
@@ -26,7 +27,7 @@ ZeppelinToolString = Annotated[object, WithJsonSchema({"type": "string"})]
 
 
 class ZeppelinToolAdapter:
-    """Translate five typed inbound calls to the Zeppelin application service."""
+    """Translate typed inbound calls to the Zeppelin application service."""
 
     def __init__(
         self,
@@ -38,7 +39,7 @@ class ZeppelinToolAdapter:
         self._secret_values = tuple(value for value in secret_values if value)
 
     def register_tools(self, registrar: ToolRegistrar) -> None:
-        """Register exactly the five approved Zeppelin tools."""
+        """Register exactly the seven approved Zeppelin tools."""
 
         registrar.add_tool(self.list_notebooks, name="list_notebooks")
         registrar.add_tool(self.create_notebook, name="create_notebook")
@@ -46,6 +47,7 @@ class ZeppelinToolAdapter:
         registrar.add_tool(self.run_paragraph, name="run_paragraph")
         registrar.add_tool(self.get_paragraph_status, name="get_paragraph_status")
         registrar.add_tool(self.get_paragraph_result, name="get_paragraph_result")
+        registrar.add_tool(self.restart_interpreter, name="restart_interpreter")
 
     async def list_notebooks(self) -> NotebookTreeResult:
         """List the Zeppelin notebook directory tree."""
@@ -128,6 +130,18 @@ class ZeppelinToolAdapter:
         except Exception as error:
             self._raise_tool_error(
                 unexpected_tool_error(error, operation=ToolOperation.GET_PARAGRAPH_RESULT)
+            )
+
+    async def restart_interpreter(self, setting_id: ZeppelinToolString) -> RestartInterpreterResult:
+        """Restart an allowlisted Zeppelin interpreter setting."""
+
+        try:
+            return await self._service.restart_interpreter(setting_id)
+        except ZeppelinGatewayError as error:
+            self._raise_tool_error(error.tool_error)
+        except Exception as error:
+            self._raise_tool_error(
+                unexpected_tool_error(error, operation=ToolOperation.RESTART_INTERPRETER)
             )
 
     def _raise_tool_error(self, error: ToolError) -> NoReturn:

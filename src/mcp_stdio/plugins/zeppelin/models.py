@@ -190,6 +190,17 @@ class RunParagraphResult(BaseModel):
     status: ParagraphStatus
 
 
+class RestartInterpreterResult(BaseModel):
+    """Result of restarting an interpreter setting."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    setting_id: str
+    name: str
+    group: str
+    status: str
+
+
 class ParagraphStatusResult(BaseModel):
     """Result of inspecting paragraph status."""
 

@@ -296,5 +296,41 @@ def test_schema_contains_only_the_approved_v1_fields() -> None:
         "sql_write_allowed_databases",
         "sh_allowed_commands",
         "sql_forbidden_keywords",
+        "restartable_interpreter_settings",
     }
     assert set(ZeppelinSecrets.model_fields) == {"username", "password"}
+
+
+def test_restartable_interpreter_settings_default_to_empty(tmp_path: Path) -> None:
+    loaded = _load(_write_json(tmp_path / "zeppelin.json", _document()))
+    assert loaded.settings.restartable_interpreter_settings == ()
+
+
+def test_restartable_interpreter_settings_support_environment_override(
+    tmp_path: Path,
+) -> None:
+    loaded = _load(
+        _write_json(tmp_path / "zeppelin.json", _document()),
+        {
+            "MCP_STDIO__SETTINGS__RESTARTABLE_INTERPRETER_SETTINGS": '["spark","sh"]',
+        },
+    )
+    assert loaded.settings.restartable_interpreter_settings == ("spark", "sh")
+
+
+def test_restartable_interpreter_settings_reject_malformed_entry(
+    tmp_path: Path,
+) -> None:
+    document = _document()
+    document["settings"]["restartable_interpreter_settings"] = ["spark", "1bad"]
+    with pytest.raises(ConfigError):
+        _load(_write_json(tmp_path / "zeppelin.json", document))
+
+
+def test_restartable_interpreter_settings_reject_duplicate_entries(
+    tmp_path: Path,
+) -> None:
+    document = _document()
+    document["settings"]["restartable_interpreter_settings"] = ["spark", "spark"]
+    with pytest.raises(ConfigError):
+        _load(_write_json(tmp_path / "zeppelin.json", document))

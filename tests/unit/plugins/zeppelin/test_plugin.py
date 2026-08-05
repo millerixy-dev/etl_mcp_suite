@@ -74,6 +74,7 @@ async def test_runtime_loads_config_and_registers_exact_tools(
         "run_paragraph",
         "get_paragraph_status",
         "get_paragraph_result",
+        "restart_interpreter",
     ]
 
     await runtime.close()
