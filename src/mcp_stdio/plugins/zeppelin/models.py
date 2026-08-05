@@ -180,6 +180,15 @@ class AddParagraphResult(BaseModel):
     interpreter: str
 
 
+class CancelParagraphResult(BaseModel):
+    """Result of cancelling paragraph execution."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    notebook_id: str
+    paragraph_id: str
+
+
 class RunParagraphResult(BaseModel):
     """Result of starting paragraph execution."""
 

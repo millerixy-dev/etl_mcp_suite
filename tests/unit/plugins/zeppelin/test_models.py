@@ -9,6 +9,7 @@ from pydantic import ValidationError
 
 from mcp_stdio.plugins.zeppelin.models import (
     AddParagraphResult,
+    CancelParagraphResult,
     CreateNotebookResult,
     OutputItem,
     OutputKind,
@@ -538,3 +539,15 @@ def test_restart_interpreter_result_rejects_extra_fields() -> None:
             status="READY",
             properties={"key": "value"},
         )
+
+
+
+def test_cancel_paragraph_result_is_frozen_with_two_fields() -> None:
+    result = CancelParagraphResult(notebook_id="nb-1", paragraph_id="p-1")
+    assert result.notebook_id == "nb-1"
+    assert result.paragraph_id == "p-1"
+
+
+def test_cancel_paragraph_result_rejects_extra_fields() -> None:
+    with pytest.raises(ValidationError):
+        CancelParagraphResult(notebook_id="nb-1", paragraph_id="p-1", status="OK")

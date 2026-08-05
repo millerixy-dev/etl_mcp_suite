@@ -9,7 +9,11 @@ from mcp_stdio.core.errors import ErrorCategory
 from mcp_stdio.plugins.zeppelin.config import ZeppelinSecrets, ZeppelinSettings
 from mcp_stdio.plugins.zeppelin.gateway import ZeppelinGatewayError
 from mcp_stdio.plugins.zeppelin.http_client import ZeppelinHttpClient
-from mcp_stdio.plugins.zeppelin.models import ParagraphStatus, RestartInterpreterResult
+from mcp_stdio.plugins.zeppelin.models import (
+    CancelParagraphResult,
+    ParagraphStatus,
+    RestartInterpreterResult,
+)
 
 
 def _settings(**overrides: object) -> ZeppelinSettings:
@@ -372,4 +376,49 @@ async def test_restart_interpreter_handles_unexpected_response_shape() -> None:
     with pytest.raises(ZeppelinGatewayError) as exc_info:
         await adapter.restart_interpreter("spark")
     assert exc_info.value.tool_error.category == ErrorCategory.UNEXPECTED_RESPONSE
+    await adapter.close()
+
+
+async def test_cancel_paragraph_calls_delete_job_endpoint() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/login":
+            return httpx.Response(200)
+        assert request.url.path == "/api/notebook/job/nb-1/p-1"
+        assert request.method == "DELETE"
+        return _ok(None)
+
+    adapter = _adapter(_mock_transport(handler), secrets=_secrets())
+    result = await adapter.cancel_paragraph("nb-1", "p-1")
+    assert isinstance(result, CancelParagraphResult)
+    assert result.notebook_id == "nb-1"
+    assert result.paragraph_id == "p-1"
+    await adapter.close()
+
+
+async def test_cancel_paragraph_maps_500_to_upstream_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/login":
+            return httpx.Response(200)
+        return httpx.Response(500, json={"exception": "error"})
+
+    adapter = _adapter(_mock_transport(handler), secrets=_secrets())
+    with pytest.raises(ZeppelinGatewayError) as exc_info:
+        await adapter.cancel_paragraph("nb-1", "p-1")
+    assert exc_info.value.tool_error.category == ErrorCategory.UPSTREAM_ERROR
+    await adapter.close()
+
+
+async def test_cancel_paragraph_encodes_opaque_ids_in_path() -> None:
+    seen_paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/login":
+            return httpx.Response(200)
+        raw = request.url.raw_path
+        seen_paths.append(raw.decode() if isinstance(raw, bytes) else raw)
+        return _ok(None)
+
+    adapter = _adapter(_mock_transport(handler), secrets=_secrets())
+    await adapter.cancel_paragraph("note/1", "para/1")
+    assert seen_paths[-1] == "/api/notebook/job/note%2F1/para%2F1"
     await adapter.close()

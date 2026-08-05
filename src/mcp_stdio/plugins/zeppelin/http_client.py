@@ -11,6 +11,7 @@ from mcp_stdio.core.errors import ErrorCategory, ToolError, ToolOperation
 from mcp_stdio.plugins.zeppelin.config import ZeppelinSecrets, ZeppelinSettings
 from mcp_stdio.plugins.zeppelin.gateway import ZeppelinGatewayError
 from mcp_stdio.plugins.zeppelin.models import (
+    CancelParagraphResult,
     NotebookTreeNode,
     OutputItem,
     OutputKind,
@@ -147,6 +148,22 @@ class ZeppelinHttpClient:
             identifiers={"notebook": notebook_id, "paragraph": paragraph_id},
         )
         return ParagraphStatus.PENDING
+
+    async def cancel_paragraph(
+        self, notebook_id: str, paragraph_id: str
+    ) -> CancelParagraphResult:
+        encoded_nb = self._encode_id(notebook_id)
+        encoded_p = self._encode_id(paragraph_id)
+        client = await self._ensure_authenticated()
+        await self._request_json(
+            client,
+            "DELETE",
+            f"/notebook/job/{encoded_nb}/{encoded_p}",
+            json_payload=None,
+            operation=ToolOperation.CANCEL_PARAGRAPH,
+            identifiers={"notebook_id": notebook_id, "paragraph_id": paragraph_id},
+        )
+        return CancelParagraphResult(notebook_id=notebook_id, paragraph_id=paragraph_id)
 
     async def get_paragraph_status(self, notebook_id: str, paragraph_id: str) -> ParagraphStatus:
         paragraph = await self._fetch_paragraph(notebook_id, paragraph_id)

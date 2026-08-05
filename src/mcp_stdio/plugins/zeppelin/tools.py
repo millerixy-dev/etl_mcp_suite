@@ -14,6 +14,7 @@ from mcp_stdio.core.errors import ToolError, ToolOperation, unexpected_tool_erro
 from mcp_stdio.plugins.zeppelin.gateway import ZeppelinGatewayError
 from mcp_stdio.plugins.zeppelin.models import (
     AddParagraphResult,
+    CancelParagraphResult,
     CreateNotebookResult,
     NotebookTreeResult,
     ParagraphResult,
@@ -48,6 +49,7 @@ class ZeppelinToolAdapter:
         registrar.add_tool(self.get_paragraph_status, name="get_paragraph_status")
         registrar.add_tool(self.get_paragraph_result, name="get_paragraph_result")
         registrar.add_tool(self.restart_interpreter, name="restart_interpreter")
+        registrar.add_tool(self.cancel_paragraph, name="cancel_paragraph")
 
     async def list_notebooks(self) -> NotebookTreeResult:
         """List the Zeppelin notebook directory tree."""
@@ -142,6 +144,20 @@ class ZeppelinToolAdapter:
         except Exception as error:
             self._raise_tool_error(
                 unexpected_tool_error(error, operation=ToolOperation.RESTART_INTERPRETER)
+            )
+
+    async def cancel_paragraph(
+        self, notebook_id: ZeppelinToolString, paragraph_id: ZeppelinToolString
+    ) -> CancelParagraphResult:
+        """Cancel a running Zeppelin paragraph."""
+
+        try:
+            return await self._service.cancel_paragraph(notebook_id, paragraph_id)
+        except ZeppelinGatewayError as error:
+            self._raise_tool_error(error.tool_error)
+        except Exception as error:
+            self._raise_tool_error(
+                unexpected_tool_error(error, operation=ToolOperation.CANCEL_PARAGRAPH)
             )
 
     def _raise_tool_error(self, error: ToolError) -> NoReturn:

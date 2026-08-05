@@ -6,6 +6,7 @@ from typing import Protocol
 
 from mcp_stdio.core.errors import ToolError
 from mcp_stdio.plugins.zeppelin.models import (
+    CancelParagraphResult,
     NotebookTreeNode,
     OutputItem,
     ParagraphStatus,
@@ -59,6 +60,13 @@ class ZeppelinGateway(Protocol):
         self, notebook_id: str, paragraph_id: str
     ) -> tuple[ParagraphStatus, tuple[OutputItem, ...], SafeErrorDetail | None, bool]:
         """Return status, bounded outputs, optional error, and truncation flag."""
+
+        ...
+
+    async def cancel_paragraph(
+        self, notebook_id: str, paragraph_id: str
+    ) -> CancelParagraphResult:
+        """Cancel a running paragraph and return confirmation."""
 
         ...
 

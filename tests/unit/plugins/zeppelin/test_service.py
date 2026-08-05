@@ -7,6 +7,7 @@ import pytest
 from mcp_stdio.core.errors import ErrorCategory
 from mcp_stdio.plugins.zeppelin.gateway import ZeppelinGatewayError
 from mcp_stdio.plugins.zeppelin.models import (
+    CancelParagraphResult,
     OutputItem,
     OutputKind,
     ParagraphStatus,
@@ -60,6 +61,10 @@ class FakeGateway:
     ) -> tuple[ParagraphStatus, tuple[OutputItem, ...], SafeErrorDetail | None, bool]:
         self.calls.append(("get_paragraph_result", notebook_id, paragraph_id))
         return self.status_result, self.result_outputs, self.result_error, self.result_truncated
+
+    async def cancel_paragraph(self, notebook_id: str, paragraph_id: str) -> CancelParagraphResult:
+        self.calls.append(("cancel_paragraph", notebook_id, paragraph_id))
+        return CancelParagraphResult(notebook_id=notebook_id, paragraph_id=paragraph_id)
 
     async def restart_interpreter(self, setting_id: str) -> RestartInterpreterResult:
         self.calls.append(("restart_interpreter", setting_id))
@@ -474,3 +479,21 @@ async def test_restart_interpreter_returns_result_from_gateway() -> None:
     result = await service.restart_interpreter("sh")
     assert result.setting_id == "sh"
     assert result.group == "sh"
+
+
+
+async def test_cancel_paragraph_returns_result() -> None:
+    service, gateway = _service()
+    result = await service.cancel_paragraph("nb-1", "p-1")
+    assert isinstance(result, CancelParagraphResult)
+    assert result.notebook_id == "nb-1"
+    assert result.paragraph_id == "p-1"
+    assert any(call[0] == "cancel_paragraph" for call in gateway.calls)
+
+
+async def test_cancel_paragraph_rejects_malformed_ids_before_network() -> None:
+    service, gateway = _service()
+    with pytest.raises(ZeppelinGatewayError) as exc_info:
+        await service.cancel_paragraph("bad\x00id", "p-1")
+    assert exc_info.value.tool_error.category == ErrorCategory.INVALID_INPUT
+    assert gateway.calls == []

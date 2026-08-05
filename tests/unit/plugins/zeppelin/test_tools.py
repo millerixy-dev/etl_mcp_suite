@@ -28,7 +28,7 @@ def _write_zeppelin_config(path: Path) -> Path:
     return path
 
 
-def test_zeppelin_registers_exact_seven_tool_set(tmp_path: Path) -> None:
+def test_zeppelin_registers_exact_eight_tool_set(tmp_path: Path) -> None:
     def reject_network(*args: object, **kwargs: object) -> object:
         del args, kwargs
         raise AssertionError("startup attempted network access")
@@ -46,6 +46,7 @@ def test_zeppelin_registers_exact_seven_tool_set(tmp_path: Path) -> None:
 
     assert sorted(server.tool_names()) == [
         "add_paragraph",
+        "cancel_paragraph",
         "create_notebook",
         "get_paragraph_result",
         "get_paragraph_status",

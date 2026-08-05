@@ -61,6 +61,7 @@ def test_tool_operations_are_closed_to_v1_tools_plus_internal_fallback() -> None
         "get_paragraph_result",
         "get_server_status",
         "restart_interpreter",
+        "cancel_paragraph",
     }
 
 
@@ -74,6 +75,19 @@ def test_restart_interpreter_operation_allows_setting_id_identifier() -> None:
         identifiers={"setting_id": "spark"},
     )
     assert error.to_dict(secret_values=())["identifiers"] == {"setting_id": "spark"}
+
+def test_cancel_paragraph_operation_allows_notebook_and_paragraph_identifiers() -> None:
+    from mcp_stdio.core.errors import ErrorCategory, ToolError, ToolOperation
+
+    error = ToolError.create(
+        category=ErrorCategory.UPSTREAM_ERROR,
+        operation=ToolOperation.CANCEL_PARAGRAPH,
+        retryable=False,
+        identifiers={"notebook_id": "nb-1", "paragraph_id": "p-1"},
+    )
+    result = error.to_dict(secret_values=())["identifiers"]
+    assert result == {"notebook_id": "nb-1", "paragraph_id": "p-1"}
+    assert result == {"notebook_id": "nb-1", "paragraph_id": "p-1"}
 
 
 def test_tool_error_serializes_only_the_safe_structured_contract() -> None:

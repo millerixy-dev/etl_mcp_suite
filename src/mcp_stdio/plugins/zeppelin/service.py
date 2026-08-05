@@ -6,6 +6,7 @@ from mcp_stdio.core.errors import ErrorCategory, ToolError, ToolOperation
 from mcp_stdio.plugins.zeppelin.gateway import ZeppelinGateway, ZeppelinGatewayError
 from mcp_stdio.plugins.zeppelin.models import (
     AddParagraphResult,
+    CancelParagraphResult,
     CreateNotebookResult,
     NotebookTreeResult,
     ParagraphResult,
@@ -123,6 +124,19 @@ class ZeppelinNotebookService:
             raise _invalid_input(ToolOperation.RUN_PARAGRAPH) from None
         status = await self._gateway.run_paragraph(nb, pid)
         return RunParagraphResult(notebook_id=nb, paragraph_id=pid, status=status)
+
+    async def cancel_paragraph(
+        self, notebook_id: object, paragraph_id: object
+    ) -> CancelParagraphResult:
+        try:
+            nb = validate_opaque_id(notebook_id, max_chars=self._max_id)
+            pid = validate_opaque_id(paragraph_id, max_chars=self._max_id)
+        except ValueError as exc:
+            raise _invalid_input(
+                ToolOperation.CANCEL_PARAGRAPH, explanation=str(exc)
+            ) from None
+        await self._gateway.cancel_paragraph(nb, pid)
+        return CancelParagraphResult(notebook_id=nb, paragraph_id=pid)
 
     async def get_paragraph_status(
         self, notebook_id: object, paragraph_id: object

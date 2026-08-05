@@ -38,6 +38,7 @@ class ToolOperation(str, Enum):
     GET_PARAGRAPH_STATUS = "get_paragraph_status"
     GET_PARAGRAPH_RESULT = "get_paragraph_result"
     RESTART_INTERPRETER = "restart_interpreter"
+    CANCEL_PARAGRAPH = "cancel_paragraph"
     GET_SERVER_STATUS = "get_server_status"
     RUNTIME = "runtime"
 
@@ -67,6 +68,7 @@ _ALLOWED_IDENTIFIER_KEYS: Mapping[ToolOperation, frozenset[str]] = MappingProxyT
         ToolOperation.GET_PARAGRAPH_STATUS: frozenset({"notebook_id", "paragraph_id"}),
         ToolOperation.GET_PARAGRAPH_RESULT: frozenset({"notebook_id", "paragraph_id"}),
         ToolOperation.RESTART_INTERPRETER: frozenset({"setting_id"}),
+        ToolOperation.CANCEL_PARAGRAPH: frozenset({"notebook_id", "paragraph_id"}),
         ToolOperation.GET_SERVER_STATUS: frozenset(),
         ToolOperation.RUNTIME: frozenset(),
     }
