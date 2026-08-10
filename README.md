@@ -17,6 +17,9 @@ follow-up changes.
 
 ## Installation
 
+> New here? See [`docs/quickstart-macos.md`](docs/quickstart-macos.md) for a
+> copy-pasteable end-to-end setup on macOS.
+
 Clone the repository and synchronize the locked environment with uv:
 
 ```bash
