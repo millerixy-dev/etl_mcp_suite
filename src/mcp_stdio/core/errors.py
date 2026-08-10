@@ -40,6 +40,12 @@ class ToolOperation(str, Enum):
     RESTART_INTERPRETER = "restart_interpreter"
     CANCEL_PARAGRAPH = "cancel_paragraph"
     GET_SERVER_STATUS = "get_server_status"
+    LIST_OBJECTS = "list_objects"
+    GET_OBJECT = "get_object"
+    SEARCH_OBJECTS = "search_objects"
+    START_WORKFLOW = "start_workflow"
+    GET_TASK_LOG = "get_task_log"
+    EXTRACT_LOG_LINKS = "extract_log_links"
     RUNTIME = "runtime"
 
 
@@ -70,6 +76,12 @@ _ALLOWED_IDENTIFIER_KEYS: Mapping[ToolOperation, frozenset[str]] = MappingProxyT
         ToolOperation.RESTART_INTERPRETER: frozenset({"setting_id"}),
         ToolOperation.CANCEL_PARAGRAPH: frozenset({"notebook_id", "paragraph_id"}),
         ToolOperation.GET_SERVER_STATUS: frozenset(),
+        ToolOperation.LIST_OBJECTS: frozenset(),
+        ToolOperation.GET_OBJECT: frozenset(),
+        ToolOperation.SEARCH_OBJECTS: frozenset(),
+        ToolOperation.START_WORKFLOW: frozenset(),
+        ToolOperation.GET_TASK_LOG: frozenset(),
+        ToolOperation.EXTRACT_LOG_LINKS: frozenset(),
         ToolOperation.RUNTIME: frozenset(),
     }
 )
@@ -183,9 +195,7 @@ class ToolError:
             "identifiers": safe_identifiers,
             "correlation_id": self.correlation_id,
         }
-        if self.explanation and not any(
-            secret in self.explanation for secret in secrets
-        ):
+        if self.explanation and not any(secret in self.explanation for secret in secrets):
             result["explanation"] = self.explanation
         return result
 
