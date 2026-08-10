@@ -44,10 +44,14 @@
 
 ## 5. DolphinScheduler Status Plugin
 
-- [ ] 5.1 Add failing tests for DolphinScheduler configuration, environment-backed authentication, configured non-caller-controlled status path, normalized health results, bounded malformed responses, and HTTP resource cleanup.
-- [ ] 5.2 Implement the DolphinScheduler gateway and asynchronous HTTP adapter with safe status normalization and error mapping.
-- [ ] 5.3 Implement and contract-test the sole `get_server_status` tool and assert that no workflow, task, project, schedule, or instance tools are registered.
-- [ ] 5.4 Add an opt-in DolphinScheduler integration test that calls only the configured status endpoint.
+> **SUPERSEDED:** Tasks 5.1-5.4 are delivered by the independent slice
+> `deliver-dolphinscheduler-plugin-slice`. The DolphinScheduler spec deltas were moved
+> there and the 3.1.7 REST API facts are recorded in that change's design.md.
+
+- [x] 5.1 ~~Add failing tests for DolphinScheduler configuration, environment-backed authentication, configured non-caller-controlled status path, normalized health results, bounded malformed responses, and HTTP resource cleanup.~~ superseded by deliver-dolphinscheduler-plugin-slice
+- [x] 5.2 ~~Implement the DolphinScheduler gateway and asynchronous HTTP adapter with safe status normalization and error mapping.~~ superseded by deliver-dolphinscheduler-plugin-slice
+- [x] 5.3 ~~Implement and contract-test the sole `get_server_status` tool and assert that no workflow, task, project, schedule, or instance tools are registered.~~ superseded by deliver-dolphinscheduler-plugin-slice
+- [x] 5.4 ~~Add an opt-in DolphinScheduler integration test that calls only the configured status endpoint.~~ superseded by deliver-dolphinscheduler-plugin-slice
 
 ## 6. Documentation and Final Verification
 
