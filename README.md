@@ -1,32 +1,113 @@
 # mcp-stdio
 
+English | [简体中文](README.zh-CN.md)
+
 A lightweight, plugin-based MCP (Model Context Protocol) server that runs over
 stdio. Each child process loads exactly one built-in plugin and serves only that
 plugin's tools to an MCP host.
 
-The first deliverable slice ships the **Hive schema plugin**: read-only
-HiveServer2 metadata inspection (databases, tables, columns, partitions, and
-optional DDL). Zeppelin and DolphinScheduler plugins are planned for separate
-follow-up changes.
+The built-in plugins are the **Hive schema plugin** for read-only HiveServer2
+metadata inspection (databases, tables, columns, partitions, and optional DDL),
+**Zeppelin notebook execution**, and **DolphinScheduler scheduling**.
 
 ## Requirements
 
 - Python 3.10 or newer
-- [uv](https://docs.astral.sh/uv/) for project and dependency management
+- [uv](https://docs.astral.sh/uv/) 0.11.28 or newer for project and dependency
+  management (0.11.28 is the currently validated version)
 - A HiveServer2 endpoint reachable from the process (only when tools are called)
+
+### Install uv on macOS
+
+Install uv with Homebrew:
+
+```bash
+brew install uv
+```
+
+Or use the [official standalone installer](https://docs.astral.sh/uv/getting-started/installation/):
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+Open a new terminal if the installer updates your shell configuration, then verify the version:
+
+```bash
+uv --version
+```
 
 ## Installation
 
 Clone the repository and synchronize the locked environment with uv:
 
 ```bash
-git clone <repo-url>
-cd hive_cli_mcp_stdio
+git clone https://github.com/millerixy-dev/etl_mcp_suite.git
+cd etl_mcp_suite
 uv sync --frozen
 ```
 
 This installs the package and its console entry point, `mcp-stdio`, in an
 isolated virtual environment using the committed `uv.lock`.
+
+## Agent Skills
+
+The client-neutral Hive, Zeppelin, and natural-language query skills are maintained once at
+`skills/hive`, `skills/zeppelin`, and `skills/nl2sql`. Install the same canonical files into the
+current project for the MCP client in use:
+
+```bash
+./scripts/install-skills-codex.sh
+./scripts/install-skills-trae.sh
+```
+
+The first command installs into `.codex/skills`; the second installs into `.trae/skills`. To target
+another project directory, pass `--project-root /path/to/project`. If any managed skill already
+exists, installation stops before copying; review the local customization and pass `--force` only
+when it is safe to overwrite the managed skill files. Unrelated skill directories are preserved.
+
+### Install Codex skills together with the local MCP server
+
+For Codex, one command can install the skills, expose the current checkout as an editable uv tool,
+and manage the target project's `.codex/config.toml`:
+
+```bash
+./scripts/install-skills-codex.sh --project-root /path/to/project --with-mcp
+```
+
+This mode runs the equivalent of `uv tool install --editable <this-repository> --reinstall`.
+Codex starts the stable `mcp-stdio` command, while each newly started MCP process imports code from
+this checkout, so local source edits take effect without rewriting `.codex/config.toml`. The uv tool
+executable directory reported by `uv tool dir --bin` must already be on `PATH`.
+
+The installer manages one marked block containing `mcp_servers.hive` and
+`mcp_servers.zeppelin`. It uses Codex `env_vars` entries to forward variable names from the
+environment that launched Codex; it does not write credential values, Python paths, virtual
+environment paths, or `PYTHONPATH` into the TOML file. Export the required values before launching
+Codex:
+
+Codex also accepts literal values under `[mcp_servers.<name>.env]`, but those values are stored as
+plain text in `.codex/config.toml`. This installer deliberately does not generate that form for
+credentials.
+
+```bash
+export HIVE_HOST=<hive-host>
+export HIVE_USERNAME=<your-ldap-user>
+export HIVE_PASSWORD=<your-ldap-password>
+export ZEPPELIN_BASE_URL=<zeppelin-base-url>
+# Optional Zeppelin login; set both or neither:
+export ZEPPELIN_USERNAME=<zeppelin-user>
+export ZEPPELIN_PASSWORD=<zeppelin-password>
+# JSON array of explicitly allowed interpreters:
+export ZEPPELIN_ALLOWED_INTERPRETERS='["spark.sql", "spark.pyspark"]'
+```
+
+Missing `HIVE_HOST`, `HIVE_USERNAME`, `HIVE_PASSWORD`, or `ZEPPELIN_BASE_URL` produces a warning
+that names only the missing variable; installation still succeeds so the launch environment can be
+configured later. Re-running with `--force --with-mcp` refreshes the managed skills and replaces
+exactly one managed TOML block while preserving unrelated Codex settings. An existing unmarked Hive
+or Zeppelin table is treated as user-owned and is never overwritten. The Trae installer is
+currently skill-only and rejects `--with-mcp`.
 
 ## Configuration
 
@@ -134,25 +215,19 @@ uv run mcp-stdio --plugin hive
 ### MCP host configuration
 
 Register the Hive plugin with a local MCP host by pointing its command at the
-`mcp-stdio` entry point with the `--plugin` flag. Each plugin instance runs as
+`mcp-stdio` entry point with the `--plugin` flag. The Codex installer above performs this
+registration without an absolute checkout path. Each plugin instance runs as
 an isolated child process with its own configuration, credentials, connections,
 caches, and failure domain. `--config` is optional; an `env`-only configuration
-needs no file at all:
+needs no server configuration file at all. Other MCP hosts can use the equivalent
+command-name registration and their own environment-variable forwarding feature:
 
 ```json
 {
   "mcpServers": {
     "hive": {
-      "command": "/path/to/.venv/bin/python",
-      "args": ["-m", "mcp_stdio", "--plugin", "hive"],
-      "env": {
-        "PYTHONPATH": "/path/to/src",
-        "HIVE_HOST": "<hive-host>",
-        "HIVE_PORT": "10000",
-        "HIVE_DATABASE": "default",
-        "HIVE_USERNAME": "<your-ldap-user>",
-        "HIVE_PASSWORD": "<your-ldap-password>"
-      }
+      "command": "mcp-stdio",
+      "args": ["--plugin", "hive"]
     }
   }
 }
