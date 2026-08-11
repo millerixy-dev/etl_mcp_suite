@@ -1,0 +1,38 @@
+# DolphinScheduler plugin configuration example (YAML).
+#
+# Start:  mcp-stdio --plugin dolphinscheduler --config /path/to/dolphinscheduler.yaml
+#
+# The --config file is OPTIONAL. You can start with environment variables only
+# (DOLPHINSCHEDULER_BASE_URL, DOLPHINSCHEDULER_TOKEN, ...) and omit --config
+# entirely. When both are present, environment variables take precedence over
+# these file values.
+#
+# `base_url` includes the DolphinScheduler context path `/dolphinscheduler`
+# (default API port 12345). `status_path` is queried relative to `base_url`,
+# so the full status URL is  base_url + status_path  e.g.
+#   http://ds-host:12345/dolphinscheduler/monitor/masters
+#
+# Values under `secrets` are ENVIRONMENT VARIABLE NAMES, never credential
+# values. The runtime reads the actual token from that variable at startup and
+# never writes it to stdout, logs, or MCP results.
+#
+# Export before starting:
+#   export DOLPHINSCHEDULER_TOKEN=<your-dolphinscheduler-api-token>
+#
+# `secrets.token` is optional: omit it (or use an empty `secrets: {}`) for
+# unauthenticated requests, which DolphinScheduler rejects with HTTP 401 at
+# call time (startup still succeeds).
+
+version: 1
+plugin: dolphinscheduler
+settings:
+  base_url: http://ds-host:12345/dolphinscheduler
+  status_path: /monitor/masters
+  request_timeout_seconds: 30
+  max_response_bytes: 1048576
+  max_detail_items: 100
+  default_page_size: 10        # scheduling list/search page size
+  max_page_size: 100           # hard cap for page_size inputs
+  max_log_bytes: 1048576       # bounds task-log fetches
+secrets:
+  token: DOLPHINSCHEDULER_TOKEN

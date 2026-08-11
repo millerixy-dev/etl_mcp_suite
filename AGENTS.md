@@ -93,7 +93,7 @@ For each pending task: read the directly relevant files; write a micro-plan scop
 - Do not add filesystem scanning, import-by-caller-input, Python entry points, hot reload, or third-party plugin loading in version one.
 - Hive is metadata-only: no arbitrary SQL, row reads, or DDL execution.
 - Zeppelin is execution-capable: interpreters default to deny and require an explicit configuration allowlist.
-- DolphinScheduler is observational in version one and exposes server status only.
+- DolphinScheduler exposes server status plus scheduling tools: read-only enumeration, inspection, search, bounded task logs, YARN/Spark link extraction, and a constrained workflow start; exact tools and result shapes come from the active capability specs.
 - Exact tool names, schemas, result shapes, and backend behavior come from the active OpenSpec capability specs.
 
 ## Configuration and Secrets
@@ -139,6 +139,7 @@ For each pending task: read the directly relevant files; write a micro-plan scop
 
 ## Documentation
 
+- Author OpenSpec artifacts to the per-artifact detail bar defined in `openspec/config.yaml` (`rules:`), surfaced via `openspec instructions <artifact>` when creating proposal/design/tasks: designs need setting field tables, both file and env-only config examples with start commands, per-tool input tables and result JSON, and cited upstream API sources; capability specs need GIVEN/WHEN/THEN scenarios with named result shapes. Treat this as a hard authoring constraint, not a suggestion.
 - Keep README usage, configuration examples, MCP host launch examples, tool contracts, and security warnings aligned with the active specs.
 - Keep `docs/architecture/runtime-flow.md` aligned with process startup, request, error, and shutdown behavior.
 - Keep `docs/architecture/modules.md` aligned with module ownership, dependency direction, plugin boundaries, and architecture tests.

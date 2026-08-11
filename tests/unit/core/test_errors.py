@@ -62,6 +62,12 @@ def test_tool_operations_are_closed_to_v1_tools_plus_internal_fallback() -> None
         "get_server_status",
         "restart_interpreter",
         "cancel_paragraph",
+        "list_objects",
+        "get_object",
+        "search_objects",
+        "start_workflow",
+        "get_task_log",
+        "extract_log_links",
     }
 
 
@@ -75,6 +81,7 @@ def test_restart_interpreter_operation_allows_setting_id_identifier() -> None:
         identifiers={"setting_id": "spark"},
     )
     assert error.to_dict(secret_values=())["identifiers"] == {"setting_id": "spark"}
+
 
 def test_cancel_paragraph_operation_allows_notebook_and_paragraph_identifiers() -> None:
     from mcp_stdio.core.errors import ErrorCategory, ToolError, ToolOperation
@@ -387,3 +394,27 @@ def test_unexpected_mapper_falls_back_safely_for_hostile_runtime_inputs(
     assert sentinel not in payload_text
     assert captured.out == ""
     logging.getLogger("mcp_stdio").handlers.clear()
+
+
+@pytest.mark.parametrize(
+    "operation_name",
+    [
+        "list_objects",
+        "get_object",
+        "search_objects",
+        "start_workflow",
+        "get_task_log",
+        "extract_log_links",
+    ],
+)
+def test_scheduling_operation_creates_safe_tool_error(operation_name: str) -> None:
+    from mcp_stdio.core.errors import ErrorCategory, ToolError, ToolOperation
+
+    error = ToolError.create(
+        category=ErrorCategory.UPSTREAM_ERROR,
+        operation=ToolOperation(operation_name),
+        retryable=False,
+        identifiers={},
+    )
+    assert error.operation.value == operation_name
+    assert error.to_dict(secret_values=())["identifiers"] == {}

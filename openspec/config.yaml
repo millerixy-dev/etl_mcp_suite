@@ -1,20 +1,22 @@
 schema: spec-driven
 
-# Project context (optional)
-# This is shown to AI when creating artifacts.
-# Add your tech stack, conventions, style guides, domain knowledge, etc.
-# Example:
-#   context: |
-#     Tech stack: TypeScript, React, Node.js
-#     We use conventional commits
-#     Domain: e-commerce platform
+# Project context shown to AI when creating artifacts (openspec instructions).
+context: |
+  Python MCP stdio runner (uv, requires-python >=3.10). Clean Architecture with
+  vertical plugin slices; the shared core owns config/errors/logging/MCP lifecycle.
+  Secrets are environment-variable names, never values. Explanations in Chinese.
 
-# Per-artifact rules (optional)
-# Add custom rules for specific artifacts.
-# Example:
-#   rules:
-#     proposal:
-#       - Keep proposals under 500 words
-#       - Always include a "Non-goals" section
-#     tasks:
-#       - Break tasks into chunks of max 2 hours
+# Per-artifact authoring rules, surfaced via `openspec instructions <artifact>`
+# (valid artifacts: proposal, design, tasks). `openspec validate` checks structure
+# and cross-change conflicts, not prose completeness; these rules are enforced at
+# creation time plus review discipline.
+rules:
+  design:
+    - Every configurable setting MUST have a field table (Field | Type | Default | Range | Required).
+    - Configuration MUST show BOTH a file example (with comments and start command) and an env-variable-only example (with a variable mapping table).
+    - Every tool or interface MUST have an input parameter table and a representative result JSON example.
+    - Every endpoint and entity MUST cite the verified upstream API source.
+  tasks:
+    - Order tasks TDD RED -> GREEN -> REFACTOR; each task must be independently verifiable.
+  proposal:
+    - Always include a Non-Goals section.
