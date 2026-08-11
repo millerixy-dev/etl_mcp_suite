@@ -310,6 +310,72 @@
 
   Run the focused README test and `git diff --check`, then mark task 3.4 complete.
 
+### OpenSpec Task 2.4: Refresh Canonical Skills from Latest Sources
+
+**Files:**
+
+- Modify: `skills/hive/SKILL.md`
+- Modify: `skills/zeppelin/SKILL.md`
+- Modify: `skills/nl2sql/SKILL.md`
+- Modify: `tests/unit/test_agent_skills.py`
+
+**Interfaces:**
+
+- Consumes: the supplied Trae-local source skills and the canonical MCP tool contracts.
+- Produces: portable Skill guidance that retains the 300-second Zeppelin escalation and safe ETL-design checks without importing client aliases, fixed interpreter names, or direct backend fallbacks.
+
+- [x] **Step 1: Write failing content-contract tests**
+
+  Extend `REQUIRED_GUIDANCE` so the Zeppelin Skill must contain `300 秒` and `用户决定`, while the NL2SQL Skill must contain `源表`, `目标表`, `显式 CAST`, and `事件时间`.
+
+- [x] **Step 2: Confirm RED**
+
+  Run: `uv run pytest tests/unit/test_agent_skills.py -q -k canonical_skill`
+
+  Expected: FAIL because the canonical skills do not yet contain the refreshed guidance.
+
+- [x] **Step 3: Add only compatible source-derived guidance**
+
+  Add a 300-second user-decision threshold to the Zeppelin polling workflow. Add source/target schema, explicit cast, and event-time guidance to NL2SQL's explicitly user-requested ETL/write design path, retaining the prohibition on automatic writes and safety bypasses. Keep Hive's already-compatible MCP-first guidance intact, with a clarifying source-refresh review if no text change is required.
+
+- [x] **Step 4: Validate GREEN and portability**
+
+  Run the focused content-contract tests, all agent-skill tests, `quick_validate.py` for every canonical skill, and a prohibited-coupling scan.
+
+- [x] **Step 5: Gate OpenSpec task 2.4**
+
+  Mark task 2.4 complete only after the refreshed skills pass the client-neutral coupling checks and no direct backend fallback has been introduced.
+
+### OpenSpec Task 3.7: Chinese Literal Environment Syntax Example
+
+**Files:**
+
+- Modify: `README.zh-CN.md`
+- Modify: `tests/unit/test_agent_skills.py`
+
+**Interfaces:**
+
+- Consumes: the existing statement that `[mcp_servers.<name>.env]` stores literal values as plaintext.
+- Produces: a copyable TOML syntax example that contains placeholders only and recommends `env_vars` for real credentials.
+
+- [x] **Step 1: Write a failing README contract test**
+
+  Require `[mcp_servers.hive.env]`, `HIVE_PASSWORD = "<your-ldap-password>"`, and `env_vars` in the Simplified Chinese README.
+
+- [x] **Step 2: Confirm RED**
+
+  Run: `uv run pytest tests/unit/test_agent_skills.py -q -k chinese_readme`
+
+  Expected: FAIL because the literal environment table is not yet shown.
+
+- [x] **Step 3: Add the smallest safe TOML example**
+
+  Add a Hive literal-environment table immediately after the plaintext warning, using only redacted placeholders and a recommendation to use `env_vars` for real credentials.
+
+- [x] **Step 4: Validate GREEN and gate task 3.7**
+
+  Run the focused and full agent-skill tests, `git diff --check`, and OpenSpec validation. Mark task 3.7 complete only after all commands pass.
+
 ### OpenSpec Task 4.1: Final Verification
 
 **Files:**

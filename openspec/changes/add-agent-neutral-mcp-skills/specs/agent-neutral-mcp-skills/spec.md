@@ -40,6 +40,17 @@ The `nl2sql` skill SHALL require schema discovery before SQL construction, exact
 - **WHEN** multiple discovered tables or columns plausibly match the user's intent
 - **THEN** the skill directs the agent to present the candidates and wait for clarification before executing SQL
 
+### Requirement: Retain compatible operational guidance from supplied source skills
+When refreshing the canonical skills from supplied client-local sources, the repository SHALL retain applicable safety and workflow guidance while excluding client-specific invocation syntax, fixed server aliases, deployment-specific interpreter names, and direct backend fallbacks. The Zeppelin skill SHALL pause after 300 seconds of a running or pending paragraph and request a user decision before any continued wait, cancellation, or retry. For user-requested ETL or write-operation design, the NL2SQL skill SHALL require discovery of source and target schemas, explicit conversion for incompatible mapped types, and event-time semantics distinct from ETL execution time; it SHALL NOT automatically execute writes or bypass configured safety controls.
+
+#### Scenario: Zeppelin paragraph exceeds the waiting threshold
+- **WHEN** a paragraph remains `PENDING` or `RUNNING` for more than 300 seconds
+- **THEN** the skill directs the agent to pause and ask the user whether to continue waiting or cancel, without automatically switching interpreters or resubmitting the paragraph
+
+#### Scenario: Design an ETL mapping
+- **WHEN** a user explicitly requests an ETL or write-operation design
+- **THEN** the skill directs the agent to discover both source and target schemas, use explicit casts for incompatible mapped types, preserve event-time semantics, and obtain the user's approval before any write execution
+
 ### Requirement: Install skills into project-local client directories
 The repository SHALL provide separate executable installers for Codex and Trae. Each installer SHALL copy the same canonical skill packages into the selected project's client-specific skills directory, default the selected project to the current working directory, support `--project-root` and `--force`, fail safely on unmanaged collisions without `--force`, and leave unrelated skills untouched.
 

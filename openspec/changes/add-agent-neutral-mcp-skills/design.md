@@ -47,6 +47,15 @@ Agent-created notebooks default to `/agents/`. A user or project instruction may
 
 Alternative considered: remove the namespace rule. This was rejected because uncontrolled root-level notebook creation was a concrete safety and maintainability concern in the source skill.
 
+### Refresh source-derived guidance without importing client or deployment coupling
+
+The latest supplied source skills add useful operational rules, but also contain Trae-only invocation syntax, a fixed `/trae/` namespace, deployment-specific interpreter names, and a write fallback that bypasses the MCP runtime. Canonical skills retain only rules that remain valid for every compatible MCP client and the repository's configured safety boundaries:
+
+- A Zeppelin paragraph still running after 300 seconds pauses for the user's decision to continue waiting or cancel. It never changes interpreter or resubmits automatically; any retry uses only a user-approved, configured interpreter.
+- For user-requested ETL or write-operation design, NL2SQL discovers source and target schemas, makes type conversions explicit, and preserves event-time semantics rather than silently substituting ETL execution time. The skill still does not automatically execute writes or bypass the configured Zeppelin allowlist.
+
+Alternative considered: copy every newer source rule verbatim. This was rejected because server aliases, `run_mcp`, `/trae/`, fixed interpreters, and direct beeline/Hive CLI fallbacks either make the skills client-specific or violate the repository safety model.
+
 ### Install into project-local client directories
 
 Both installers derive canonical skills from their own repository location and accept the same command interface.

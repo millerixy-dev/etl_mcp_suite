@@ -7,6 +7,7 @@
 - [x] 2.1 Create and validate the agent-neutral `zeppelin` skill with notebook lifecycle, polling, cancellation, restart, namespace, and safety guidance.
 - [x] 2.2 Create and validate the agent-neutral `hive` skill with metadata-only routing and Zeppelin fallback guidance.
 - [x] 2.3 Create and validate the agent-neutral `nl2sql` skill with metadata grounding, ambiguity gates, partition pruning, SQL validation, bounded execution, and result explanation.
+- [x] 2.4 Refresh the canonical Hive, Zeppelin, and NL2SQL skills from the latest supplied source skills, retaining compatible safety guidance and rejecting client/deployment coupling.
 
 ## 3. Project-Local Installation
 

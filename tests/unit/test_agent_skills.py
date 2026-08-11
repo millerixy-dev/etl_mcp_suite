@@ -36,8 +36,27 @@ CANONICAL_SKILLS = {
 }
 REQUIRED_GUIDANCE = {
     "hive": {"partition_columns", "[A-Za-z_][A-Za-z0-9_]*", "zeppelin"},
-    "zeppelin": {"/agents/", "PENDING", "RUNNING", "FINISHED", "ERROR", "CANCELLED"},
-    "nl2sql": {"partition_columns", "SHOW PARTITIONS", "LIMIT", "zeppelin", "hive"},
+    "zeppelin": {
+        "/agents/",
+        "PENDING",
+        "RUNNING",
+        "FINISHED",
+        "ERROR",
+        "CANCELLED",
+        "300 秒",
+        "用户决定",
+    },
+    "nl2sql": {
+        "partition_columns",
+        "SHOW PARTITIONS",
+        "LIMIT",
+        "zeppelin",
+        "hive",
+        "源表",
+        "目标表",
+        "显式 CAST",
+        "事件时间",
+    },
 }
 LEGACY_COUPLING_SAMPLES = (
     'run_mcp(server_name="mcp_hive", tool_name="list_databases", args={})',
