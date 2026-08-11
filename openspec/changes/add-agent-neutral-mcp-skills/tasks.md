@@ -17,6 +17,7 @@
 - [x] 3.4 Document editable MCP installation, project-local Codex configuration, required launch environment variables, and the current Trae limitation.
 - [x] 3.5 Document the validated uv version and macOS installation paths, and describe Zeppelin and DolphinScheduler as available built-in plugins.
 - [x] 3.6 Add a complete Simplified Chinese README and bidirectional language links.
+- [x] 3.7 Add a redacted literal-environment syntax example to the Simplified Chinese Codex MCP documentation.
 
 ## 4. Final Verification
 

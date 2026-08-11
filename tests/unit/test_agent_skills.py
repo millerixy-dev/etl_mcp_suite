@@ -513,5 +513,8 @@ def test_simplified_chinese_readme_is_linked_and_covers_core_usage() -> None:
         "Zeppelin",
         "DolphinScheduler",
         "安全说明",
+        "[mcp_servers.hive.env]",
+        'HIVE_PASSWORD = "<your-ldap-password>"',
+        "env_vars",
     ):
         assert required_content in chinese_readme

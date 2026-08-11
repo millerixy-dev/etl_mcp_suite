@@ -69,6 +69,15 @@ uv sync --frozen
 
 Codex 也支持在 `[mcp_servers.<name>.env]` 中直接配置字面值，但这些值会以明文保存在 `.codex/config.toml`。安装器刻意不为凭据生成这种形式。
 
+仅为说明 TOML 语法，下面是 Hive 的字面环境变量示例。不要将真实值写入或提交该文件；真实凭据仍推荐使用上方安装器生成的 `env_vars` 转发方式：
+
+```toml
+[mcp_servers.hive.env]
+HIVE_HOST = "<hive-host>"
+HIVE_USERNAME = "<your-ldap-user>"
+HIVE_PASSWORD = "<your-ldap-password>"
+```
+
 ```bash
 export HIVE_HOST=<hive-host>
 export HIVE_USERNAME=<your-ldap-user>

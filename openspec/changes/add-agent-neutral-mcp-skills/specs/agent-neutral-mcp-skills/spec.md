@@ -85,6 +85,10 @@ The Codex installer SHALL accept `--with-mcp`, SHALL install the current reposit
 - **WHEN** the installer writes the managed MCP entries
 - **THEN** it uses `env_vars` to name supported Hive and Zeppelin variables and writes no environment-variable values
 
+#### Scenario: Document literal Codex environment syntax safely
+- **WHEN** the Simplified Chinese README illustrates `[mcp_servers.<name>.env]`
+- **THEN** it uses redacted placeholders only and explains that literal values are plaintext, while `env_vars` remains recommended for real credentials
+
 #### Scenario: Update the managed block idempotently
 - **WHEN** a valid managed MCP block already exists and the Codex installer runs again with `--with-mcp`
 - **THEN** exactly one managed block is replaced atomically while unrelated configuration remains unchanged

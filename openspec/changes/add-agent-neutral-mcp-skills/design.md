@@ -119,6 +119,8 @@ env_vars = [
 
 `env_vars` names variables that Codex forwards from its launch environment. The config never stores a credential value, absolute Python executable, checkout path, virtual-environment path, or `PYTHONPATH`. Required runtime variables are `HIVE_HOST`, `HIVE_USERNAME`, `HIVE_PASSWORD`, and `ZEPPELIN_BASE_URL`; Zeppelin credentials remain an optional pair. Other supported settings continue to use the server's existing environment model.
 
+The Simplified Chinese README may show `[mcp_servers.<name>.env]` only as a syntax example with redacted placeholders. It explicitly states that literal values are persisted as plaintext and that `env_vars` remains the recommended form for real credentials.
+
 The marked block is replaced on repeated runs, so updates remain idempotent. An unmarked `[mcp_servers.hive]` or `[mcp_servers.zeppelin]` table, malformed marker pair, or duplicate managed block is a conflict and causes a non-zero exit before mutation, including when `--force` is supplied. `--force` controls only skill-directory collisions. The Trae installer rejects `--with-mcp` with a clear non-zero error.
 
 Alternative considered: persist the checkout's `.venv/bin/python` plus `PYTHONPATH`. This was rejected because moving the checkout or recreating its environment would invalidate Codex configuration. A uv editable tool provides a stable `mcp-stdio` command while importing code from the current checkout on each process start.
