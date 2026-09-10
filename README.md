@@ -83,8 +83,8 @@ Codex starts the stable `mcp-stdio` command, while each newly started MCP proces
 this checkout, so local source edits take effect without rewriting `.codex/config.toml`. The uv tool
 executable directory reported by `uv tool dir --bin` must already be on `PATH`.
 
-The installer manages one marked block containing `mcp_servers.hive` and
-`mcp_servers.zeppelin`. It uses Codex `env_vars` entries to forward variable names from the
+The installer manages one marked block containing `mcp_servers.hive`,
+`mcp_servers.zeppelin`, and `mcp_servers.dolphinscheduler`. It uses Codex `env_vars` entries to forward variable names from the
 environment that launched Codex; it does not write credential values, Python paths, virtual
 environment paths, or `PYTHONPATH` into the TOML file. Export the required values before launching
 Codex:
@@ -103,14 +103,49 @@ export ZEPPELIN_USERNAME=<zeppelin-user>
 export ZEPPELIN_PASSWORD=<zeppelin-password>
 # JSON array of explicitly allowed interpreters:
 export ZEPPELIN_ALLOWED_INTERPRETERS='["spark.sql", "spark.pyspark"]'
+export DOLPHINSCHEDULER_BASE_URL=http://<ds-host>:12345/dolphinscheduler
+# Optional DolphinScheduler API token:
+export DOLPHINSCHEDULER_TOKEN=<dolphinscheduler-api-token>
 ```
 
 Missing `HIVE_HOST`, `HIVE_USERNAME`, `HIVE_PASSWORD`, or `ZEPPELIN_BASE_URL` produces a warning
 that names only the missing variable; installation still succeeds so the launch environment can be
 configured later. Re-running with `--force --with-mcp` refreshes the managed skills and replaces
-exactly one managed TOML block while preserving unrelated Codex settings. An existing unmarked Hive
-or Zeppelin table is treated as user-owned and is never overwritten. The Trae installer is
-currently skill-only and rejects `--with-mcp`.
+exactly one managed TOML block while preserving unrelated Codex settings. An existing unmarked Hive,
+Zeppelin, or DolphinScheduler table is treated as user-owned and is never overwritten.
+
+### Add the DolphinScheduler MCP server to Codex
+
+The Codex installer creates this entry automatically with `--with-mcp`:
+
+```toml
+[mcp_servers.dolphinscheduler]
+command = "mcp-stdio"
+args = ["--plugin", "dolphinscheduler"]
+env_vars = [
+  "DOLPHINSCHEDULER_BASE_URL",
+  "DOLPHINSCHEDULER_TOKEN",
+]
+```
+
+`DOLPHINSCHEDULER_BASE_URL` is required and must be an absolute `http` or
+`https` URL without credentials, including the deployment context path when it
+uses one (for example, `http://ds-host:12345/dolphinscheduler`).
+`DOLPHINSCHEDULER_TOKEN` is optional. It is forwarded by name; never put its
+value in the TOML file.
+
+### Add all three MCP servers to Trae
+
+The Trae installer also accepts `--with-mcp`. It installs the editable tool and creates `<project>/.trae/mcp.json` with the **Hive, Zeppelin, and DolphinScheduler** server entries:
+
+```bash
+./scripts/install-skills-trae.sh --project-root /path/to/project --with-mcp
+```
+
+The JSON config contains only `mcp-stdio` commands and plugin arguments, not
+environment values. Start Trae with the required `HIVE_*`, `ZEPPELIN_*`, and
+`DOLPHINSCHEDULER_*` variables already exported. To prevent loss of user
+configuration, the installer refuses to replace an existing `.trae/mcp.json`.
 
 ## Configuration
 
@@ -293,6 +328,38 @@ DDL from `SHOW CREATE TABLE`.
 | `cached` | boolean | Cache indicator |
 
 Unsafe identifiers return `INVALID_INPUT` without opening a Hive connection.
+
+## DolphinScheduler configuration and tools
+
+The DolphinScheduler plugin supports a versioned YAML or JSON file, or an
+environment-only startup. Full non-sensitive examples are available at
+[`docs/examples/dolphinscheduler.yaml`](docs/examples/dolphinscheduler.yaml)
+and [`docs/examples/dolphinscheduler.json`](docs/examples/dolphinscheduler.json).
+
+For an environment-only process, configure the base URL and optionally a token:
+
+```bash
+export DOLPHINSCHEDULER_BASE_URL=http://<ds-host>:12345/dolphinscheduler
+export DOLPHINSCHEDULER_TOKEN=<dolphinscheduler-api-token> # optional
+uv run mcp-stdio --plugin dolphinscheduler
+```
+
+With a configuration file, `secrets.token` contains the environment variable
+name `DOLPHINSCHEDULER_TOKEN`, not a token value:
+
+```bash
+export DOLPHINSCHEDULER_TOKEN=<dolphinscheduler-api-token>
+uv run mcp-stdio --plugin dolphinscheduler \
+  --config docs/examples/dolphinscheduler.yaml
+```
+
+The process exposes `get_server_status`, `list_objects`, `get_object`,
+`search_objects`, `start_workflow`, `get_task_log`, and `extract_log_links`.
+`start_workflow` starts a workflow when `dry_run=0`; use `dry_run=1` to request
+validation without execution, and obtain user approval before an actual start.
+The remaining tools are read-only. Results and task logs are bounded, and the
+server does not expose object create, update, delete, pause, resume, or stop
+operations.
 
 ## Process isolation
 

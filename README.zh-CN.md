@@ -65,7 +65,7 @@ uv sync --frozen
 
 该模式等效于执行 `uv tool install --editable <this-repository> --reinstall`。Codex 启动稳定的 `mcp-stdio` 命令；每个新启动的 MCP 进程都会从当前检出导入代码，因此修改本地源码后无需重写 `.codex/config.toml`。`uv tool dir --bin` 返回的工具可执行目录必须已位于 `PATH` 中。
 
-安装器管理一个带标记的配置块，其中包含 `mcp_servers.hive` 和 `mcp_servers.zeppelin`。它使用 Codex 的 `env_vars` 将变量名从启动 Codex 的环境传入；不会将凭据值、Python 路径、虚拟环境路径或 `PYTHONPATH` 写入 TOML 文件。启动 Codex 前请导出必需变量：
+安装器管理一个带标记的配置块，其中包含 `mcp_servers.hive`、`mcp_servers.zeppelin` 和 `mcp_servers.dolphinscheduler`。它使用 Codex 的 `env_vars` 将变量名从启动 Codex 的环境传入；不会将凭据值、Python 路径、虚拟环境路径或 `PYTHONPATH` 写入 TOML 文件。启动 Codex 前请导出必需变量：
 
 Codex 也支持在 `[mcp_servers.<name>.env]` 中直接配置字面值，但这些值会以明文保存在 `.codex/config.toml`。安装器刻意不为凭据生成这种形式。
 
@@ -88,9 +88,38 @@ export ZEPPELIN_USERNAME=<zeppelin-user>
 export ZEPPELIN_PASSWORD=<zeppelin-password>
 # 显式允许的解释器 JSON 数组：
 export ZEPPELIN_ALLOWED_INTERPRETERS='["spark.sql", "spark.pyspark"]'
+export DOLPHINSCHEDULER_BASE_URL=http://<ds-host>:12345/dolphinscheduler
+# 可选的 DolphinScheduler API 令牌：
+export DOLPHINSCHEDULER_TOKEN=<dolphinscheduler-api-token>
 ```
 
-缺少 `HIVE_HOST`、`HIVE_USERNAME`、`HIVE_PASSWORD` 或 `ZEPPELIN_BASE_URL` 时，安装器只会提示缺失的变量名，安装仍会成功，以便稍后再配置启动环境。使用 `--force --with-mcp` 重复执行会刷新受管理的 Skill，并替换唯一一个受管理 TOML 块，同时保留其他 Codex 设置。未标记的 Hive 或 Zeppelin 配置表被视为用户自管内容，绝不会被覆盖。Trae 安装器目前只安装 Skill，并会拒绝 `--with-mcp`。
+缺少 `HIVE_HOST`、`HIVE_USERNAME`、`HIVE_PASSWORD`、`ZEPPELIN_BASE_URL` 或 `DOLPHINSCHEDULER_BASE_URL` 时，安装器只会提示缺失的变量名，安装仍会成功，以便稍后再配置启动环境。使用 `--force --with-mcp` 重复执行会刷新受管理的 Skill，并替换唯一一个受管理 TOML 块，同时保留其他 Codex 设置。未标记的 Hive、Zeppelin 或 DolphinScheduler 配置表被视为用户自管内容，绝不会被覆盖。
+
+### 向 Codex 添加 DolphinScheduler MCP Server
+
+Codex 安装器在使用 `--with-mcp` 时会自动创建该条目：
+
+```toml
+[mcp_servers.dolphinscheduler]
+command = "mcp-stdio"
+args = ["--plugin", "dolphinscheduler"]
+env_vars = [
+  "DOLPHINSCHEDULER_BASE_URL",
+  "DOLPHINSCHEDULER_TOKEN",
+]
+```
+
+`DOLPHINSCHEDULER_BASE_URL` 为必需项，必须是没有凭据的绝对 `http` 或 `https` URL；部署使用上下文路径时也必须带上它，例如 `http://ds-host:12345/dolphinscheduler`。`DOLPHINSCHEDULER_TOKEN` 为可选项，仅按变量名转发，绝不能将其值写入 TOML 文件。
+
+### 向 Trae 添加三个 MCP Server
+
+Trae 安装器同样支持 `--with-mcp`。它会安装可编辑工具，并在 `<项目>/.trae/mcp.json` 创建 **Hive、Zeppelin 与 DolphinScheduler** 三个服务条目：
+
+```bash
+./scripts/install-skills-trae.sh --project-root /path/to/project --with-mcp
+```
+
+该 JSON 配置只包含 `mcp-stdio` 命令与插件参数，不包含环境变量值。请在启动 Trae 前导出必需的 `HIVE_*`、`ZEPPELIN_*` 和 `DOLPHINSCHEDULER_*` 变量。为保护用户配置，安装器会拒绝覆盖已经存在的 `.trae/mcp.json`。
 
 ## 配置
 
@@ -250,6 +279,28 @@ Hive 进程恰好暴露三个只读工具。
 | `cached` | boolean | 缓存标志 |
 
 不安全的标识符会返回 `INVALID_INPUT`，且不会打开 Hive 连接。
+
+## DolphinScheduler 配置与工具
+
+DolphinScheduler 插件支持带版本号的 YAML/JSON 配置文件，也支持仅用环境变量启动。完整的非敏感示例见 [`docs/examples/dolphinscheduler.yaml`](docs/examples/dolphinscheduler.yaml) 与 [`docs/examples/dolphinscheduler.json`](docs/examples/dolphinscheduler.json)。
+
+仅用环境变量启动时，配置基础 URL，并按需配置令牌：
+
+```bash
+export DOLPHINSCHEDULER_BASE_URL=http://<ds-host>:12345/dolphinscheduler
+export DOLPHINSCHEDULER_TOKEN=<dolphinscheduler-api-token> # 可选
+uv run mcp-stdio --plugin dolphinscheduler
+```
+
+使用配置文件时，`secrets.token` 写入的是环境变量名称 `DOLPHINSCHEDULER_TOKEN`，不是令牌值：
+
+```bash
+export DOLPHINSCHEDULER_TOKEN=<dolphinscheduler-api-token>
+uv run mcp-stdio --plugin dolphinscheduler \
+  --config docs/examples/dolphinscheduler.yaml
+```
+
+该进程暴露 `get_server_status`、`list_objects`、`get_object`、`search_objects`、`start_workflow`、`get_task_log` 与 `extract_log_links`。`start_workflow` 在 `dry_run=0` 时会启动工作流；使用 `dry_run=1` 可只做校验、不实际执行，实际启动前必须获得用户批准。其余工具均为只读；结果和任务日志均有边界，服务不提供对象创建、更新、删除、暂停、恢复或停止操作。
 
 ## 进程隔离
 

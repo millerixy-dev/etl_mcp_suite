@@ -8,7 +8,7 @@ usage() {
             if [ "$client" = codex ]; then
                 printf 'Usage: install-skills-codex.sh [--project-root PATH] [--force] [--with-mcp]\n'
             else
-                printf 'Usage: install-skills-trae.sh [--project-root PATH] [--force]\n'
+                printf 'Usage: install-skills-trae.sh [--project-root PATH] [--force] [--with-mcp]\n'
             fi
             ;;
         *)
@@ -82,7 +82,6 @@ while [ "$#" -gt 0 ]; do
             shift
             ;;
         --with-mcp)
-            [ "$client" = codex ] || fail "--with-mcp is currently supported for Codex only"
             with_mcp=1
             shift
             ;;
@@ -111,8 +110,9 @@ destination_root=$project_root/$client_directory/skills
 managed_skills="hive zeppelin nl2sql"
 
 codex_config=$project_root/.codex/config.toml
+trae_config=$project_root/.trae/mcp.json
 
-if [ "$with_mcp" -eq 1 ] && [ -e "$codex_config" ]; then
+if [ "$with_mcp" -eq 1 ] && [ "$client" = codex ] && [ -e "$codex_config" ]; then
     [ ! -L "$codex_config" ] || fail "refusing to replace symlink: $codex_config"
     [ -f "$codex_config" ] || fail "Codex config is not a regular file: $codex_config"
 
@@ -125,13 +125,18 @@ if [ "$with_mcp" -eq 1 ] && [ -e "$codex_config" ]; then
     if awk -v begin="$managed_begin" -v end="$managed_end" '
         $0 == begin { inside = 1; next }
         $0 == end { inside = 0; next }
-        !inside && $0 ~ /^[[:space:]]*\[mcp_servers\.(hive|zeppelin)\][[:space:]]*(#.*)?$/ {
+        !inside && $0 ~ /^[[:space:]]*\[mcp_servers\.(hive|zeppelin|dolphinscheduler)\][[:space:]]*(#.*)?$/ {
             conflict = 1
         }
         END { exit conflict ? 0 : 1 }
     ' "$codex_config"; then
-        fail "Codex config already has an unmanaged Hive or Zeppelin MCP table: $codex_config"
+        fail "Codex config already has an unmanaged Hive, Zeppelin, or DolphinScheduler MCP table: $codex_config"
     fi
+fi
+
+if [ "$with_mcp" -eq 1 ] && [ "$client" = trae ] && [ -e "$trae_config" ]; then
+    [ ! -L "$trae_config" ] || fail "refusing to replace symlink: $trae_config"
+    fail "Trae MCP config already exists and is user-managed: $trae_config"
 fi
 
 for skill_name in $managed_skills; do
@@ -170,12 +175,13 @@ if [ "$with_mcp" -eq 1 ]; then
     resolved_command=$(command -v mcp-stdio || true)
     [ "$resolved_command" = "$expected_command" ] || fail "mcp-stdio does not resolve to the uv tool executable: $expected_command"
 
-    config_directory=$project_root/.codex
-    mkdir -p "$config_directory"
-    mcp_block_temp=$(mktemp "$config_directory/.mcp-stdio-block.XXXXXX")
-    mcp_output_temp=$(mktemp "$config_directory/.config.toml.XXXXXX")
+    if [ "$client" = codex ]; then
+        config_directory=$project_root/.codex
+        mkdir -p "$config_directory"
+        mcp_block_temp=$(mktemp "$config_directory/.mcp-stdio-block.XXXXXX")
+        mcp_output_temp=$(mktemp "$config_directory/.config.toml.XXXXXX")
 
-    {
+        {
         printf '%s\n' "$managed_begin"
         printf '%s\n' '[mcp_servers.hive]'
         printf '%s\n' 'command = "mcp-stdio"'
@@ -198,10 +204,25 @@ if [ "$with_mcp" -eq 1 ]; then
         printf '%s\n' '  "ZEPPELIN_USERNAME",'
         printf '%s\n' '  "ZEPPELIN_PASSWORD",'
         printf '%s\n' ']'
+        printf '\n'
+        printf '%s\n' '[mcp_servers.dolphinscheduler]'
+        printf '%s\n' 'command = "mcp-stdio"'
+        printf '%s\n' 'args = ["--plugin", "dolphinscheduler"]'
+        printf '%s\n' 'env_vars = ['
+        printf '%s\n' '  "DOLPHINSCHEDULER_BASE_URL",'
+        printf '%s\n' '  "DOLPHINSCHEDULER_STATUS_PATH",'
+        printf '%s\n' '  "DOLPHINSCHEDULER_REQUEST_TIMEOUT_SECONDS",'
+        printf '%s\n' '  "DOLPHINSCHEDULER_MAX_RESPONSE_BYTES",'
+        printf '%s\n' '  "DOLPHINSCHEDULER_MAX_DETAIL_ITEMS",'
+        printf '%s\n' '  "DOLPHINSCHEDULER_DEFAULT_PAGE_SIZE",'
+        printf '%s\n' '  "DOLPHINSCHEDULER_MAX_PAGE_SIZE",'
+        printf '%s\n' '  "DOLPHINSCHEDULER_MAX_LOG_BYTES",'
+        printf '%s\n' '  "DOLPHINSCHEDULER_TOKEN",'
+        printf '%s\n' ']'
         printf '%s\n' "$managed_end"
-    } > "$mcp_block_temp"
+        } > "$mcp_block_temp"
 
-    if [ -f "$codex_config" ] && [ "$begin_count" -eq 1 ]; then
+        if [ -f "$codex_config" ] && [ "$begin_count" -eq 1 ]; then
         awk -v begin="$managed_begin" -v end="$managed_end" -v block="$mcp_block_temp" '
             $0 == begin {
                 while ((getline line < block) > 0) print line
@@ -213,18 +234,37 @@ if [ "$with_mcp" -eq 1 ]; then
             inside { next }
             { print }
         ' "$codex_config" > "$mcp_output_temp"
-    else
-        if [ -s "$codex_config" ]; then
-            awk '{ print }' "$codex_config" > "$mcp_output_temp"
-            printf '\n' >> "$mcp_output_temp"
+        else
+            if [ -s "$codex_config" ]; then
+                awk '{ print }' "$codex_config" > "$mcp_output_temp"
+                printf '\n' >> "$mcp_output_temp"
+            fi
+            awk '{ print }' "$mcp_block_temp" >> "$mcp_output_temp"
         fi
-        awk '{ print }' "$mcp_block_temp" >> "$mcp_output_temp"
-    fi
 
-    mv -- "$mcp_output_temp" "$codex_config"
-    mcp_output_temp=
-    rm -f -- "$mcp_block_temp"
-    mcp_block_temp=
+        mv -- "$mcp_output_temp" "$codex_config"
+        mcp_output_temp=
+        rm -f -- "$mcp_block_temp"
+        mcp_block_temp=
+    else
+        config_directory=$project_root/.trae
+        mkdir -p "$config_directory"
+        mcp_output_temp=$(mktemp "$config_directory/.mcp.json.XXXXXX")
+        {
+            printf '%s\n' '{'
+            printf '%s\n' '  "mcpServers": {'
+            printf '%s\n' '    "hive": {"command": "mcp-stdio", "args": ["--plugin", "hive"]},'
+            printf '%s\n' '    "zeppelin": {"command": "mcp-stdio", "args": ["--plugin", "zeppelin"]},'
+            printf '%s\n' '    "dolphinscheduler": {'
+            printf '%s\n' '      "command": "mcp-stdio",'
+            printf '%s\n' '      "args": ["--plugin", "dolphinscheduler"]'
+            printf '%s\n' '    }'
+            printf '%s\n' '  }'
+            printf '%s\n' '}'
+        } > "$mcp_output_temp"
+        mv -- "$mcp_output_temp" "$trae_config"
+        mcp_output_temp=
+    fi
 fi
 
 mkdir -p "$destination_root"
@@ -239,13 +279,19 @@ done
 printf 'Installed hive, zeppelin, and nl2sql skills into %s\n' "$destination_root"
 
 if [ "$with_mcp" -eq 1 ]; then
-    printf 'Configured Hive and Zeppelin MCP servers in %s\n' "$codex_config"
-    for variable_name in HIVE_HOST HIVE_USERNAME HIVE_PASSWORD ZEPPELIN_BASE_URL; do
+    if [ "$client" = codex ]; then
+        configured_path=$codex_config
+    else
+        configured_path=$trae_config
+    fi
+    printf 'Configured Hive, Zeppelin, and DolphinScheduler MCP servers in %s\n' "$configured_path"
+    for variable_name in HIVE_HOST HIVE_USERNAME HIVE_PASSWORD ZEPPELIN_BASE_URL DOLPHINSCHEDULER_BASE_URL; do
         case "$variable_name" in
             HIVE_HOST) variable_value=${HIVE_HOST-} ;;
             HIVE_USERNAME) variable_value=${HIVE_USERNAME-} ;;
             HIVE_PASSWORD) variable_value=${HIVE_PASSWORD-} ;;
             ZEPPELIN_BASE_URL) variable_value=${ZEPPELIN_BASE_URL-} ;;
+            DOLPHINSCHEDULER_BASE_URL) variable_value=${DOLPHINSCHEDULER_BASE_URL-} ;;
         esac
         if [ -z "$variable_value" ]; then
             warn "runtime environment variable is not set: $variable_name"

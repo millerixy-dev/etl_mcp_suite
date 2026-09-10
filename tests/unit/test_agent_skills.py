@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from collections.abc import Mapping
@@ -153,6 +154,7 @@ exit 64
                 "HIVE_USERNAME": "example-hive-user",
                 "HIVE_PASSWORD": "example-hive-password",
                 "ZEPPELIN_BASE_URL": "https://zeppelin.example.test",
+                "DOLPHINSCHEDULER_BASE_URL": "https://dolphinscheduler.example.test",
             }
         )
     return environment, uv_log, reported_tool_bin
@@ -270,7 +272,7 @@ def test_installer_help_names_the_public_entry_point(
     )
 
     assert completed.returncode == 0, completed.stderr
-    expected_suffix = " [--with-mcp]" if script_name == "install-skills-codex.sh" else ""
+    expected_suffix = " [--with-mcp]"
     assert (
         f"Usage: {script_name} [--project-root PATH] [--force]{expected_suffix}"
         in completed.stdout
@@ -307,9 +309,11 @@ def test_codex_with_mcp_installs_editable_tool_and_manages_path_free_config(
     assert config.count(MANAGED_END) == 1
     assert config.count("[mcp_servers.hive]") == 1
     assert config.count("[mcp_servers.zeppelin]") == 1
+    assert config.count("[mcp_servers.dolphinscheduler]") == 1
     assert 'command = "mcp-stdio"' in config
     assert 'args = ["--plugin", "hive"]' in config
     assert 'args = ["--plugin", "zeppelin"]' in config
+    assert 'args = ["--plugin", "dolphinscheduler"]' in config
     assert "env_vars = [" in config
     for variable_name in (
         "HIVE_HOST",
@@ -317,6 +321,8 @@ def test_codex_with_mcp_installs_editable_tool_and_manages_path_free_config(
         "HIVE_PASSWORD",
         "ZEPPELIN_BASE_URL",
         "ZEPPELIN_ALLOWED_INTERPRETERS",
+        "DOLPHINSCHEDULER_BASE_URL",
+        "DOLPHINSCHEDULER_TOKEN",
     ):
         assert f'"{variable_name}"' in config
     for forbidden in (
@@ -326,6 +332,7 @@ def test_codex_with_mcp_installs_editable_tool_and_manages_path_free_config(
         "example-hive-user",
         "example-hive-password",
         "https://zeppelin.example.test",
+        "https://dolphinscheduler.example.test",
     ):
         assert forbidden not in config
 
@@ -434,9 +441,13 @@ def test_codex_with_mcp_warns_with_missing_variable_names_only(tmp_path: Path) -
     assert "example-hive-password" not in completed.stderr
 
 
-def test_trae_installer_rejects_with_mcp(tmp_path: Path) -> None:
+def test_trae_with_mcp_installs_editable_tool_and_creates_three_server_config(
+    tmp_path: Path,
+) -> None:
     project_root = tmp_path / "target"
     project_root.mkdir()
+    config_path = project_root / ".trae" / "mcp.json"
+    environment, uv_log, _tool_bin = fake_uv_environment(tmp_path)
 
     completed = subprocess.run(
         [
@@ -446,14 +457,50 @@ def test_trae_installer_rejects_with_mcp(tmp_path: Path) -> None:
             "--with-mcp",
         ],
         cwd=PROJECT_ROOT,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert uv_log.read_text(encoding="utf-8").splitlines() == [
+        "tool dir --bin",
+        f"tool install --editable {PROJECT_ROOT} --reinstall",
+    ]
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    assert set(config["mcpServers"]) == {"hive", "zeppelin", "dolphinscheduler"}
+    assert config["mcpServers"]["dolphinscheduler"] == {
+        "command": "mcp-stdio",
+        "args": ["--plugin", "dolphinscheduler"],
+    }
+    assert "example-hive-password" not in config_path.read_text(encoding="utf-8")
+
+
+def test_trae_with_mcp_refuses_to_replace_an_existing_config(tmp_path: Path) -> None:
+    project_root = tmp_path / "target"
+    config_path = project_root / ".trae" / "mcp.json"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text('{"mcpServers":{"custom":{}}}\n', encoding="utf-8")
+    environment, uv_log, _tool_bin = fake_uv_environment(tmp_path)
+
+    completed = subprocess.run(
+        [
+            str(PROJECT_ROOT / "scripts" / "install-skills-trae.sh"),
+            "--project-root",
+            str(project_root),
+            "--with-mcp",
+        ],
+        cwd=PROJECT_ROOT,
+        env=environment,
         check=False,
         capture_output=True,
         text=True,
     )
 
     assert completed.returncode != 0
-    assert "Codex" in completed.stderr
-    assert not (project_root / ".trae" / "skills" / "hive").exists()
+    assert config_path.read_text(encoding="utf-8") == '{"mcpServers":{"custom":{}}}\n'
+    assert not uv_log.exists()
 
 
 def test_readme_documents_project_local_skill_installers() -> None:
@@ -477,6 +524,8 @@ def test_readme_documents_project_local_skill_installers() -> None:
         "HIVE_PASSWORD",
         "ZEPPELIN_BASE_URL",
         "Trae",
+        ".trae/mcp.json",
+        "Hive, Zeppelin, and DolphinScheduler",
     }
 
     assert required_guidance <= {item for item in required_guidance if item in readme}
@@ -494,6 +543,32 @@ def test_readme_documents_uv_and_current_builtin_plugins() -> None:
 
     assert required_guidance <= {item for item in required_guidance if item in readme}
     assert "planned for separate follow-up changes" not in readme
+
+
+def test_readmes_and_quickstart_document_dolphinscheduler_mcp_server() -> None:
+    required_readme_guidance = {
+        "mcp_servers.dolphinscheduler",
+        "--plugin dolphinscheduler",
+        "DOLPHINSCHEDULER_BASE_URL",
+        "DOLPHINSCHEDULER_TOKEN",
+        "docs/examples/dolphinscheduler.yaml",
+        "get_server_status",
+        "start_workflow",
+    }
+    for path in (PROJECT_ROOT / "README.md", PROJECT_ROOT / "README.zh-CN.md"):
+        content = path.read_text(encoding="utf-8")
+        assert required_readme_guidance <= {
+            item for item in required_readme_guidance if item in content
+        }
+
+    quickstart = (PROJECT_ROOT / "docs/quickstart-macos.md").read_text(encoding="utf-8")
+    assert "暂不可用" not in quickstart
+    for required_content in (
+        "dolphinscheduler",
+        "DOLPHINSCHEDULER_BASE_URL",
+        "DOLPHINSCHEDULER_TOKEN",
+    ):
+        assert required_content in quickstart
 
 
 def test_simplified_chinese_readme_is_linked_and_covers_core_usage() -> None:

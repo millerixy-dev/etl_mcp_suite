@@ -1,8 +1,7 @@
 # macOS 快速上手
 
-面向新用户,在 macOS 上从零安装并跑通 `mcp-stdio` 的最短路径。版本一交付 `hive`
-(只读元数据)与 `zeppelin`(可执行,带安全门控)两个插件;`dolphinscheduler` 为占位,
-暂不可用。每个插件各自一个独立子进程,互不共享凭据、连接与缓存。
+面向新用户,在 macOS 上从零安装并跑通 `mcp-stdio` 的最短路径。内置 `hive`
+(只读元数据)、`zeppelin`(可执行,带安全门控)与 `dolphinscheduler`(调度观测与工作流启动)三个插件。每个插件各自一个独立子进程,互不共享凭据、连接与缓存。
 
 ## 1. 安装前置依赖
 
@@ -77,6 +76,21 @@ export ZEPPELIN_RESTARTABLE_INTERPRETER_SETTINGS='["spark"]'  # 可重启的解�
 uv run mcp-stdio --plugin zeppelin --debug
 ```
 
+### DolphinScheduler 插件(前缀 `DOLPHINSCHEDULER`)
+
+```bash
+export DOLPHINSCHEDULER_BASE_URL=http://<ds-host>:12345/dolphinscheduler # 必填
+export DOLPHINSCHEDULER_TOKEN=<dolphinscheduler-api-token> # 可选
+```
+
+`DOLPHINSCHEDULER_BASE_URL` 必须是没有凭据的绝对 HTTP(S) URL；部署使用上下文路径时必须保留它。也可使用 `docs/examples/dolphinscheduler.yaml` 或 `.json` 放置非敏感配置；其中 `secrets.token` 填写环境变量名称，而非令牌值。
+
+直连 stdio 验证:
+
+```bash
+uv run mcp-stdio --plugin dolphinscheduler --debug
+```
+
 ## 4. 接入 MCP 客户端
 
 把命令指向 venv 里的入口,把环境变量放进 `env`。Hive 示例(放入客户端的 mcp 配置,
@@ -102,7 +116,7 @@ uv run mcp-stdio --plugin zeppelin --debug
 ```
 
 Zeppelin 同理,把 `--plugin` 换成 `zeppelin`、`env` 换成 `ZEPPELIN_*`(列表字段用 JSON
-数组字符串)。每个插件各自一个 `mcpServers` 条目、一个独立子进程。
+数组字符串)。DolphinScheduler 则使用 `--plugin dolphinscheduler`，并传入 `DOLPHINSCHEDULER_BASE_URL` 与可选的 `DOLPHINSCHEDULER_TOKEN`。每个插件各自一个 `mcpServers` 条目、一个独立子进程。
 
 ## 5. 常见坑
 
@@ -113,9 +127,10 @@ Zeppelin 同理,把 `--plugin` 换成 `zeppelin`、`env` 换成 `ZEPPELIN_*`(列
   门控拒绝会明确说明命中的是黑/白名单。
 - 写库被拒 -> 目标库不在 `ZEPPELIN_SQL_WRITE_ALLOWED_DATABASES`,或命中
   `ZEPPELIN_SQL_FORBIDDEN_KEYWORDS` 黑名单。
+- DolphinScheduler 工作流启动 -> 先使用 `dry_run=1` 校验；实际 `start_workflow` 前须获得用户批准。除启动外，其余 DolphinScheduler 工具只读。
 
 ## 6. 下一步
 
-- 配置文件示例见 `docs/examples/hive.yaml` 与 `docs/examples/hive.json`(非敏感项)。
+- 配置文件示例见 `docs/examples/hive.yaml`、`docs/examples/hive.json`、`docs/examples/dolphinscheduler.yaml` 与 `docs/examples/dolphinscheduler.json`(非敏感项)。
 - 架构与模块边界见 `docs/architecture/runtime-flow.md`、`docs/architecture/modules.md`。
 - 完整工具契约与安全说明见 `README.md`。
