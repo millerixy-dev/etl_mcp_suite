@@ -753,6 +753,78 @@ def test_interpreter_bindings_result_rejects_duplicate_or_excessive_bindings() -
         )
 
 
+def test_interpreter_bindings_result_accepts_all_exact_protocol_maxima() -> None:
+    from mcp_stdio.plugins.zeppelin.models import InterpreterBindingsResult
+
+    interpreter_names = ["i" * 256, *(f"interpreter-{index}" for index in range(63))]
+    bindings: list[dict[str, object]] = [
+        {
+            "setting_id": "s" * 4_096,
+            "name": "n" * 256,
+            "interpreters": interpreter_names,
+            "selected": True,
+            "restart_allowed": False,
+        }
+    ]
+    bindings.extend(
+        {
+            "setting_id": f"setting-{index}",
+            "name": f"Setting {index}",
+            "interpreters": [],
+            "selected": False,
+            "restart_allowed": False,
+        }
+        for index in range(1, 256)
+    )
+
+    result = InterpreterBindingsResult.model_validate(
+        {"notebook_id": "n" * 4_096, "bindings": bindings}
+    )
+
+    assert len(result.notebook_id) == 4_096
+    assert len(result.bindings) == 256
+    assert len(result.bindings[0].setting_id) == 4_096
+    assert len(result.bindings[0].name) == 256
+    assert len(result.bindings[0].interpreters) == 64
+    assert len(result.bindings[0].interpreters[0]) == 256
+
+
+def test_interpreter_bindings_result_rejects_extra_fields() -> None:
+    from mcp_stdio.plugins.zeppelin.models import InterpreterBindingsResult
+
+    with pytest.raises(ValidationError):
+        InterpreterBindingsResult.model_validate(
+            {
+                "notebook_id": "note-example",
+                "bindings": [],
+                "ticket": "forbidden",
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "bindings",
+    [
+        None,
+        123,
+        True,
+        "[]",
+        {"setting_id": "spark"},
+        {"spark"},
+        frozenset({"spark"}),
+    ],
+)
+def test_interpreter_bindings_result_rejects_non_list_or_tuple_bindings(
+    bindings: object,
+) -> None:
+    from mcp_stdio.plugins.zeppelin.models import InterpreterBindingsResult
+
+    with pytest.raises(ValidationError):
+        InterpreterBindingsResult.model_validate(
+            {"notebook_id": "note-example", "bindings": bindings}
+        )
+
+
 @pytest.mark.parametrize("notebook_id", [123, True, "", "bad\nnotebook", "x" * 4_097])
 def test_interpreter_bindings_result_rejects_invalid_notebook_id(
     notebook_id: object,
