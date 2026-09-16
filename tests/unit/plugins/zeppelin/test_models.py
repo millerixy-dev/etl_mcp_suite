@@ -76,6 +76,14 @@ def test_opaque_ids_preserve_url_syntax_and_encode_as_one_path_segment() -> None
     assert encode_opaque_id(opaque_id, max_chars=64) == "..%2Ffolder%3Fx%3D1%23%E7%89%87%E6%AE%B5"
 
 
+@pytest.mark.parametrize("value", ["2AY6GV7Q3", "../spark?scope=note#v1"])
+def test_opaque_setting_ids_do_not_change_paragraph_interpreter_syntax(value: str) -> None:
+    assert validate_opaque_id(value, max_chars=64) == value
+
+    with pytest.raises(ValueError, match="interpreter name is malformed"):
+        validate_interpreter_name(value)
+
+
 @pytest.mark.parametrize("value", ["", "id\nnext", "id\x00next", "x" * 513])
 def test_opaque_ids_reject_empty_control_or_oversized_values(value: str) -> None:
     with pytest.raises(ValueError) as exc_info:

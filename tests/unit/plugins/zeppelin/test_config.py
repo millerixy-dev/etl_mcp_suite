@@ -49,6 +49,7 @@ def _load(
         settings_type=ZeppelinSettings,
         secrets_type=ZeppelinSecrets,
         environ={} if environ is None else environ,
+        env_prefix="ZEPPELIN",
     )
 
 
@@ -306,31 +307,116 @@ def test_restartable_interpreter_settings_default_to_empty(tmp_path: Path) -> No
     assert loaded.settings.restartable_interpreter_settings == ()
 
 
-def test_restartable_interpreter_settings_support_environment_override(
-    tmp_path: Path,
-) -> None:
-    loaded = _load(
-        _write_json(tmp_path / "zeppelin.json", _document()),
-        {
-            "MCP_STDIO__SETTINGS__RESTARTABLE_INTERPRETER_SETTINGS": '["spark","sh"]',
-        },
-    )
-    assert loaded.settings.restartable_interpreter_settings == ("spark", "sh")
-
-
-def test_restartable_interpreter_settings_reject_malformed_entry(
+def test_restartable_interpreter_settings_preserve_opaque_ids_exactly(
     tmp_path: Path,
 ) -> None:
     document = _document()
-    document["settings"]["restartable_interpreter_settings"] = ["spark", "1bad"]
-    with pytest.raises(ConfigError):
+    settings = document["settings"]
+    assert isinstance(settings, dict)
+    settings["restartable_interpreter_settings"] = [
+        "2AY6GV7Q3",
+        "../spark?scope=note#v1",
+        "Spark",
+        "spark",
+    ]
+
+    loaded = _load(_write_json(tmp_path / "zeppelin.json", document))
+
+    assert loaded.settings.restartable_interpreter_settings == (
+        "2AY6GV7Q3",
+        "../spark?scope=note#v1",
+        "Spark",
+        "spark",
+    )
+    assert isinstance(loaded.settings.restartable_interpreter_settings, tuple)
+
+
+@pytest.mark.parametrize("value", ["", "id\nnext", "id\x00next", "x" * 513, 123, True])
+def test_restartable_interpreter_settings_reject_unsafe_or_non_string_entries(
+    tmp_path: Path, value: object
+) -> None:
+    document = _document()
+    settings = document["settings"]
+    assert isinstance(settings, dict)
+    settings["restartable_interpreter_settings"] = [value]
+
+    with pytest.raises(ConfigError) as exc_info:
         _load(_write_json(tmp_path / "zeppelin.json", document))
+
+    assert str(exc_info.value).startswith("CONFIG_ERROR: invalid configuration at settings")
+    if value:
+        assert str(value) not in str(exc_info.value)
 
 
 def test_restartable_interpreter_settings_reject_duplicate_entries(
     tmp_path: Path,
 ) -> None:
     document = _document()
-    document["settings"]["restartable_interpreter_settings"] = ["spark", "spark"]
+    settings = document["settings"]
+    assert isinstance(settings, dict)
+    settings["restartable_interpreter_settings"] = ["spark", "spark"]
     with pytest.raises(ConfigError):
         _load(_write_json(tmp_path / "zeppelin.json", document))
+
+
+def test_restartable_interpreter_settings_use_configured_opaque_id_bound(
+    tmp_path: Path,
+) -> None:
+    setting_id = "opaque-id"
+    rejected = _document()
+    rejected_settings = rejected["settings"]
+    assert isinstance(rejected_settings, dict)
+    rejected_settings["max_opaque_id_chars"] = len(setting_id) - 1
+    rejected_settings["restartable_interpreter_settings"] = [setting_id]
+
+    with pytest.raises(ConfigError) as exc_info:
+        _load(_write_json(tmp_path / "rejected.json", rejected))
+
+    assert str(exc_info.value) == "CONFIG_ERROR: invalid configuration at settings"
+    assert setting_id not in str(exc_info.value)
+
+    accepted = _document()
+    accepted_settings = accepted["settings"]
+    assert isinstance(accepted_settings, dict)
+    accepted_settings["max_opaque_id_chars"] = len(setting_id)
+    accepted_settings["restartable_interpreter_settings"] = [setting_id]
+
+    loaded = _load(_write_json(tmp_path / "accepted.json", accepted))
+
+    assert loaded.settings.restartable_interpreter_settings == (setting_id,)
+
+
+def test_plugin_restart_allowlist_override_has_precedence_and_uses_json_array(
+    tmp_path: Path,
+) -> None:
+    document = _document()
+    settings = document["settings"]
+    assert isinstance(settings, dict)
+    settings["restartable_interpreter_settings"] = ["file-setting"]
+
+    loaded = _load(
+        _write_json(tmp_path / "zeppelin.json", document),
+        {
+            "MCP_STDIO__SETTINGS__RESTARTABLE_INTERPRETER_SETTINGS": '["generic-setting"]',
+            "ZEPPELIN_RESTARTABLE_INTERPRETER_SETTINGS": (
+                '["spark_prod","2AY6GV7Q3","../spark?scope=note#v1"]'
+            ),
+        },
+    )
+
+    assert loaded.settings.restartable_interpreter_settings == (
+        "spark_prod",
+        "2AY6GV7Q3",
+        "../spark?scope=note#v1",
+    )
+
+
+def test_plugin_restart_allowlist_override_rejects_scalar_value(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError) as exc_info:
+        _load(
+            _write_json(tmp_path / "zeppelin.json", _document()),
+            {"ZEPPELIN_RESTARTABLE_INTERPRETER_SETTINGS": '"spark_prod"'},
+        )
+
+    assert "settings.restartable_interpreter_settings" in str(exc_info.value)
+    assert "spark_prod" not in str(exc_info.value)
