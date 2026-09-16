@@ -47,10 +47,17 @@ _Result = TypeVar("_Result")
 
 # A non-cooperative transport must not hold shutdown open or lose task ownership.
 _http_close_tasks: set[asyncio.Task[None]] = set()
+_http_work_tasks: set[asyncio.Task[object]] = set()
 
 
 def _observe_http_close(task: asyncio.Task[None]) -> None:
     _http_close_tasks.discard(task)
+    if not task.cancelled():
+        task.exception()
+
+
+def _observe_http_work(task: asyncio.Task[object]) -> None:
+    _http_work_tasks.discard(task)
     if not task.cancelled():
         task.exception()
 
@@ -680,7 +687,9 @@ class ZeppelinHttpClient:
             await self._release_discovery_lock(acquisition)
 
     async def _finish_http_work(self, task: asyncio.Task[object]) -> None:
-        """Join cancelled send work, aborting owned sockets before a stalled join."""
+        """Bound cleanup and retain a silent owner if a custom transport cannot stop."""
+        _http_work_tasks.add(task)
+        task.add_done_callback(_observe_http_work)
         if not task.done():
             task.cancel()
             await asyncio.wait(
@@ -692,7 +701,14 @@ class ZeppelinHttpClient:
                 except Exception:
                     pass
                 task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
+                # Abort schedules socket and waiter callbacks. Give them finite
+                # loop turns without another potentially unbounded task join.
+                for _ in range(8):
+                    if task.done():
+                        break
+                    await asyncio.sleep(0)
+        if task.done():
+            _observe_http_work(task)
 
     def _parse_restart_result(
         self, body: object, setting_id: str, identifiers: dict[str, str],

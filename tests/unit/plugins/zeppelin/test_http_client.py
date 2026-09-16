@@ -15,9 +15,11 @@ import httpx
 import pytest
 
 from mcp_stdio.core.errors import ErrorCategory, ToolError, ToolOperation
+from mcp_stdio.plugins.zeppelin import http_client as adapter_module
 from mcp_stdio.plugins.zeppelin.config import ZeppelinSecrets, ZeppelinSettings
 from mcp_stdio.plugins.zeppelin.gateway import ZeppelinGatewayError
 from mcp_stdio.plugins.zeppelin.http_client import ZeppelinHttpClient
+from mcp_stdio.plugins.zeppelin.http_resources import HttpResources
 from mcp_stdio.plugins.zeppelin.models import (
     CancelParagraphResult,
     ParagraphStatus,
@@ -736,6 +738,91 @@ async def test_contextual_abort_released_put_has_bounded_cleanup_and_no_orphan(
     assert asyncio.all_tasks() == before
 
 
+@pytest.mark.parametrize("abort_behavior", ["raises", "no-op"])
+@pytest.mark.parametrize("trigger", ["timeout", "cancel", "shutdown"])
+async def test_contextual_failed_abort_keeps_owned_work_without_blocking_close(
+    abort_behavior: str, trigger: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class UnreleasedPut(AbortReleasedPut):
+        def __init__(self) -> None:
+            super().__init__()
+            self.work: asyncio.Task[object] | None = None
+
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            if request.method != "PUT":
+                return await super().handle_async_request(request)
+            self.work = asyncio.current_task()
+            await super().handle_async_request(request)
+            raise RuntimeError("private-late-send-failure")
+
+        def abort(self) -> None:
+            self.abort_calls += 1
+            if abort_behavior == "raises":
+                raise OSError("private-abort-failure")
+
+    loop = asyncio.get_running_loop()
+    before = asyncio.all_tasks()
+    loop_errors: list[dict[str, object]] = []
+    previous_handler = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: loop_errors.append(context))
+    transport = UnreleasedPut()
+    adapter, _ = contextual_adapter(transport, selected_socket(), request_timeout_seconds=0.02)
+    lock = asyncio.Lock()
+    monkeypatch.setattr(adapter, "_discovery_lock", lock)
+    caller = asyncio.create_task(adapter.restart_interpreter("spark", "first"))
+    closer: asyncio.Task[None] | None = None
+    try:
+        await transport.put_entered.wait()
+        if trigger == "cancel":
+            caller.cancel()
+        elif trigger == "shutdown":
+            closer = asyncio.create_task(adapter.close())
+        await transport.send_cancelled.wait()
+        done, _ = await asyncio.wait((caller,), timeout=0.2)
+        assert caller in done, "abort failure left the caller in an unbounded join"
+        if trigger == "timeout":
+            with pytest.raises(ZeppelinGatewayError) as failure:
+                await caller
+            assert failure.value.tool_error.category == ErrorCategory.TIMEOUT
+            assert not failure.value.tool_error.retryable
+        else:
+            with pytest.raises(asyncio.CancelledError):
+                await caller
+        if closer is None:
+            closer = asyncio.create_task(adapter.close())
+        done, _ = await asyncio.wait((closer,), timeout=0.2)
+        assert closer in done, "close still depends on the non-cooperative PUT"
+        await closer
+        assert not lock.locked()
+        assert transport.abort_calls >= 1
+        work = transport.work
+        assert work is not None and not work.done()
+        # Inspect the private owner to distinguish retention from silent detachment.
+        tracked = adapter_module._http_work_tasks  # pyright: ignore[reportPrivateUsage]
+        assert work in tracked, "the unfinished work lost its strong owner"
+        assert asyncio.all_tasks() - before == {work}
+        transport.put_release.set()
+        await asyncio.wait((work,), timeout=0.2)
+        assert work.done()
+        await asyncio.sleep(0)
+        assert work not in tracked
+        transport.work = None
+        del work
+        gc.collect()
+        await asyncio.sleep(0)
+        assert loop_errors == []
+    finally:
+        transport.put_release.set()
+        await asyncio.gather(caller, return_exceptions=True)
+        if closer is not None:
+            await closer
+        await adapter.close()
+        if transport.work is not None:
+            await asyncio.gather(transport.work, return_exceptions=True)
+        loop.set_exception_handler(previous_handler)
+    assert asyncio.all_tasks() == before
+
+
 @pytest.mark.parametrize("stage", ["/api/notebook/first", "PUT"])
 @pytest.mark.parametrize("exception", [httpx.ReadError("private"), httpx.WriteError("private")])
 async def test_contextual_read_write_failure_maps_connection_without_retry(
@@ -1210,7 +1297,7 @@ class LocalNetworkStream(Protocol):
 
 @pytest.mark.parametrize("trigger", ["timeout", "cancel", "shutdown"])
 async def test_contextual_put_cleanup_aborts_real_httpx_socket_before_response(
-    trigger: str,
+    trigger: str, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     before = asyncio.all_tasks()
     put_received = asyncio.Event()
@@ -1253,6 +1340,12 @@ async def test_contextual_put_cleanup_aborts_real_httpx_socket_before_response(
             self.network: LocalNetworkStream | None = None
             self.cancelled = asyncio.Event()
             self.put_count = 0
+            self.release_close = asyncio.Event()
+
+        async def aclose(self) -> None:
+            # Shutdown's ordinary client close must not substitute for abort.
+            await self.release_close.wait()
+            await super().aclose()
 
         async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
             if request.method != "PUT":
@@ -1277,10 +1370,26 @@ async def test_contextual_put_cleanup_aborts_real_httpx_socket_before_response(
                     work.exception()
                 raise
 
+    class LongHttpTimeoutGateway(ZeppelinHttpClient):
+        async def _ensure_client(self) -> httpx.AsyncClient:
+            client = await super()._ensure_client()
+            # Prevent HTTPX's own timeout from substituting for the tested abort.
+            client.timeout = httpx.Timeout(10)
+            return client
+
+    abort_calls = 0
+    actual_abort = HttpResources.abort
+
+    def counted_abort(resources: HttpResources) -> None:
+        nonlocal abort_calls
+        abort_calls += 1
+        actual_abort(resources)
+
+    monkeypatch.setattr(HttpResources, "abort", counted_abort)
     server = await asyncio.start_server(peer, "127.0.0.1", 0)
     port = server.sockets[0].getsockname()[1]
     transport = CancellationNeedsSocketAbort()
-    adapter = ZeppelinHttpClient(
+    adapter = LongHttpTimeoutGateway(
         settings=_settings(base_url=f"http://127.0.0.1:{port}/api", request_timeout_seconds=0.1),
         secrets=_no_secrets(), transport=transport,
         websocket_connector=DiscoverySockets(selected_socket()),
@@ -1308,14 +1417,17 @@ async def test_contextual_put_cleanup_aborts_real_httpx_socket_before_response(
                 await caller
         await asyncio.wait_for(peer_closed.wait(), 1)
         assert raw_socket.fileno() == -1
+        assert abort_calls >= 1
         assert transport.put_count == 1
     finally:
+        transport.release_close.set()
         for writer in writers:
             writer.close()
         await asyncio.gather(caller, return_exceptions=True)
         if closer is not None:
             await closer
         await adapter.close()
+        await httpx.AsyncHTTPTransport.aclose(transport)
         server.close()
         await server.wait_closed()
         await asyncio.gather(*handlers, return_exceptions=True)
