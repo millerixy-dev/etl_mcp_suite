@@ -341,3 +341,40 @@
 - Also run: `uv run --locked ruff check src/mcp_stdio/plugins/zeppelin/service.py src/mcp_stdio/plugins/zeppelin/plugin.py tests/unit/plugins/zeppelin/test_service.py`
 - Also run scoped Pyright over changed production modules and service tests; report pre-existing diagnostics separately.
 - Commit the task with a focused message and write TDD evidence to the assigned implementation report.
+
+### Task 10: OpenSpec 5.1 — Nine-tool MCP wiring and public schemas
+
+**OpenSpec task:** `5.1 Write and run failing tool/plugin tests for exactly nine tools, required notebook input on discovery, optional nullable notebook input on restart, exact public result schemas, safe errors, and zero network on startup/tool listing. Register/combine the new behavior and refactor.`
+
+**Files:**
+
+- Modify: `tests/unit/plugins/zeppelin/test_tools.py`
+- Modify: `tests/unit/plugins/zeppelin/test_plugin.py`
+- Modify: `src/mcp_stdio/plugins/zeppelin/tools.py`
+- Do not change service/gateway semantics, architecture rules, docs/skills, or integration tests in this task.
+
+**RED:**
+
+1. Replace the shallow eight-tool assertions with an adapter fake and real FastMCP contract tests proving exact registration order/set of nine tools, including `get_interpreter_bindings` and all existing names, with no extra admin/binding-mutation tools.
+2. Assert public signatures and FastMCP input schemas exactly: discovery requires one string `notebook_id`; restart requires string `setting_id` and optional `notebook_id` whose schema accepts string or null with default null; all other tool input schemas remain unchanged.
+3. Assert exact output schemas: discovery uses `InterpreterBindingsResult.model_json_schema()` and restart remains `RestartInterpreterResult.model_json_schema()`; call both through FastMCP and compare structured/text JSON to the immutable public models with no ticket/cookie/roles/transport/group/status leakage in discovery.
+4. Test adapter delegation for discovery and restart omission/null/value, preserving the optional notebook value exactly and making one service call.
+5. Inject stable gateway errors and unexpected exceptions for both new paths. Assert serialized `FastMCPToolError` operation/category/retryability/safe identifiers, configured-secret filtering, no raw exception/sentinel, and no stdout/stderr emission.
+6. Route raw invalid MCP inputs through a real service/fake gateway to prove strict non-coercion, pre-network validation, nullable-only restart notebook input, and zero gateway calls.
+7. Construct the real plugin/runtime and list FastMCP tools while socket/DNS/HTTP/WebSocket entry points are patched to fail. Assert startup and listing make zero upstream calls; runtime close remains idempotent.
+8. Run `uv run --locked --no-sync pytest tests/unit/plugins/zeppelin/test_tools.py tests/unit/plugins/zeppelin/test_plugin.py -q` and retain functional RED before production edits.
+
+**GREEN / REFACTOR:**
+
+1. Import the discovery result model, register `get_interpreter_bindings` once, and add a thin adapter method that delegates to the service and uses the existing stable error boundary with `GET_INTERPRETER_BINDINGS` attribution.
+2. Extend the adapter restart method to accept a JSON-schema-explicit string-or-null `notebook_id=None` and pass it unchanged to the service. Keep `setting_id` required and avoid FastMCP/Pydantic coercion by retaining object-backed schema annotations.
+3. Update registration docstrings/descriptions to the nine-tool contract and explain discovery/restart scope precisely enough for tool consumers without exposing implementation/auth details.
+4. Reuse one small error-boundary helper only if it reduces duplication without changing current exception mapping, result typing, or stdout discipline.
+5. Keep runtime construction and tool listing lazy and network-free; do not instantiate a WebSocket connection or obtain a ticket during registration/schema generation.
+
+**Verification:**
+
+- Required: `uv run --locked --no-sync pytest tests/unit/plugins/zeppelin/test_tools.py tests/unit/plugins/zeppelin/test_plugin.py -q`
+- Also run affected service/contract smoke tests that exercise FastMCP schema/result behavior.
+- Also run Ruff over changed production/tests and scoped Pyright over `tools.py`, `plugin.py`, and task tests; report existing test diagnostics separately.
+- Commit the task with a focused message and write TDD evidence to the assigned implementation report.

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import cast
 
 import pytest
+from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError as FastMCPToolError
 
 from mcp_stdio.contracts.plugin import ToolHandler
@@ -62,17 +63,34 @@ def _reject_network(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(socket, "gethostbyname", reject)
 
 
-async def test_runtime_loads_config_and_registers_exact_tools(
+async def test_runtime_and_fastmcp_listing_are_network_free_with_exact_nine_tools(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _reject_network(monkeypatch)
+
+    def reject_http(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("tool listing attempted an HTTP connection")
+
+    async def reject_websocket(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("tool listing attempted a WebSocket connection")
+
+    monkeypatch.setattr(
+        "mcp_stdio.plugins.zeppelin.http_client.httpx.AsyncClient", reject_http,
+    )
+    monkeypatch.setattr(
+        "mcp_stdio.plugins.zeppelin.websocket_client.SingleQueryConnection.__aenter__",
+        reject_websocket,
+    )
     runtime = PLUGIN_DEFINITION.create_runtime(
         write_config(tmp_path / "zeppelin.json"),
         environ={},
     )
     registrar = RecordingRegistrar()
     runtime.register_tools(registrar)
+    server = FastMCP("zeppelin-plugin-contract")
+    runtime.register_tools(server)
+    listed = await server.list_tools()
 
     assert runtime.name == "zeppelin"
     assert [name for _, name in registrar.tools] == [
@@ -82,10 +100,13 @@ async def test_runtime_loads_config_and_registers_exact_tools(
         "run_paragraph",
         "get_paragraph_status",
         "get_paragraph_result",
+        "get_interpreter_bindings",
         "restart_interpreter",
         "cancel_paragraph",
     ]
+    assert [tool.name for tool in listed] == [name for _, name in registrar.tools]
 
+    await runtime.close()
     await runtime.close()
 
 
