@@ -115,3 +115,37 @@
 - Also run: `uv run --locked ruff check src/mcp_stdio/plugins/zeppelin/http_client.py tests/unit/plugins/zeppelin/test_http_client.py`
 - Also run: `uv run --locked pyright src/mcp_stdio/plugins/zeppelin/http_client.py`
 - Commit the task with a focused message and write TDD evidence to the assigned implementation report.
+
+### Task 4: OpenSpec 2.2 — WebSocket URL derivation and scoped handshake authentication
+
+**OpenSpec task:** `2.2 Write and run failing tests for HTTP(S) /api to WS(S) /ws derivation, proxy-prefix preservation, fail-before-network for ambiguous mounts, and scoped Cookie/Origin handling. Implement the URL and private authentication context needed by discovery, then refactor.`
+
+**Files:**
+
+- Modify: `tests/unit/plugins/zeppelin/test_http_client.py`
+- Modify: `src/mcp_stdio/plugins/zeppelin/http_client.py`
+- Do not add the `websockets` dependency/client, perform a socket connection, parse binding frames, or expose handshake values through public models/results.
+
+**RED:**
+
+1. Add table-driven tests deriving `ws://host/ws` from `http://host/api` and `wss://host/proxy/ws` from `https://host/proxy/api`, preserving host, explicit port, and proxy prefix while replacing only the final literal `/api` path component.
+2. Add fail-before-network tests for bases without terminal `/api`, lookalike suffixes (`/api-v2`, `/myapi`), root/custom mounts, or otherwise ambiguous mapping. Assert `CONFIG_ERROR`, initiating operation attribution, safe IDs, and zero HTTP calls.
+3. Add private-context tests for exact WebSocket URL, HTTP(S) Origin (`scheme://authority`), and Cookie selection after login using the same `httpx` jar.
+4. Prove cookie selection honors host-only/domain, path, Secure, expiry, and port/origin rules: only cookies that HTTPX would send to the same-origin HTTP(S) `/ws` target become the private Cookie header; unrelated-domain/path, expired, and Secure-over-HTTP cookies are excluded.
+5. Prove redirect responses are rejected without following to another origin, `trust_env=False` remains set, credentials/tickets/cookies are never placed in URLs, public errors, repr, stdout, or stderr, and no alternate-origin request is sent.
+6. Run `uv run --locked pytest tests/unit/plugins/zeppelin/test_http_client.py -q` and record expected failures before production edits.
+
+**GREEN / REFACTOR:**
+
+1. Add a pure, strict URL derivation helper using parsed URL components. Require the normalized path's final component to be exactly `api`; map only `http->ws` and `https->wss`; preserve authority/port/prefix; never guess or accept caller overrides.
+2. Run derivation before authentication or any other network operation in discovery preparation and map ambiguity to safe non-retryable `CONFIG_ERROR` for the initiating operation.
+3. Extend the plugin-private non-repr discovery context with derived WebSocket URL, exact HTTP(S) origin, and an optional scoped Cookie header selected from the existing HTTPX cookie jar against the corresponding HTTP(S) `/ws` target.
+4. Delegate cookie domain/path/expiry/Secure matching to the standard cookie jar. Copy only the final Cookie value; do not expose arbitrary headers or transport objects.
+5. Preserve `trust_env=False`, no redirect following, and existing Task 2.1 request/session behavior.
+
+**Verification:**
+
+- Required: `uv run --locked pytest tests/unit/plugins/zeppelin/test_http_client.py -q`
+- Also run: `uv run --locked ruff check src/mcp_stdio/plugins/zeppelin/http_client.py tests/unit/plugins/zeppelin/test_http_client.py`
+- Also run: `uv run --locked pyright src/mcp_stdio/plugins/zeppelin/http_client.py`
+- Commit the task with a focused message and write TDD evidence to the assigned implementation report.

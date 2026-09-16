@@ -6,6 +6,7 @@ import json
 import logging
 from dataclasses import dataclass
 from typing import Any, cast
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
@@ -38,6 +39,42 @@ class _TicketContext:
     principal: str
     ticket: str
     roles: str
+    websocket_url: str
+    origin: str
+    cookie_header: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class _DiscoveryTarget:
+    websocket_url: str
+    http_url: str
+    origin: str
+
+
+def _derive_discovery_target(base_url: str) -> _DiscoveryTarget:
+    """Derive the documented same-origin Zeppelin WebSocket target."""
+    parts = urlsplit(base_url)
+    websocket_scheme = {"http": "ws", "https": "wss"}.get(parts.scheme)
+    prefix, separator, final_component = parts.path.rpartition("/")
+    if (
+        websocket_scheme is None
+        or not parts.netloc
+        or parts.username is not None
+        or parts.password is not None
+        or parts.query
+        or parts.fragment
+        or not separator
+        or final_component != "api"
+    ):
+        raise ValueError("base URL has no unambiguous WebSocket mapping")
+    websocket_path = f"{prefix}/ws"
+    return _DiscoveryTarget(
+        websocket_url=urlunsplit(
+            (websocket_scheme, parts.netloc, websocket_path, "", "")
+        ),
+        http_url=urlunsplit((parts.scheme, parts.netloc, websocket_path, "", "")),
+        origin=urlunsplit((parts.scheme, parts.netloc, "", "", "")),
+    )
 
 
 class ZeppelinHttpClient:
@@ -64,6 +101,7 @@ class ZeppelinHttpClient:
                 timeout=self._settings.request_timeout_seconds,
                 transport=self._transport,
                 trust_env=False,
+                follow_redirects=False,
             )
         return self._client
 
@@ -101,6 +139,15 @@ class ZeppelinHttpClient:
         identifiers: dict[str, str],
     ) -> _TicketContext:
         """Check notebook readability and obtain fresh auth on the same session."""
+        try:
+            target = _derive_discovery_target(self._settings.base_url)
+        except ValueError:
+            raise self._gateway_error(
+                ErrorCategory.CONFIG_ERROR,
+                operation,
+                identifiers,
+                retryable=False,
+            ) from None
         encoded_id = self._encode_id(notebook_id)
         client = await self._ensure_authenticated(
             operation=operation, identifiers=identifiers, discovery=True,
@@ -146,7 +193,15 @@ class ZeppelinHttpClient:
             isinstance(role, str) for role in cast(list[object], decoded_roles)
         ):
             raise self._gateway_error(ErrorCategory.UNEXPECTED_RESPONSE, operation, identifiers)
-        return _TicketContext(principal=principal, ticket=ticket, roles=roles)
+        cookie_header = client.build_request("GET", target.http_url).headers.get("cookie")
+        return _TicketContext(
+            principal=principal,
+            ticket=ticket,
+            roles=roles,
+            websocket_url=target.websocket_url,
+            origin=target.origin,
+            cookie_header=cookie_header,
+        )
 
     async def list_notebooks(self) -> tuple[NotebookTreeNode, ...]:
         client = await self._ensure_authenticated(

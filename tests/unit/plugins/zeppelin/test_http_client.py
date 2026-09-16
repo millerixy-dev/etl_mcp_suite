@@ -452,6 +452,221 @@ def _ticket(**overrides: object) -> dict[str, object]:
             **overrides}
 
 
+@pytest.mark.parametrize(
+    ("base_url", "websocket_url", "origin", "api_prefix"),
+    [
+        ("http://zep.example/api", "ws://zep.example/ws", "http://zep.example", "/api"),
+        (
+            "https://zep.example:9443/proxy/api",
+            "wss://zep.example:9443/proxy/ws",
+            "https://zep.example:9443",
+            "/proxy/api",
+        ),
+    ],
+)
+async def test_discovery_derives_strict_same_origin_websocket_target(
+    base_url: str,
+    websocket_url: str,
+    origin: str,
+    api_prefix: str,
+) -> None:
+    paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        if request.url.path == f"{api_prefix}/notebook/note":
+            return _ok({"id": "note"})
+        assert request.url.path == f"{api_prefix}/security/ticket"
+        return _ok(_ticket())
+
+    adapter = _adapter(_mock_transport(handler), settings=_settings(base_url=base_url))
+    context = await adapter._prepare_discovery(
+        "note",
+        operation=ToolOperation.GET_INTERPRETER_BINDINGS,
+        identifiers={"notebook_id": "note"},
+    )
+
+    assert context.websocket_url == websocket_url
+    assert context.origin == origin
+    assert context.cookie_header is None
+    assert paths == [f"{api_prefix}/notebook/note", f"{api_prefix}/security/ticket"]
+    await adapter.close()
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "https://zep.example",
+        "https://zep.example/",
+        "https://zep.example/api-v2",
+        "https://zep.example/myapi",
+        "https://zep.example/proxy/custom",
+        "https://zep.example/api/v2",
+        "https://zep.example/proxy/%61pi",
+    ],
+)
+@pytest.mark.parametrize(
+    "operation", [ToolOperation.GET_INTERPRETER_BINDINGS, ToolOperation.RESTART_INTERPRETER]
+)
+async def test_discovery_rejects_ambiguous_websocket_mount_before_network(
+    base_url: str,
+    operation: ToolOperation,
+) -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return _ok({"id": "note"})
+
+    adapter = _adapter(_mock_transport(handler), settings=_settings(base_url=base_url))
+    with pytest.raises(ZeppelinGatewayError) as error:
+        await adapter._prepare_discovery(
+            "note",
+            operation=operation,
+            identifiers={
+                "notebook_id": "note",
+                "setting_id": "x" * 257,
+                "password": "never-public",
+            },
+        )
+
+    assert error.value.tool_error.category == ErrorCategory.CONFIG_ERROR
+    assert error.value.tool_error.operation == operation
+    assert error.value.tool_error.identifiers == {"notebook_id": "note"}
+    assert error.value.tool_error.retryable is False
+    assert calls == 0
+    assert adapter._client is None
+    await adapter.close()
+
+
+@pytest.mark.parametrize(("scheme", "secure_cookie_expected"), [("http", False), ("https", True)])
+async def test_discovery_copies_only_httpx_scoped_cookie_for_http_ws_target(
+    scheme: str,
+    secure_cookie_expected: bool,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    base_url = f"{scheme}://zep.example:9443/proxy/api"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/proxy/api/login":
+            return httpx.Response(
+                200,
+                headers=[
+                    ("set-cookie", "host_only=host-secret; Path=/proxy"),
+                    ("set-cookie", "domain_cookie=domain-secret; Domain=zep.example; Path=/proxy"),
+                    ("set-cookie", "ws_path=path-secret; Path=/proxy/ws"),
+                    ("set-cookie", "api_path=api-secret; Path=/proxy/api"),
+                    ("set-cookie", "secure_cookie=secure-secret; Path=/proxy; Secure"),
+                    ("set-cookie", "expired_cookie=expired-secret; Path=/proxy; Max-Age=0"),
+                ],
+            )
+        if request.url.path == "/proxy/api/notebook/note":
+            return _ok({"id": "note"})
+        assert request.url.path == "/proxy/api/security/ticket"
+        return _ok(_ticket(ticket="ticket-secret", roles='["private-role"]'))
+
+    adapter = _adapter(
+        _mock_transport(handler),
+        secrets=ZeppelinSecrets.model_validate(
+            {"username": "username-secret", "password": "password-secret"}
+        ),
+        settings=_settings(base_url=base_url),
+    )
+    client = await adapter._ensure_client()
+    client.cookies.set(
+        "other_domain", "other-secret", domain="other.example", path="/proxy"
+    )
+
+    context = await adapter._prepare_discovery(
+        "note",
+        operation=ToolOperation.GET_INTERPRETER_BINDINGS,
+        identifiers={"notebook_id": "note"},
+    )
+    http_ws_url = f"{scheme}://zep.example:9443/proxy/ws"
+    expected_cookie = client.build_request("GET", http_ws_url).headers.get("cookie")
+    assert context.cookie_header == expected_cookie
+    assert context.websocket_url == f"{'wss' if scheme == 'https' else 'ws'}://zep.example:9443/proxy/ws"
+    assert context.origin == f"{scheme}://zep.example:9443"
+    assert context.cookie_header is not None
+    cookie_names = {item.partition("=")[0].strip() for item in context.cookie_header.split(";")}
+    assert {"host_only", "domain_cookie", "ws_path"} <= cookie_names
+    assert ("secure_cookie" in cookie_names) is secure_cookie_expected
+    assert cookie_names.isdisjoint(
+        {"api_path", "expired_cookie", "other_domain"}
+    )
+    captured = capsys.readouterr()
+    for secret in (
+        "username-secret",
+        "password-secret",
+        "ticket-secret",
+        "private-role",
+        "host-secret",
+        "domain-secret",
+        "path-secret",
+    ):
+        assert secret not in repr(context)
+        assert secret not in captured.out
+        assert secret not in captured.err
+        assert secret not in context.websocket_url
+        assert secret not in context.origin
+    await adapter.close()
+
+
+async def test_discovery_rejects_redirect_without_forwarding_authentication(
+    caplog: pytest.LogCaptureFixture,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/api/login":
+            return httpx.Response(
+                200, headers={"set-cookie": "JSESSIONID=cookie-secret; Path=/"}
+            )
+        return httpx.Response(
+            302,
+            headers={"location": "https://other.example/ws?ticket=redirect-secret"},
+        )
+
+    adapter = _adapter(
+        _mock_transport(handler),
+        secrets=ZeppelinSecrets.model_validate(
+            {"username": "username-secret", "password": "password-secret"}
+        ),
+    )
+    with pytest.raises(ZeppelinGatewayError) as error:
+        await adapter._prepare_discovery(
+            "note",
+            operation=ToolOperation.GET_INTERPRETER_BINDINGS,
+            identifiers={"notebook_id": "note"},
+        )
+
+    assert error.value.tool_error.category == ErrorCategory.UPSTREAM_ERROR
+    assert [request.url.host for request in requests] == ["zep.example", "zep.example"]
+    assert all(request.url.query == b"" for request in requests)
+    assert all(request.url.userinfo == b"" for request in requests)
+    assert adapter._client is not None
+    assert adapter._client.follow_redirects is False
+    assert adapter._client._trust_env is False
+    captured = capsys.readouterr()
+    for secret in (
+        "username-secret",
+        "password-secret",
+        "cookie-secret",
+        "redirect-secret",
+    ):
+        assert secret not in str(error.value)
+        assert secret not in repr(error.value.tool_error)
+        assert secret not in caplog.text
+        assert secret not in captured.out
+        assert secret not in captured.err
+        assert all(secret not in str(request.url) for request in requests)
+    await adapter.close()
+
+
 async def test_discovery_prepares_fresh_tickets_with_one_lazy_authenticated_session(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
