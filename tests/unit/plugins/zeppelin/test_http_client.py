@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import json
+import logging
+from collections.abc import AsyncIterator
+from urllib.parse import parse_qs
+
 import httpx
 import pytest
 
-from mcp_stdio.core.errors import ErrorCategory
+from mcp_stdio.core.errors import ErrorCategory, ToolOperation
 from mcp_stdio.plugins.zeppelin.config import ZeppelinSecrets, ZeppelinSettings
 from mcp_stdio.plugins.zeppelin.gateway import ZeppelinGatewayError
 from mcp_stdio.plugins.zeppelin.http_client import ZeppelinHttpClient
@@ -421,4 +426,293 @@ async def test_cancel_paragraph_encodes_opaque_ids_in_path() -> None:
     adapter = _adapter(_mock_transport(handler), secrets=_secrets())
     await adapter.cancel_paragraph("note/1", "para/1")
     assert seen_paths[-1] == "/api/notebook/job/note%2F1/para%2F1"
+    await adapter.close()
+
+
+class _TrackedStream(httpx.AsyncByteStream):
+    def __init__(self, chunks: list[bytes], failure: Exception | None = None) -> None:
+        self.chunks = chunks
+        self.failure = failure
+        self.closed = False
+        self.read_count = 0
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        for chunk in self.chunks:
+            self.read_count += 1
+            yield chunk
+        if self.failure is not None:
+            raise self.failure
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+def _ticket(**overrides: object) -> dict[str, object]:
+    return {"principal": "synthetic-user", "ticket": "synthetic-ticket", "roles": "[]",
+            **overrides}
+
+
+async def test_discovery_prepares_fresh_tickets_with_one_lazy_authenticated_session(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    username, password = "synthetic+user&=中文", "synthetic+pass&= word"
+    notebook_id = "note/1?#%"
+    paths: list[bytes] = []
+    streams: list[_TrackedStream] = []
+    ticket_number = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal ticket_number
+        paths.append(request.url.raw_path)
+        assert request.url.host == "zep.example"
+        if request.url.path == "/api/login":
+            assert request.method == "POST"
+            assert request.headers["content-type"] == "application/x-www-form-urlencoded"
+            assert parse_qs(request.content.decode()) == {
+                "userName": [username], "password": [password],
+            }
+            document = {"unused": "login content"}
+            headers = {"set-cookie": "JSESSIONID=synthetic-session; Path=/api"}
+        else:
+            assert request.method == "GET"
+            assert request.headers["cookie"] == "JSESSIONID=synthetic-session"
+            headers = {}
+            if request.url.path == "/api/security/ticket":
+                ticket_number += 1
+                body = _ticket(ticket=f"synthetic-ticket-{ticket_number}", roles='["reader"]')
+            else:
+                assert request.url.raw_path == b"/api/notebook/note%2F1%3F%23%25"
+                body = {"id": notebook_id, "paragraphs": [{"text": "private-notebook-text"}]}
+            document = {"status": "OK", "body": body}
+        stream = _TrackedStream([json.dumps(document).encode()])
+        streams.append(stream)
+        return httpx.Response(200, stream=stream, headers=headers)
+
+    adapter = _adapter(_mock_transport(handler), secrets=ZeppelinSecrets.model_validate(
+        {"username": username, "password": password},
+    ))
+    assert adapter._client is None
+    contexts = []
+    for _ in range(2):
+        context = await adapter._prepare_discovery(
+            notebook_id, operation=ToolOperation.GET_INTERPRETER_BINDINGS,
+            identifiers={"notebook_id": notebook_id},
+        )
+        contexts.append(context)
+        assert context.principal == "synthetic-user"
+        assert context.roles == '["reader"]'
+        assert not hasattr(context, "paragraphs")
+        assert not hasattr(context, "notebook")
+    assert contexts[0].ticket == "synthetic-ticket-1"
+    assert contexts[1].ticket == "synthetic-ticket-2"
+    assert paths == [b"/api/login", b"/api/notebook/note%2F1%3F%23%25",
+                     b"/api/security/ticket", b"/api/notebook/note%2F1%3F%23%25",
+                     b"/api/security/ticket"]
+    assert all(stream.closed for stream in streams)
+    for secret in (username, password, "synthetic-ticket", "reader", "private-notebook-text"):
+        assert secret not in repr(contexts)
+        assert secret not in caplog.text
+    await adapter.close()
+
+
+@pytest.mark.parametrize("body", [None, [], "note", {}, {"id": 1}, {"id": "other"}])
+async def test_discovery_rejects_notebook_body_without_exact_id(body: object) -> None:
+    paths = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        return _ok(body)
+
+    adapter = _adapter(_mock_transport(handler))
+    with pytest.raises(ZeppelinGatewayError) as error:
+        await adapter._prepare_discovery(
+            "note", operation=ToolOperation.GET_INTERPRETER_BINDINGS,
+            identifiers={"notebook_id": "note"},
+        )
+    assert error.value.tool_error.category == ErrorCategory.UNEXPECTED_RESPONSE
+    assert paths == ["/api/notebook/note"]
+    await adapter.close()
+
+
+@pytest.mark.parametrize("stage", ["login", "notebook/note", "security/ticket"])
+@pytest.mark.parametrize("operation", [ToolOperation.GET_INTERPRETER_BINDINGS,
+                                        ToolOperation.RESTART_INTERPRETER])
+@pytest.mark.parametrize(("status", "category"), [
+    (401, ErrorCategory.AUTHENTICATION_FAILED), (403, ErrorCategory.PERMISSION_DENIED),
+    (404, ErrorCategory.NOT_FOUND), (500, ErrorCategory.UPSTREAM_ERROR),
+    (302, ErrorCategory.UPSTREAM_ERROR),
+])
+async def test_discovery_http_errors_keep_safe_initiating_context(
+    stage: str, operation: ToolOperation, status: int, category: ErrorCategory,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    paths = []
+    failed_stream = _TrackedStream([b"private-notebook-text synthetic-ticket secret-roles"])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        if request.url.path == f"/api/{stage}":
+            return httpx.Response(status, stream=failed_stream,
+                                  headers={"location": "https://other.example/"})
+        if request.url.path == "/api/login":
+            return httpx.Response(200)
+        return _ok({"id": "note"})
+
+    adapter = _adapter(_mock_transport(handler), secrets=_secrets())
+    with pytest.raises(ZeppelinGatewayError) as error:
+        await adapter._prepare_discovery(
+            "note", operation=operation,
+            identifiers={"notebook_id": "note", "setting_id": "x" * 257,
+                         "password": "synthetic-password"},
+        )
+    expected = (ErrorCategory.UPSTREAM_ERROR
+                if status == 404 and stage != "notebook/note" else category)
+    assert error.value.tool_error.category == expected
+    assert error.value.tool_error.operation == operation
+    assert error.value.tool_error.identifiers == {"notebook_id": "note"}
+    assert error.value.tool_error.retryable is False
+    assert paths[-1] == f"/api/{stage}"
+    assert failed_stream.closed
+    for secret in ("private-notebook-text", "synthetic-ticket", "secret-roles",
+                   "synthetic-password"):
+        assert secret not in str(error.value)
+        assert secret not in repr(error.value.tool_error)
+        assert secret not in caplog.text
+    await adapter.close()
+
+
+@pytest.mark.parametrize("roles", [None, [], {}, 1, True, "", "broken", "null", '"reader"',
+                                    "1", "true", "{}", "[[]]", "[{}]", "[1]", "[true]", "[null]"])
+async def test_discovery_rejects_invalid_ticket_roles(roles: object) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _ok({"id": "note"} if request.url.path.endswith("/note") else _ticket(roles=roles))
+
+    adapter = _adapter(_mock_transport(handler))
+    with pytest.raises(ZeppelinGatewayError) as error:
+        await adapter._prepare_discovery("note", operation=ToolOperation.GET_INTERPRETER_BINDINGS,
+                                         identifiers={"notebook_id": "note"})
+    assert error.value.tool_error.category == ErrorCategory.UNEXPECTED_RESPONSE
+    await adapter.close()
+
+
+@pytest.mark.parametrize("body", [None, [], {}, {"principal": "user", "ticket": "value"},
+    _ticket(principal=""), _ticket(principal=1), _ticket(ticket=""), _ticket(ticket=False),
+    _ticket(principal="\ud800"), _ticket(ticket="\udfff"),
+    _ticket(principal="x" * 513), _ticket(ticket="x" * 513), _ticket(roles=" " * 513)])
+async def test_discovery_rejects_missing_or_invalid_ticket_fields(body: object) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        response_body = {"id": "note"} if request.url.path.endswith("/note") else body
+        return httpx.Response(200, content=json.dumps({"status": "OK", "body": response_body}))
+
+    adapter = _adapter(_mock_transport(handler), settings=_settings(max_response_bytes=512))
+    with pytest.raises(ZeppelinGatewayError) as error:
+        await adapter._prepare_discovery("note", operation=ToolOperation.GET_INTERPRETER_BINDINGS,
+                                         identifiers={"notebook_id": "note"})
+    assert error.value.tool_error.category == ErrorCategory.UNEXPECTED_RESPONSE
+    await adapter.close()
+
+
+@pytest.mark.parametrize("allow_anonymous", [True, False])
+async def test_discovery_anonymous_mode_requires_upstream_ticket(allow_anonymous: bool) -> None:
+    paths = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        if request.url.path == "/api/notebook/note":
+            return _ok({"id": "note"})
+        assert request.url.path == "/api/security/ticket"
+        return _ok(_ticket(principal="anonymous")) if allow_anonymous else httpx.Response(401)
+
+    adapter = _adapter(_mock_transport(handler))
+    if allow_anonymous:
+        context = await adapter._prepare_discovery(
+            "note", operation=ToolOperation.GET_INTERPRETER_BINDINGS,
+            identifiers={"notebook_id": "note"})
+        assert context.principal == "anonymous"
+    else:
+        with pytest.raises(ZeppelinGatewayError) as error:
+            await adapter._prepare_discovery(
+                "note", operation=ToolOperation.GET_INTERPRETER_BINDINGS,
+                identifiers={"notebook_id": "note"})
+        assert error.value.tool_error.category == ErrorCategory.AUTHENTICATION_FAILED
+    assert paths == ["/api/notebook/note", "/api/security/ticket"]
+    await adapter.close()
+
+
+@pytest.mark.parametrize("stage", ["login", "notebook/note", "security/ticket"])
+@pytest.mark.parametrize("headers", [{}, {"content-length": "1"}, {"content-length": "10000"}])
+async def test_discovery_caps_streamed_bodies_without_trusting_content_length(
+    stage: str, headers: dict[str, str],
+) -> None:
+    stream = _TrackedStream([b"x" * 80, b"y" * 80, b"must-not-read"])
+    paths = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        if request.url.path == f"/api/{stage}":
+            return httpx.Response(200, stream=stream, headers=headers)
+        return _ok({"id": "note"})
+
+    adapter = _adapter(_mock_transport(handler), settings=_settings(max_response_bytes=128),
+                       secrets=_secrets())
+    with pytest.raises(ZeppelinGatewayError) as error:
+        await adapter._prepare_discovery("note", operation=ToolOperation.RESTART_INTERPRETER,
+                                         identifiers={"notebook_id": "note", "setting_id": "spark"})
+    assert error.value.tool_error.category == ErrorCategory.UNEXPECTED_RESPONSE
+    assert error.value.tool_error.operation == ToolOperation.RESTART_INTERPRETER
+    assert stream.read_count <= 2
+    assert stream.closed
+    assert paths[-1] == f"/api/{stage}"
+    await adapter.close()
+
+
+@pytest.mark.parametrize("document", [[], None, {"body": {"id": "note"}},
+    {"status": "OK", "body": {"id": "other"}}, {"status": "ERROR", "body": {"id": "note"}}])
+async def test_discovery_rejects_invalid_envelopes(document: object) -> None:
+    adapter = _adapter(_mock_transport(lambda request: httpx.Response(200, json=document)))
+    with pytest.raises(ZeppelinGatewayError) as error:
+        await adapter._prepare_discovery("note", operation=ToolOperation.GET_INTERPRETER_BINDINGS,
+                                         identifiers={"notebook_id": "note"})
+    category = (ErrorCategory.UPSTREAM_ERROR if isinstance(document, dict)
+                and document.get("status") == "ERROR" else ErrorCategory.UNEXPECTED_RESPONSE)
+    assert error.value.tool_error.category == category
+    await adapter.close()
+
+
+@pytest.mark.parametrize("operation", [ToolOperation.GET_INTERPRETER_BINDINGS,
+                                        ToolOperation.RESTART_INTERPRETER])
+@pytest.mark.parametrize(("failure", "category"), [
+    (httpx.ReadTimeout("synthetic-ticket"), ErrorCategory.TIMEOUT),
+    (httpx.RemoteProtocolError("synthetic-ticket"), ErrorCategory.CONNECTION_FAILED),
+])
+async def test_discovery_stream_failures_close_and_preserve_context(
+    operation: ToolOperation, failure: Exception, category: ErrorCategory,
+) -> None:
+    stream = _TrackedStream([b"{"], failure)
+    adapter = _adapter(_mock_transport(lambda request: httpx.Response(200, stream=stream)))
+    with pytest.raises(ZeppelinGatewayError) as error:
+        await adapter._prepare_discovery("n" * 300, operation=operation,
+                                         identifiers={"notebook_id": "n" * 300})
+    assert stream.closed
+    assert error.value.tool_error.operation == operation
+    assert error.value.tool_error.category == category
+    assert error.value.tool_error.identifiers == {}
+    assert error.value.tool_error.retryable == (operation == ToolOperation.GET_INTERPRETER_BINDINGS)
+    assert "synthetic-ticket" not in str(error.value)
+    await adapter.close()
+
+
+@pytest.mark.parametrize("operation", [ToolOperation.LIST_NOTEBOOKS,
+                                        ToolOperation.RESTART_INTERPRETER])
+async def test_legacy_login_errors_keep_the_initiating_operation(operation: ToolOperation) -> None:
+    adapter = _adapter(_mock_transport(lambda request: httpx.Response(403)), secrets=_secrets())
+    with pytest.raises(ZeppelinGatewayError) as error:
+        if operation == ToolOperation.LIST_NOTEBOOKS:
+            await adapter.list_notebooks()
+        else:
+            await adapter.restart_interpreter("spark")
+    assert error.value.tool_error.operation == operation
+    assert error.value.tool_error.category == ErrorCategory.AUTHENTICATION_FAILED
     await adapter.close()

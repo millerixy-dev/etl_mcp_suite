@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import logging
+from dataclasses import dataclass
 from typing import Any, cast
 
 import httpx
 
-from mcp_stdio.core.errors import ErrorCategory, ToolError, ToolOperation
+from mcp_stdio.core.errors import ErrorCategory, ToolError, ToolOperation, safe_error_identifiers
 from mcp_stdio.plugins.zeppelin.config import ZeppelinSecrets, ZeppelinSettings
 from mcp_stdio.plugins.zeppelin.gateway import ZeppelinGatewayError
 from mcp_stdio.plugins.zeppelin.models import (
@@ -27,6 +29,15 @@ from mcp_stdio.plugins.zeppelin.models import (
 logger = logging.getLogger("mcp_stdio.zeppelin")
 
 _ZEPPELIN_STATUS_OK = "OK"
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class _TicketContext:
+    """Transient adapter-only authentication; never include its fields in repr."""
+
+    principal: str
+    ticket: str
+    roles: str
 
 
 class ZeppelinHttpClient:
@@ -56,29 +67,91 @@ class ZeppelinHttpClient:
             )
         return self._client
 
-    async def _ensure_authenticated(self) -> httpx.AsyncClient:
+    async def _ensure_authenticated(
+        self,
+        *,
+        operation: ToolOperation,
+        identifiers: dict[str, str],
+        discovery: bool = False,
+    ) -> httpx.AsyncClient:
         client = await self._ensure_client()
         if self._authenticated or self._secrets.username is None:
             return client
         username = self._secrets.username.get_secret_value()
         password = self._secrets.password
         assert password is not None
-        response = await self._request(
+        await self._request(
             client,
             "POST",
             "/login",
-            content=f"userName={username}&password={password.get_secret_value()}",
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-            operation=ToolOperation.CREATE_NOTEBOOK,
-            identifiers={},
+            form_data={"userName": username, "password": password.get_secret_value()},
+            operation=operation,
+            identifiers=identifiers,
             expect_body=False,
+            discovery=discovery,
         )
         self._authenticated = True
-        del response
         return client
 
+    async def _prepare_discovery(
+        self,
+        notebook_id: str,
+        *,
+        operation: ToolOperation,
+        identifiers: dict[str, str],
+    ) -> _TicketContext:
+        """Check notebook readability and obtain fresh auth on the same session."""
+        encoded_id = self._encode_id(notebook_id)
+        client = await self._ensure_authenticated(
+            operation=operation, identifiers=identifiers, discovery=True,
+        )
+        notebook = await self._request(
+            client, "GET", f"/notebook/{encoded_id}", operation=operation,
+            identifiers=identifiers, expect_body=True, discovery=True, notebook_precheck=True,
+        )
+        if (
+            not isinstance(notebook, dict)
+            or cast(dict[str, Any], notebook).get("id") != notebook_id
+        ):
+            raise self._gateway_error(ErrorCategory.UNEXPECTED_RESPONSE, operation, identifiers)
+        del notebook
+        body = await self._request(
+            client, "GET", "/security/ticket", operation=operation,
+            identifiers=identifiers, expect_body=True, discovery=True,
+        )
+        if not isinstance(body, dict):
+            raise self._gateway_error(ErrorCategory.UNEXPECTED_RESPONSE, operation, identifiers)
+        fields: list[str] = []
+        for key in ("principal", "ticket", "roles"):
+            value = cast(dict[str, Any], body).get(key)
+            if not isinstance(value, str) or not value:
+                raise self._gateway_error(ErrorCategory.UNEXPECTED_RESPONSE, operation, identifiers)
+            try:
+                byte_length = len(value.encode("utf-8"))
+            except UnicodeError:
+                raise self._gateway_error(
+                    ErrorCategory.UNEXPECTED_RESPONSE, operation, identifiers,
+                ) from None
+            if byte_length > self._settings.max_response_bytes:
+                raise self._gateway_error(ErrorCategory.UNEXPECTED_RESPONSE, operation, identifiers)
+            fields.append(value)
+        principal, ticket, roles = fields
+        try:
+            decoded_roles: object = json.loads(roles)
+        except (ValueError, RecursionError):
+            raise self._gateway_error(
+                ErrorCategory.UNEXPECTED_RESPONSE, operation, identifiers,
+            ) from None
+        if not isinstance(decoded_roles, list) or not all(
+            isinstance(role, str) for role in cast(list[object], decoded_roles)
+        ):
+            raise self._gateway_error(ErrorCategory.UNEXPECTED_RESPONSE, operation, identifiers)
+        return _TicketContext(principal=principal, ticket=ticket, roles=roles)
+
     async def list_notebooks(self) -> tuple[NotebookTreeNode, ...]:
-        client = await self._ensure_authenticated()
+        client = await self._ensure_authenticated(
+            operation=ToolOperation.LIST_NOTEBOOKS, identifiers={},
+        )
         body = await self._request_json(
             client,
             "GET",
@@ -106,7 +179,9 @@ class ZeppelinHttpClient:
         return build_notebook_tree(tuple(entries))
 
     async def create_notebook(self, name: str) -> str:
-        client = await self._ensure_authenticated()
+        client = await self._ensure_authenticated(
+            operation=ToolOperation.CREATE_NOTEBOOK, identifiers={},
+        )
         body = await self._request_json(
             client,
             "POST",
@@ -124,7 +199,9 @@ class ZeppelinHttpClient:
         body: str,
     ) -> str:
         encoded_nb = self._encode_id(notebook_id)
-        client = await self._ensure_authenticated()
+        client = await self._ensure_authenticated(
+            operation=ToolOperation.ADD_PARAGRAPH, identifiers={"notebook_id": notebook_id},
+        )
         result = await self._request_json(
             client,
             "POST",
@@ -138,7 +215,10 @@ class ZeppelinHttpClient:
     async def run_paragraph(self, notebook_id: str, paragraph_id: str) -> ParagraphStatus:
         encoded_nb = self._encode_id(notebook_id)
         encoded_p = self._encode_id(paragraph_id)
-        client = await self._ensure_authenticated()
+        client = await self._ensure_authenticated(
+            operation=ToolOperation.RUN_PARAGRAPH,
+            identifiers={"notebook_id": notebook_id, "paragraph_id": paragraph_id},
+        )
         await self._request_json(
             client,
             "POST",
@@ -154,7 +234,10 @@ class ZeppelinHttpClient:
     ) -> CancelParagraphResult:
         encoded_nb = self._encode_id(notebook_id)
         encoded_p = self._encode_id(paragraph_id)
-        client = await self._ensure_authenticated()
+        client = await self._ensure_authenticated(
+            operation=ToolOperation.CANCEL_PARAGRAPH,
+            identifiers={"notebook_id": notebook_id, "paragraph_id": paragraph_id},
+        )
         await self._request_json(
             client,
             "DELETE",
@@ -209,7 +292,10 @@ class ZeppelinHttpClient:
     async def _fetch_paragraph(self, notebook_id: str, paragraph_id: str) -> dict[str, Any]:
         encoded_nb = self._encode_id(notebook_id)
         encoded_p = self._encode_id(paragraph_id)
-        client = await self._ensure_authenticated()
+        client = await self._ensure_authenticated(
+            operation=ToolOperation.GET_PARAGRAPH_RESULT,
+            identifiers={"notebook_id": notebook_id, "paragraph_id": paragraph_id},
+        )
         body = await self._request_json(
             client,
             "GET",
@@ -228,7 +314,9 @@ class ZeppelinHttpClient:
 
     async def restart_interpreter(self, setting_id: str) -> RestartInterpreterResult:
         encoded_id = self._encode_id(setting_id)
-        client = await self._ensure_authenticated()
+        client = await self._ensure_authenticated(
+            operation=ToolOperation.RESTART_INTERPRETER, identifiers={"setting_id": setting_id},
+        )
         body = await self._request_json(
             client,
             "PUT",
@@ -302,56 +390,60 @@ class ZeppelinHttpClient:
         path: str,
         *,
         json_payload: dict[str, Any] | None = None,
-        content: str | None = None,
-        headers: dict[str, str] | None = None,
+        form_data: dict[str, str] | None = None,
         operation: ToolOperation,
         identifiers: dict[str, str],
         expect_body: bool,
+        discovery: bool = False,
+        notebook_precheck: bool = False,
     ) -> Any:
         try:
-            response = await client.request(
-                method,
-                path,
-                json=json_payload,
-                content=content,
-                headers=headers,
-            )
-        except httpx.ConnectTimeout:
-            raise self._gateway_error(ErrorCategory.TIMEOUT, operation, identifiers) from None
-        except httpx.ReadTimeout:
-            raise self._gateway_error(ErrorCategory.TIMEOUT, operation, identifiers) from None
+            if discovery:
+                async with client.stream(
+                    method, path, json=json_payload, data=form_data,
+                ) as response:
+                    self._check_http_status(
+                        response, operation, identifiers, discovery=True,
+                        notebook_precheck=notebook_precheck,
+                    )
+                    content = await self._read_bounded(response, operation, identifiers)
+            else:
+                response = await client.request(method, path, json=json_payload, data=form_data)
+                bounded = await self._bound_response(response)
+                self._check_http_status(bounded, operation, identifiers)
+                content = bounded.content
+        except (httpx.ConnectTimeout, httpx.ReadTimeout):
+            raise self._gateway_error(
+                ErrorCategory.TIMEOUT, operation, identifiers,
+                retryable=not (discovery and operation == ToolOperation.RESTART_INTERPRETER),
+            ) from None
         except (httpx.ConnectError, httpx.RemoteProtocolError):
             raise self._gateway_error(
-                ErrorCategory.CONNECTION_FAILED, operation, identifiers
+                ErrorCategory.CONNECTION_FAILED, operation, identifiers,
+                retryable=not (discovery and operation == ToolOperation.RESTART_INTERPRETER),
             ) from None
-        except httpx.HTTPError:
+        except httpx.HTTPError as exc:
+            if discovery and isinstance(exc, httpx.TimeoutException):
+                raise self._gateway_error(
+                    ErrorCategory.TIMEOUT, operation, identifiers,
+                    retryable=operation != ToolOperation.RESTART_INTERPRETER,
+                ) from None
             raise self._gateway_error(
                 ErrorCategory.UPSTREAM_ERROR, operation, identifiers
             ) from None
 
-        bounded = await self._bound_response(response)
-        if bounded.status_code == 401 or bounded.status_code == 403:
-            raise self._gateway_error(
-                ErrorCategory.AUTHENTICATION_FAILED,
-                operation,
-                identifiers,
-            )
-        if bounded.status_code >= 400:
-            raise self._gateway_error(
-                ErrorCategory.UPSTREAM_ERROR,
-                operation,
-                identifiers,
-            )
         if not expect_body:
-            return bounded
+            return None
         try:
-            document = bounded.json()
-        except Exception:
+            document: object = json.loads(content)
+        except (ValueError, UnicodeError, RecursionError):
             raise self._gateway_error(
                 ErrorCategory.UNEXPECTED_RESPONSE,
                 operation,
                 identifiers,
             ) from None
+        if not isinstance(document, dict):
+            raise self._gateway_error(ErrorCategory.UNEXPECTED_RESPONSE, operation, identifiers)
         typed_doc = cast(dict[str, Any], document)
         status = typed_doc.get("status")
         if status is None:
@@ -365,6 +457,41 @@ class ZeppelinHttpClient:
                 identifiers,
             )
         return typed_doc.get("body")
+
+    def _check_http_status(
+        self,
+        response: httpx.Response,
+        operation: ToolOperation,
+        identifiers: dict[str, str],
+        *,
+        discovery: bool = False,
+        notebook_precheck: bool = False,
+    ) -> None:
+        status = response.status_code
+        if status == 401 or (status == 403 and not discovery):
+            category = ErrorCategory.AUTHENTICATION_FAILED
+        elif status == 403:
+            category = ErrorCategory.PERMISSION_DENIED
+        elif status == 404 and notebook_precheck:
+            category = ErrorCategory.NOT_FOUND
+        elif status >= 400 or (discovery and not 200 <= status < 300):
+            category = ErrorCategory.UPSTREAM_ERROR
+        else:
+            return
+        raise self._gateway_error(category, operation, identifiers)
+
+    async def _read_bounded(
+        self,
+        response: httpx.Response,
+        operation: ToolOperation,
+        identifiers: dict[str, str],
+    ) -> bytes:
+        content = bytearray()
+        async for chunk in response.aiter_bytes():
+            if len(content) + len(chunk) > self._settings.max_response_bytes:
+                raise self._gateway_error(ErrorCategory.UNEXPECTED_RESPONSE, operation, identifiers)
+            content.extend(chunk)
+        return bytes(content)
 
     async def _bound_response(self, response: httpx.Response) -> httpx.Response:
         max_bytes = self._settings.max_response_bytes
@@ -391,12 +518,15 @@ class ZeppelinHttpClient:
         category: ErrorCategory,
         operation: ToolOperation,
         identifiers: dict[str, str],
+        *,
+        retryable: bool | None = None,
     ) -> ZeppelinGatewayError:
         return ZeppelinGatewayError(
             ToolError.create(
                 category=category,
                 operation=operation,
-                retryable=category in (ErrorCategory.TIMEOUT, ErrorCategory.CONNECTION_FAILED),
-                identifiers=identifiers,
+                retryable=(category in (ErrorCategory.TIMEOUT, ErrorCategory.CONNECTION_FAILED)
+                           if retryable is None else retryable),
+                identifiers=safe_error_identifiers(operation, identifiers),
             )
         )

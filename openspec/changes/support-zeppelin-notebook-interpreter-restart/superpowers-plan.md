@@ -78,3 +78,40 @@
 - Also run: `uv run --locked ruff check src/mcp_stdio/core/errors.py src/mcp_stdio/plugins/zeppelin/models.py src/mcp_stdio/plugins/zeppelin/gateway.py tests/unit/core/test_errors.py tests/unit/plugins/zeppelin/test_models.py tests/unit/plugins/zeppelin/test_service.py`
 - Also run focused type checking on the changed production modules and tests; record pre-existing failures separately from regressions.
 - Commit the task with a focused message and write TDD evidence to the assigned implementation report.
+
+### Task 3: OpenSpec 2.1 — Session-aware notebook precheck and fresh ticket acquisition
+
+**OpenSpec task:** `2.1 Write and run focused failing HTTP-mock tests for readable/existing notebook precheck with matching response ID, missing/denied notebook, bounded streamed response, discarded paragraph content, correctly form-encoded credentials, fresh ticket acquisition in the same session, string-array roles validation, anonymous policy, and attribution to the initiating operation. Implement the smallest session/ticket helpers without changing unrelated tool behavior, then refactor.`
+
+**Files:**
+
+- Modify: `tests/unit/plugins/zeppelin/test_http_client.py`
+- Modify: `src/mcp_stdio/plugins/zeppelin/http_client.py`
+- Modify a transport-neutral model/helper file only if needed for a private non-repr authentication value; do not expose ticket data through public models.
+- Do not add the WebSocket dependency/client, derive `/ws`, select cookies/origin, or implement binding parsing in this task.
+
+**RED:**
+
+1. Add HTTP mock tests for one discovery-preparation flow using a caller-supplied initiating operation (`get_interpreter_bindings` and `restart_interpreter` attribution): optional login, `GET /notebook/{encoded_id}`, then `GET /security/ticket`, all through the same lazy `httpx.AsyncClient` session.
+2. Prove the notebook response must be an OK envelope with an object body whose exact `id` matches the requested ID; 403 maps to `PERMISSION_DENIED`, 404 maps to `NOT_FOUND`, and neither failure fetches a ticket.
+3. Prove notebook content/paragraphs are discarded and streamed bytes are capped by `max_response_bytes`, including missing/lying `Content-Length`; response streams close on success and failure.
+4. Prove credentials are sent as correctly form-encoded `userName` and `password` values, login happens only when the configured pair exists, anonymous mode skips login, and ticket acquisition still relies on upstream anonymous policy.
+5. Prove every discovery preparation obtains a fresh ticket and validates non-empty bounded string `principal`/`ticket` plus `roles` as a JSON-array string containing only strings. Missing, malformed, scalar, object, nested, or non-string role entries fail as `UNEXPECTED_RESPONSE` before any future socket work.
+6. Prove login/precheck/ticket errors retain the initiating operation and only safe filtered identifiers; no raw notebook content, credential, ticket, or roles values appear in errors/logs.
+7. Run `uv run --locked pytest tests/unit/plugins/zeppelin/test_http_client.py -q` and record expected failures before production edits.
+
+**GREEN / REFACTOR:**
+
+1. Parameterize session authentication with the initiating operation/identifiers instead of the existing hard-coded create operation, preserving all existing tool mappings.
+2. Use httpx form data encoding for login rather than interpolating credential text.
+3. Add a small plugin-private, non-repr ticket/auth context and a discovery preparation helper that validates notebook readability/existence and fresh ticket metadata on the existing session.
+4. Read discovery HTTP bodies incrementally with a hard cumulative byte ceiling and guaranteed response closure. Parse only after the bounded read; discard notebook fields other than matching `id`.
+5. Use fixed safe error mappings and `safe_error_identifiers`; keep secrets and upstream body text out of exceptions and logs.
+6. Refactor only enough to share existing request/error plumbing without changing unrelated REST request shapes or adding network retries.
+
+**Verification:**
+
+- Required: `uv run --locked pytest tests/unit/plugins/zeppelin/test_http_client.py -q`
+- Also run: `uv run --locked ruff check src/mcp_stdio/plugins/zeppelin/http_client.py tests/unit/plugins/zeppelin/test_http_client.py`
+- Also run: `uv run --locked pyright src/mcp_stdio/plugins/zeppelin/http_client.py`
+- Commit the task with a focused message and write TDD evidence to the assigned implementation report.
