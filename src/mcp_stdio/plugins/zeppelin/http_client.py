@@ -664,9 +664,7 @@ class ZeppelinHttpClient:
             try:
                 body = await asyncio.wait_for(asyncio.shield(put), remaining)
             finally:
-                if not put.done():
-                    put.cancel()
-                await await_cleanup(asyncio.gather(put, return_exceptions=True))
+                await await_cleanup(asyncio.create_task(self._finish_http_work(put)))
             if self._closed or cancelled.is_set():
                 raise asyncio.CancelledError
             return self._parse_restart_result(body, setting_id, identifiers)
@@ -680,6 +678,21 @@ class ZeppelinHttpClient:
             ) from None
         finally:
             await self._release_discovery_lock(acquisition)
+
+    async def _finish_http_work(self, task: asyncio.Task[object]) -> None:
+        """Join cancelled send work, aborting owned sockets before a stalled join."""
+        if not task.done():
+            task.cancel()
+            await asyncio.wait(
+                (task,), timeout=min(5.0, self._settings.request_timeout_seconds),
+            )
+            if not task.done():
+                try:
+                    self._http_resources.abort()
+                except Exception:
+                    pass
+                task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
     def _parse_restart_result(
         self, body: object, setting_id: str, identifiers: dict[str, str],
@@ -763,6 +776,9 @@ class ZeppelinHttpClient:
         from urllib.parse import quote
 
         validated = validate_opaque_id(opaque_id, max_chars=self._settings.max_opaque_id_chars)
+        # quote() leaves unreserved dots intact; HTTPX normalizes whole dot segments.
+        if validated in (".", ".."):
+            return "%2E" * len(validated)
         return quote(validated, safe="")
 
     async def _request_json(
@@ -839,6 +855,11 @@ class ZeppelinHttpClient:
                 retryable=not (discovery and operation == ToolOperation.RESTART_INTERPRETER),
             ) from None
         except httpx.HTTPError as exc:
+            if discovery and isinstance(exc, httpx.NetworkError):
+                raise self._gateway_error(
+                    ErrorCategory.CONNECTION_FAILED, operation, identifiers,
+                    retryable=operation != ToolOperation.RESTART_INTERPRETER,
+                ) from None
             if discovery and isinstance(exc, httpx.TimeoutException):
                 raise self._gateway_error(
                     ErrorCategory.TIMEOUT, operation, identifiers,

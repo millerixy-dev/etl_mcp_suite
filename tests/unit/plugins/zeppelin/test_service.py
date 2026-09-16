@@ -784,7 +784,7 @@ async def test_cancel_paragraph_rejects_malformed_ids_before_network() -> None:
     assert gateway.calls == []
 
 
-@pytest.mark.parametrize("setting_id", ["2AY6GV7Q3", "2/a%2F?x=# 中", "x" * 300])
+@pytest.mark.parametrize("setting_id", ["2AY6GV7Q3", "2/a%2F?x=# 中", "x" * 300, ".", ".."])
 @pytest.mark.parametrize("notebook_id", [None, "2/n%2F?x=# 中"])
 async def test_restart_preserves_opaque_ids_and_optional_context(
     setting_id: str, notebook_id: str | None,

@@ -617,6 +617,172 @@ async def test_contextual_restart_rejects_ambiguous_mount_before_login() -> None
     await adapter.close()
 
 
+@pytest.mark.parametrize("setting_id,encoded", [(".", b"%2E"), ("..", b"%2E%2E")])
+@pytest.mark.parametrize("notebook_id", [None, "first"])
+async def test_restart_dot_segment_is_sent_as_one_data_path_segment(
+    setting_id: str, encoded: bytes, notebook_id: str | None,
+) -> None:
+    transport = RestartTransport(setting_id)
+    socket = selected_socket()
+    socket.frames = [response([binding(id=setting_id, selected=True)])]
+    adapter, _ = contextual_adapter(transport, socket)
+    try:
+        assert (await adapter.restart_interpreter(setting_id, notebook_id)).setting_id == setting_id
+        puts = [request for request in transport.requests if request.method == "PUT"]
+        assert len(puts) == 1
+        assert puts[0].url.raw_path == b"/api/interpreter/setting/restart/" + encoded
+        if notebook_id is None:
+            assert puts[0].content == b""
+        else:
+            assert json.loads(puts[0].content) == {"noteId": notebook_id}
+    finally:
+        await adapter.close()
+
+
+@pytest.mark.parametrize("notebook_id,encoded", [(".", b"%2E"), ("..", b"%2E%2E")])
+async def test_contextual_notebook_dot_segment_preserves_precheck_and_body(
+    notebook_id: str, encoded: bytes,
+) -> None:
+    transport = RestartTransport(notebook_id=notebook_id)
+    adapter, _ = contextual_adapter(transport, selected_socket())
+    try:
+        await adapter.restart_interpreter("spark", notebook_id)
+        assert transport.requests[1].url.raw_path == b"/api/notebook/" + encoded
+        assert json.loads(transport.requests[-1].content) == {"noteId": notebook_id}
+    finally:
+        await adapter.close()
+
+
+class AbortReleasedPut(RestartTransport):
+    """Model HTTP send cancellation that needs its transport forcibly released."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.abort_calls = 0
+        self.send_cancelled = asyncio.Event()
+        self.send_exited = False
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        if request.method != "PUT":
+            return await super().handle_async_request(request)
+        self.requests.append(request)
+        self.put_entered.set()
+        try:
+            while not self.put_release.is_set():
+                try:
+                    await self.put_release.wait()
+                except asyncio.CancelledError:
+                    self.send_cancelled.set()
+            return self.put_response
+        finally:
+            self.send_exited = True
+
+    def abort(self) -> None:
+        self.abort_calls += 1
+        self.put_release.set()
+
+
+@pytest.mark.parametrize("trigger", ["timeout", "cancel", "shutdown"])
+async def test_contextual_abort_released_put_has_bounded_cleanup_and_no_orphan(
+    trigger: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    before = asyncio.all_tasks()
+    transport = AbortReleasedPut()
+    adapter, sockets = contextual_adapter(
+        transport, selected_socket(), request_timeout_seconds=0.02,
+    )
+    lock = asyncio.Lock()
+    monkeypatch.setattr(adapter, "_discovery_lock", lock)
+    caller = asyncio.create_task(adapter.restart_interpreter("spark", "first"))
+    closer: asyncio.Task[None] | None = None
+    await transport.put_entered.wait()
+    if trigger == "cancel":
+        caller.cancel()
+    elif trigger == "shutdown":
+        closer = asyncio.create_task(adapter.close())
+    await transport.send_cancelled.wait()
+    try:
+        # A generous assertion deadline avoids scheduling-sensitive timing checks.
+        # Production has only 20 ms of additional cleanup allowance.
+        done, _ = await asyncio.wait((caller,), timeout=0.2)
+        assert caller in done, "PUT cancellation never reached the required transport abort"
+        if trigger == "timeout":
+            with pytest.raises(ZeppelinGatewayError) as failure:
+                await caller
+            error = failure.value.tool_error
+            assert (error.category, error.operation, error.retryable) == (
+                ErrorCategory.TIMEOUT, ToolOperation.RESTART_INTERPRETER, False,
+            )
+            assert error.identifiers == {"setting_id": "spark", "notebook_id": "first"}
+        else:
+            with pytest.raises(asyncio.CancelledError):
+                await caller
+        if closer is not None:
+            done, _ = await asyncio.wait((closer,), timeout=0.2)
+            assert closer in done
+            await closer
+        assert transport.abort_calls == 1 and transport.send_exited
+        assert not lock.locked()
+        assert sockets.calls == 1
+        assert sum(request.method == "PUT" for request in transport.requests) == 1
+    finally:
+        # Unblock the old implementation so functional RED itself leaks no work.
+        if not transport.send_exited:
+            transport.abort()
+        await asyncio.gather(caller, return_exceptions=True)
+        if closer is not None:
+            await closer
+        await adapter.close()
+    assert asyncio.all_tasks() == before
+
+
+@pytest.mark.parametrize("stage", ["/api/notebook/first", "PUT"])
+@pytest.mark.parametrize("exception", [httpx.ReadError("private"), httpx.WriteError("private")])
+async def test_contextual_read_write_failure_maps_connection_without_retry(
+    stage: str, exception: httpx.HTTPError,
+) -> None:
+    transport = RestartTransport()
+    transport.failure, transport.failure_stage = exception, stage
+    adapter, sockets = contextual_adapter(transport, selected_socket())
+    try:
+        with pytest.raises(ZeppelinGatewayError) as failure:
+            await adapter.restart_interpreter("spark", "first")
+        error = failure.value.tool_error
+        assert (error.category, error.operation, error.retryable) == (
+            ErrorCategory.CONNECTION_FAILED, ToolOperation.RESTART_INTERPRETER, False,
+        )
+        assert error.identifiers == {"setting_id": "spark", "notebook_id": "first"}
+        assert "private" not in str(failure.value)
+        assert sockets.calls == int(stage == "PUT")
+        assert sum(request.method == "PUT" for request in transport.requests) == int(stage == "PUT")
+    finally:
+        await adapter.close()
+
+
+@pytest.mark.parametrize("explicit_null", [False, True])
+@pytest.mark.parametrize("exception", [httpx.ReadError("private"), httpx.WriteError("private")])
+async def test_legacy_read_write_failure_preserves_upstream_mapping(
+    explicit_null: bool, exception: httpx.HTTPError,
+) -> None:
+    transport = RestartTransport()
+    transport.failure = exception
+    adapter, sockets = contextual_adapter(transport)
+    try:
+        with pytest.raises(ZeppelinGatewayError) as failure:
+            if explicit_null:
+                await adapter.restart_interpreter("spark", None)
+            else:
+                await adapter.restart_interpreter("spark")
+        error = failure.value.tool_error
+        assert (error.category, error.operation, error.retryable) == (
+            ErrorCategory.UPSTREAM_ERROR, ToolOperation.RESTART_INTERPRETER, False,
+        )
+        assert sockets.calls == 0
+        assert sum(request.method == "PUT" for request in transport.requests) == 1
+    finally:
+        await adapter.close()
+
+
 async def test_discovery_serializes_http_tickets_and_socket_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1040,6 +1206,120 @@ async def local_http_peer() -> AsyncIterator[str]:
 
 class LocalNetworkStream(Protocol):
     def get_extra_info(self, info: str) -> socket.socket: ...
+
+
+@pytest.mark.parametrize("trigger", ["timeout", "cancel", "shutdown"])
+async def test_contextual_put_cleanup_aborts_real_httpx_socket_before_response(
+    trigger: str,
+) -> None:
+    before = asyncio.all_tasks()
+    put_received = asyncio.Event()
+    peer_closed = asyncio.Event()
+    writers: list[asyncio.StreamWriter] = []
+    handlers: set[asyncio.Task[object]] = set()
+
+    async def peer(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        task = asyncio.current_task()
+        assert task is not None
+        handlers.add(task)
+        writers.append(writer)
+        try:
+            while True:
+                headers = await reader.readuntil(b"\r\n\r\n")
+                if headers.startswith(b"PUT "):
+                    put_received.set()
+                    await reader.read()
+                    peer_closed.set()
+                    return
+                body = {
+                    "principal": "fake-user", "ticket": "fake-ticket", "roles": "[]",
+                } if b"/security/ticket " in headers else {"id": "first"}
+                content = json.dumps({"status": "OK", "body": body}).encode()
+                writer.write(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: " + str(len(content)).encode()
+                    + b"\r\n\r\n" + content,
+                )
+                await writer.drain()
+        except (asyncio.IncompleteReadError, ConnectionError):
+            pass
+        finally:
+            writer.close()
+            await writer.wait_closed()
+            handlers.discard(task)
+
+    class CancellationNeedsSocketAbort(httpx.AsyncHTTPTransport):
+        def __init__(self) -> None:
+            super().__init__()
+            self.network: LocalNetworkStream | None = None
+            self.cancelled = asyncio.Event()
+            self.put_count = 0
+
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            if request.method != "PUT":
+                result = await super().handle_async_request(request)
+                self.network = result.extensions["network_stream"]
+                return result
+            self.put_count += 1
+            work = asyncio.create_task(super().handle_async_request(request))
+            try:
+                return await asyncio.shield(work)
+            except asyncio.CancelledError:
+                self.cancelled.set()
+                # Simulate cancellation cleanup waiting for an OS-level release.
+                while not work.done():
+                    try:
+                        await asyncio.shield(work)
+                    except asyncio.CancelledError:
+                        continue
+                    except Exception:
+                        break
+                if not work.cancelled():
+                    work.exception()
+                raise
+
+    server = await asyncio.start_server(peer, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    transport = CancellationNeedsSocketAbort()
+    adapter = ZeppelinHttpClient(
+        settings=_settings(base_url=f"http://127.0.0.1:{port}/api", request_timeout_seconds=0.1),
+        secrets=_no_secrets(), transport=transport,
+        websocket_connector=DiscoverySockets(selected_socket()),
+    )
+    caller = asyncio.create_task(adapter.restart_interpreter("spark", "first"))
+    closer: asyncio.Task[None] | None = None
+    try:
+        await asyncio.wait_for(put_received.wait(), 1)
+        assert transport.network is not None
+        raw_socket = transport.network.get_extra_info("socket")
+        assert raw_socket.fileno() >= 0
+        if trigger == "cancel":
+            caller.cancel()
+        elif trigger == "shutdown":
+            closer = asyncio.create_task(adapter.close())
+        await asyncio.wait_for(transport.cancelled.wait(), 1)
+        done, _ = await asyncio.wait((caller,), timeout=0.5)
+        assert caller in done, "pre-response cancellation did not abort the owned HTTP socket"
+        if trigger == "timeout":
+            with pytest.raises(ZeppelinGatewayError) as failure:
+                await caller
+            assert failure.value.tool_error.category == ErrorCategory.TIMEOUT
+        else:
+            with pytest.raises(asyncio.CancelledError):
+                await caller
+        await asyncio.wait_for(peer_closed.wait(), 1)
+        assert raw_socket.fileno() == -1
+        assert transport.put_count == 1
+    finally:
+        for writer in writers:
+            writer.close()
+        await asyncio.gather(caller, return_exceptions=True)
+        if closer is not None:
+            await closer
+        await adapter.close()
+        server.close()
+        await server.wait_closed()
+        await asyncio.gather(*handlers, return_exceptions=True)
+    assert asyncio.all_tasks() == before
 
 
 class LocalSocketTransport(httpx.AsyncHTTPTransport):
