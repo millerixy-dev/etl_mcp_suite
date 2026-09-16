@@ -9,7 +9,7 @@ import re
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from http.cookies import CookieError, SimpleCookie
-from typing import Any, cast
+from typing import Any, TypeVar, cast
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
@@ -43,6 +43,7 @@ logger = logging.getLogger("mcp_stdio.zeppelin")
 
 _ZEPPELIN_STATUS_OK = "OK"
 _COOKIE_NAME_PATTERN = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
+_Result = TypeVar("_Result")
 
 # A non-cooperative transport must not hold shutdown open or lose task ownership.
 _http_close_tasks: set[asyncio.Task[None]] = set()
@@ -202,6 +203,7 @@ class ZeppelinHttpClient:
         self._websocket_connector = websocket_connector
         self._discovery_lock = asyncio.Lock()
         self._discoveries: set[asyncio.Task[tuple[InterpreterBindingRecord, ...]]] = set()
+        self._restarts: set[asyncio.Task[RestartInterpreterResult]] = set()
         self._close_task: asyncio.Task[None] | None = None
 
     async def get_interpreter_bindings(
@@ -214,18 +216,33 @@ class ZeppelinHttpClient:
         task = asyncio.create_task(self._serialized_discovery(notebook_id, deadline, cancelled))
         self._discoveries.add(task)
         try:
-            try:
-                return await asyncio.shield(task)
-            except asyncio.CancelledError:
-                cancelled.set()
-                task.cancel()
-                try:
-                    await await_cleanup(task)
-                except (Exception, asyncio.CancelledError):
-                    pass
-                raise
+            return await self._await_owned_task(task, cancelled)
         finally:
             self._discoveries.discard(task)
+
+    async def _await_owned_task(
+        self, task: asyncio.Task[_Result], cancelled: asyncio.Event,
+    ) -> _Result:
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled.set()
+            task.cancel()
+            try:
+                await await_cleanup(task)
+            except (Exception, asyncio.CancelledError):
+                pass
+            raise
+
+    async def _release_discovery_lock(self, acquisition: asyncio.Task[bool]) -> None:
+        if not acquisition.done():
+            acquisition.cancel()
+        try:
+            await await_cleanup(asyncio.gather(acquisition, return_exceptions=True))
+        finally:
+            if not acquisition.cancelled() and acquisition.exception() is None:
+                if acquisition.result():
+                    self._discovery_lock.release()
 
     async def _serialized_discovery(
         self, notebook_id: str, deadline: float, cancelled: asyncio.Event,
@@ -250,14 +267,7 @@ class ZeppelinHttpClient:
         except asyncio.TimeoutError:
             raise self._gateway_error(ErrorCategory.TIMEOUT, operation, identifiers) from None
         finally:
-            if not acquisition.done():
-                acquisition.cancel()
-            try:
-                await await_cleanup(asyncio.gather(acquisition, return_exceptions=True))
-            finally:
-                if not acquisition.cancelled() and acquisition.exception() is None:
-                    if acquisition.result():
-                        self._discovery_lock.release()
+            await self._release_discovery_lock(acquisition)
 
     async def _discover_locked(
         self, notebook_id: str, *, deadline: float, operation: ToolOperation,
@@ -590,7 +600,23 @@ class ZeppelinHttpClient:
             )
         return cast(dict[str, Any], body)
 
-    async def restart_interpreter(self, setting_id: str) -> RestartInterpreterResult:
+    async def restart_interpreter(
+        self, setting_id: str, notebook_id: str | None = None,
+    ) -> RestartInterpreterResult:
+        deadline = asyncio.get_running_loop().time() + self._settings.request_timeout_seconds
+        if notebook_id is not None:
+            if self._closed:
+                raise asyncio.CancelledError
+            cancelled = asyncio.Event()
+            task = asyncio.create_task(
+                self._serialized_restart(setting_id, notebook_id, deadline, cancelled),
+            )
+            self._restarts.add(task)
+            try:
+                return await self._await_owned_task(task, cancelled)
+            finally:
+                self._restarts.discard(task)
+
         encoded_id = self._encode_id(setting_id)
         client = await self._ensure_authenticated(
             operation=ToolOperation.RESTART_INTERPRETER, identifiers={"setting_id": setting_id},
@@ -603,25 +629,85 @@ class ZeppelinHttpClient:
             operation=ToolOperation.RESTART_INTERPRETER,
             identifiers={"setting_id": setting_id},
         )
-        if not isinstance(body, dict):
-            raise self._gateway_error(
-                ErrorCategory.UNEXPECTED_RESPONSE,
-                ToolOperation.RESTART_INTERPRETER,
-                {"setting_id": setting_id},
-            )
-        typed_body = cast(dict[str, Any], body)
+        return self._parse_restart_result(body, setting_id, {"setting_id": setting_id})
+
+    async def _serialized_restart(
+        self, setting_id: str, notebook_id: str, deadline: float, cancelled: asyncio.Event,
+    ) -> RestartInterpreterResult:
+        operation = ToolOperation.RESTART_INTERPRETER
+        identifiers = {"setting_id": setting_id, "notebook_id": notebook_id}
+        acquisition = asyncio.create_task(self._discovery_lock.acquire())
         try:
-            return RestartInterpreterResult(
-                setting_id=str(typed_body["id"]),
-                name=str(typed_body["name"]),
-                group=str(typed_body["group"]),
-                status=str(typed_body["status"]),
+            await asyncio.wait_for(
+                asyncio.shield(acquisition),
+                max(0, deadline - asyncio.get_running_loop().time()),
             )
-        except KeyError:
+            if self._closed or cancelled.is_set():
+                raise asyncio.CancelledError
+            bindings = await self._discover_locked(
+                notebook_id, deadline=deadline, operation=operation, identifiers=identifiers,
+                cancelled=cancelled,
+            )
+            if self._closed or cancelled.is_set():
+                raise asyncio.CancelledError
+            if not any(item.setting_id == setting_id and item.selected for item in bindings):
+                raise self._gateway_error(ErrorCategory.INVALID_INPUT, operation, identifiers)
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                raise asyncio.TimeoutError
+            client = await self._ensure_client()
+            put = asyncio.create_task(self._request(
+                client, "PUT", f"/interpreter/setting/restart/{self._encode_id(setting_id)}",
+                json_payload={"noteId": notebook_id}, operation=operation,
+                identifiers=identifiers, expect_body=True, discovery=True,
+            ))
+            try:
+                body = await asyncio.wait_for(asyncio.shield(put), remaining)
+            finally:
+                if not put.done():
+                    put.cancel()
+                await await_cleanup(asyncio.gather(put, return_exceptions=True))
+            if self._closed or cancelled.is_set():
+                raise asyncio.CancelledError
+            return self._parse_restart_result(body, setting_id, identifiers)
+        except asyncio.TimeoutError:
             raise self._gateway_error(
-                ErrorCategory.UNEXPECTED_RESPONSE,
-                ToolOperation.RESTART_INTERPRETER,
-                {"setting_id": setting_id},
+                ErrorCategory.TIMEOUT, operation, identifiers, retryable=False,
+            ) from None
+        except ZeppelinGatewayError as exc:
+            raise self._gateway_error(
+                exc.tool_error.category, operation, identifiers, retryable=False,
+            ) from None
+        finally:
+            await self._release_discovery_lock(acquisition)
+
+    def _parse_restart_result(
+        self, body: object, setting_id: str, identifiers: dict[str, str],
+    ) -> RestartInterpreterResult:
+        try:
+            if not isinstance(body, dict):
+                raise ValueError
+            fields = cast(dict[str, object], body)
+            result = RestartInterpreterResult(
+                setting_id=validate_opaque_id(
+                    fields.get("id"), max_chars=self._settings.max_opaque_id_chars,
+                ),
+                name=validate_opaque_id(fields.get("name"), max_chars=256),
+                group=validate_opaque_id(fields.get("group"), max_chars=256),
+                status=validate_opaque_id(fields.get("status"), max_chars=256),
+            )
+            if result.setting_id != setting_id:
+                raise ValueError
+            serialized = json.dumps(
+                result.model_dump(mode="json"), ensure_ascii=False, separators=(",", ":"),
+            ).encode("utf-8")
+            if len(serialized) > self._settings.max_result_bytes:
+                raise ValueError
+            return result
+        except (ValueError, UnicodeError):
+            raise self._gateway_error(
+                ErrorCategory.UNEXPECTED_RESPONSE, ToolOperation.RESTART_INTERPRETER,
+                identifiers, retryable=False,
             ) from None
 
     async def close(self) -> None:
@@ -634,10 +720,11 @@ class ZeppelinHttpClient:
         await await_cleanup(self._close_task)
 
     async def _close(self, deadline: float) -> None:
-        discoveries = tuple(self._discoveries)
+        discoveries = (*self._discoveries, *self._restarts)
         for task in discoveries:
             task.cancel()
-        await asyncio.gather(*discoveries, return_exceptions=True)
+        pending = cast(tuple[Awaitable[object], ...], discoveries)
+        await asyncio.gather(*pending, return_exceptions=True)
         if self._client is not None:
             await self._close_http_resource(
                 self._client, deadline=deadline, abort=self._http_resources.abort,

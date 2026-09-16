@@ -782,3 +782,65 @@ async def test_cancel_paragraph_rejects_malformed_ids_before_network() -> None:
         await service.cancel_paragraph("bad\x00id", "p-1")
     assert exc_info.value.tool_error.category == ErrorCategory.INVALID_INPUT
     assert gateway.calls == []
+
+
+@pytest.mark.parametrize("setting_id", ["2AY6GV7Q3", "2/a%2F?x=# 中", "x" * 300])
+@pytest.mark.parametrize("notebook_id", [None, "2/n%2F?x=# 中"])
+async def test_restart_preserves_opaque_ids_and_optional_context(
+    setting_id: str, notebook_id: str | None,
+) -> None:
+    service, gateway = _service(restartable_interpreter_settings=(setting_id,))
+    result = await service.restart_interpreter(setting_id, notebook_id)
+    assert result.setting_id == setting_id
+    assert gateway.calls == [("restart_interpreter", setting_id, notebook_id)]
+
+
+async def test_restart_omitted_and_null_context_are_identical() -> None:
+    service, gateway = _service(restartable_interpreter_settings=("spark",))
+    assert await service.restart_interpreter("spark") == await service.restart_interpreter(
+        "spark", None,
+    )
+    assert gateway.calls == [("restart_interpreter", "spark", None)] * 2
+
+
+async def test_restart_legacy_accepts_numeric_leading_opaque_setting() -> None:
+    service, gateway = _service(restartable_interpreter_settings=("2/id?x",))
+    assert (await service.restart_interpreter("2/id?x")).setting_id == "2/id?x"
+    assert gateway.calls == [("restart_interpreter", "2/id?x", None)]
+
+
+@pytest.mark.parametrize("invalid", ["", 123, True, "bad\x00id", "bad\x7fid", "x" * 9])
+@pytest.mark.parametrize("field", ["setting", "notebook"])
+async def test_restart_validates_both_ids_before_any_gateway_call(
+    invalid: object, field: str,
+) -> None:
+    service, gateway = _service(
+        restartable_interpreter_settings=("spark",), max_opaque_id_chars=8,
+    )
+    setting_id = invalid if field == "setting" else "spark"
+    notebook_id = invalid if field == "notebook" else "note"
+    with pytest.raises(ZeppelinGatewayError) as failure:
+        await service.restart_interpreter(setting_id, notebook_id)
+    error = failure.value.tool_error
+    assert error.category == ErrorCategory.INVALID_INPUT
+    assert error.operation == ToolOperation.RESTART_INTERPRETER
+    assert not error.retryable
+    assert gateway.calls == []
+
+
+@pytest.mark.parametrize("setting_id", ["Spark", "spark ", "spark.sql", "s" * 300])
+@pytest.mark.parametrize("notebook_id", [None, "note"])
+async def test_restart_allowlist_is_exact_and_error_identifiers_are_safe(
+    setting_id: str, notebook_id: str | None,
+) -> None:
+    service, gateway = _service(restartable_interpreter_settings=("spark",))
+    with pytest.raises(ZeppelinGatewayError) as failure:
+        await service.restart_interpreter(setting_id, notebook_id)
+    error = failure.value.tool_error
+    assert error.category == ErrorCategory.INVALID_INPUT
+    assert error.identifiers == safe_error_identifiers(
+        ToolOperation.RESTART_INTERPRETER,
+        {"setting_id": setting_id, "notebook_id": notebook_id},
+    )
+    assert setting_id not in (error.explanation or "")
+    assert gateway.calls == []

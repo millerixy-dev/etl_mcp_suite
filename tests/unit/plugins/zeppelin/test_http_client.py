@@ -9,7 +9,7 @@ import logging
 import socket
 from collections.abc import AsyncIterator
 from typing import Protocol, cast
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, quote
 
 import httpx
 import pytest
@@ -120,6 +120,501 @@ def discovery_adapter(
         settings=_settings(request_timeout_seconds=timeout), secrets=_secrets(),
         transport=transport, websocket_connector=sockets,
     )
+
+
+class RestartTransport(DiscoveryTransport):
+    def __init__(self, setting_id: str = "spark", notebook_id: str = "first") -> None:
+        super().__init__()
+        self.setting_id = setting_id
+        self.notebook_id = notebook_id
+        self.requests: list[httpx.Request] = []
+        self.put_entered = asyncio.Event()
+        self.put_release = asyncio.Event()
+        self.pause_put = False
+        self.put_response = _ok({
+            "id": setting_id, "name": "名称", "group": "spark", "status": "READY",
+            "properties": {"private": "discarded"},
+        })
+        self.failure: httpx.HTTPError | None = None
+        self.failure_stage = "PUT"
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        if self.failure is not None and (
+            request.method == self.failure_stage or request.url.path == self.failure_stage
+        ):
+            raise self.failure
+        if request.method == "PUT":
+            self.paths.append(request.url.path)
+            self.put_entered.set()
+            if self.pause_put:
+                await self.put_release.wait()
+            return self.put_response
+        result = await super().handle_async_request(request)
+        if "/notebook/" in request.url.path:
+            return _ok({"id": self.notebook_id})
+        return result
+
+
+def contextual_adapter(
+    transport: RestartTransport, *socket_items: LifecycleSocket, **settings: object,
+) -> tuple[ZeppelinHttpClient, DiscoverySockets]:
+    sockets = DiscoverySockets(*socket_items)
+    return ZeppelinHttpClient(
+        settings=_settings(**settings), secrets=_secrets(), transport=transport,
+        websocket_connector=sockets,
+    ), sockets
+
+
+def selected_socket(**kwargs: str) -> LifecycleSocket:
+    socket = LifecycleSocket(**kwargs)
+    socket.frames = [response([binding(id="spark", selected=True)])]
+    return socket
+
+
+@pytest.mark.parametrize("notebook_id", ["first", "2/n%2F?x=# 中"])
+async def test_contextual_restart_uses_fresh_selected_binding_and_exact_single_put(
+    notebook_id: str,
+) -> None:
+    setting_id = "2/a%2F?x=# 中"
+    transport = RestartTransport(setting_id, notebook_id)
+    first, second = selected_socket(), selected_socket()
+    first.frames = [response([binding(id=setting_id, selected=True)])]
+    second.frames = [response([])]
+    adapter, sockets = contextual_adapter(transport, first, second)
+    result = await adapter.restart_interpreter(setting_id, notebook_id)
+    assert result.model_dump() == {
+        "setting_id": setting_id, "name": "名称", "group": "spark", "status": "READY",
+    }
+    with pytest.raises(ZeppelinGatewayError) as failure:
+        await adapter.restart_interpreter(setting_id, notebook_id)
+    assert failure.value.tool_error.category == ErrorCategory.INVALID_INPUT
+    assert [request.method for request in transport.requests] == [
+        "POST", "GET", "GET", "PUT", "GET", "GET",
+    ]
+    put = transport.requests[3]
+    assert put.url.raw_path == (
+        "/api/interpreter/setting/restart/" + quote(setting_id, safe="")
+    ).encode()
+    assert json.loads(put.content) == {"noteId": notebook_id}
+    assert transport.tickets == sockets.calls == 2
+    assert first.sent[0]["data"] == {"noteId": notebook_id}
+    assert first.closes == second.closes == 1
+    await adapter.close()
+
+
+@pytest.mark.parametrize("bindings,category", [
+    ([], ErrorCategory.INVALID_INPUT),
+    ([binding(id="other", selected=True)], ErrorCategory.INVALID_INPUT),
+    ([binding(id="spark", selected=False)], ErrorCategory.INVALID_INPUT),
+    ([binding(id="Spark", selected=True)], ErrorCategory.INVALID_INPUT),
+    ([binding(id="spark"), binding(id="spark")], ErrorCategory.UNEXPECTED_RESPONSE),
+])
+async def test_contextual_restart_membership_failure_never_puts(
+    bindings: object, category: ErrorCategory,
+) -> None:
+    transport = RestartTransport()
+    socket = selected_socket()
+    socket.frames = [response(bindings)]
+    adapter, sockets = contextual_adapter(transport, socket)
+    with pytest.raises(ZeppelinGatewayError) as failure:
+        await adapter.restart_interpreter("spark", "first")
+    error = failure.value.tool_error
+    assert (error.category, error.operation, error.retryable) == (
+        category, ToolOperation.RESTART_INTERPRETER, False,
+    )
+    assert error.identifiers == {"setting_id": "spark", "notebook_id": "first"}
+    assert all(request.method != "PUT" for request in transport.requests)
+    assert sockets.calls == 1
+    await adapter.close()
+
+
+@pytest.mark.parametrize("stage", ["/api/login", "/api/notebook/first", "/api/security/ticket",
+                                  "PUT"])
+@pytest.mark.parametrize("exception,category", [
+    (httpx.ReadTimeout("private"), ErrorCategory.TIMEOUT),
+    (httpx.ConnectError("private"), ErrorCategory.CONNECTION_FAILED),
+    (httpx.WriteTimeout("private"), ErrorCategory.TIMEOUT),
+])
+async def test_contextual_restart_transport_failure_is_never_retryable_or_repeated(
+    stage: str, exception: httpx.HTTPError, category: ErrorCategory,
+) -> None:
+    transport = RestartTransport()
+    transport.failure, transport.failure_stage = exception, stage
+    adapter, sockets = contextual_adapter(transport, selected_socket())
+    with pytest.raises(ZeppelinGatewayError) as failure:
+        await adapter.restart_interpreter("spark", "first")
+    error = failure.value.tool_error
+    assert (error.category, error.operation, error.retryable) == (
+        category, ToolOperation.RESTART_INTERPRETER, False,
+    )
+    assert error.identifiers == {"setting_id": "spark", "notebook_id": "first"}
+    assert sum(request.method == "PUT" for request in transport.requests) == int(stage == "PUT")
+    assert sockets.calls == int(stage == "PUT")
+    assert "private" not in str(failure.value)
+    await adapter.close()
+
+
+@pytest.mark.parametrize("status,category", [
+    (401, ErrorCategory.AUTHENTICATION_FAILED), (403, ErrorCategory.PERMISSION_DENIED),
+    (404, ErrorCategory.UPSTREAM_ERROR), (500, ErrorCategory.UPSTREAM_ERROR),
+    (302, ErrorCategory.UPSTREAM_ERROR),
+])
+async def test_contextual_restart_put_http_mapping_without_fallback(
+    status: int, category: ErrorCategory,
+) -> None:
+    transport = RestartTransport()
+    transport.put_response = httpx.Response(status, headers={"location": "https://other.invalid"})
+    adapter, sockets = contextual_adapter(transport, selected_socket())
+    with pytest.raises(ZeppelinGatewayError) as failure:
+        await adapter.restart_interpreter("spark", "first")
+    assert failure.value.tool_error.category == category
+    assert not failure.value.tool_error.retryable
+    assert sum(request.method == "PUT" for request in transport.requests) == 1
+    assert sockets.calls == 1
+    await adapter.close()
+
+
+@pytest.mark.parametrize("explicit_null", [False, True])
+@pytest.mark.parametrize("failure,category,retryable", [
+    (None, None, False), (401, ErrorCategory.AUTHENTICATION_FAILED, False),
+    (403, ErrorCategory.AUTHENTICATION_FAILED, False), (404, ErrorCategory.UPSTREAM_ERROR, False),
+    (500, ErrorCategory.UPSTREAM_ERROR, False),
+    (httpx.ReadTimeout("private"), ErrorCategory.TIMEOUT, True),
+    (httpx.ConnectError("private"), ErrorCategory.CONNECTION_FAILED, True),
+])
+async def test_legacy_restart_retains_bodyless_path_and_error_metadata(
+    explicit_null: bool, failure: int | httpx.HTTPError | None,
+    category: ErrorCategory | None, retryable: bool,
+) -> None:
+    transport = RestartTransport()
+    if isinstance(failure, int):
+        transport.put_response = httpx.Response(failure)
+    elif failure is not None:
+        transport.failure = failure
+    adapter, sockets = contextual_adapter(transport, base_url="https://zep.example/custom")
+    try:
+        if explicit_null:
+            result = await adapter.restart_interpreter("spark", None)
+        else:
+            result = await adapter.restart_interpreter("spark")
+        assert category is None and result.setting_id == "spark"
+    except ZeppelinGatewayError as error:
+        assert (error.tool_error.category, error.tool_error.retryable) == (category, retryable)
+        assert error.tool_error.operation == ToolOperation.RESTART_INTERPRETER
+    assert [request.method for request in transport.requests] == ["POST", "PUT"]
+    assert transport.requests[-1].content == b""
+    assert sockets.calls == 0
+    await adapter.close()
+
+
+@pytest.mark.parametrize("context", [None, "first"])
+@pytest.mark.parametrize("field", ["id", "name", "group", "status"])
+@pytest.mark.parametrize("value", [None, 1, True, [], {}, "", "bad\ntext", "bad\x7ftext",
+                                  "x" * 257])
+async def test_restart_rejects_non_string_empty_control_or_oversized_result_fields(
+    context: str | None, field: str, value: object,
+) -> None:
+    transport = RestartTransport()
+    body: dict[str, object] = {"id": "spark", "name": "名称", "group": "spark", "status": "READY"}
+    body[field] = value
+    transport.put_response = _ok(body)
+    adapter, _ = contextual_adapter(transport, selected_socket(), max_opaque_id_chars=256)
+    with pytest.raises(ZeppelinGatewayError) as failure:
+        await adapter.restart_interpreter("spark", context)
+    error = failure.value.tool_error
+    assert (error.category, error.operation, error.retryable) == (
+        ErrorCategory.UNEXPECTED_RESPONSE, ToolOperation.RESTART_INTERPRETER, False,
+    )
+    assert sum(request.method == "PUT" for request in transport.requests) == 1
+    await adapter.close()
+
+
+@pytest.mark.parametrize("context", [None, "first"])
+@pytest.mark.parametrize("body", [
+    {"id": "other", "name": "n", "group": "g", "status": "s"},
+    {"id": "spark", "name": "n", "group": "g"},
+])
+async def test_restart_rejects_mismatched_or_missing_result_without_repeat(
+    context: str | None, body: dict[str, str],
+) -> None:
+    transport = RestartTransport()
+    transport.put_response = _ok(body)
+    adapter, _ = contextual_adapter(transport, selected_socket())
+    with pytest.raises(ZeppelinGatewayError) as failure:
+        await adapter.restart_interpreter("spark", context)
+    assert failure.value.tool_error.category == ErrorCategory.UNEXPECTED_RESPONSE
+    assert not failure.value.tool_error.retryable
+    assert sum(request.method == "PUT" for request in transport.requests) == 1
+    await adapter.close()
+
+
+@pytest.mark.parametrize("context", [None, "first"])
+@pytest.mark.parametrize("overflow", [0, 1])
+async def test_restart_result_budget_counts_complete_compact_utf8(
+    context: str | None, overflow: int,
+) -> None:
+    expected = {"setting_id": "spark", "name": "名称", "group": "spark", "status": "READY"}
+    byte_count = len(json.dumps(expected, ensure_ascii=False, separators=(",", ":")).encode())
+    transport = RestartTransport()
+    adapter, _ = contextual_adapter(
+        transport, selected_socket(), max_result_bytes=byte_count - overflow,
+    )
+    if overflow:
+        with pytest.raises(ZeppelinGatewayError) as failure:
+            await adapter.restart_interpreter("spark", context)
+        assert failure.value.tool_error.category == ErrorCategory.UNEXPECTED_RESPONSE
+        assert not failure.value.tool_error.retryable
+    else:
+        assert (await adapter.restart_interpreter("spark", context)).model_dump() == expected
+    assert sum(request.method == "PUT" for request in transport.requests) == 1
+    await adapter.close()
+
+
+@pytest.mark.parametrize("body", [
+    {"id": "spark", "name": 123, "group": "g", "status": "s"},
+    {"id": "other", "name": "n", "group": "g", "status": "s"},
+    {"id": "spark", "name": "", "group": "g", "status": "s"},
+])
+async def test_legacy_restart_strict_response_regression(body: dict[str, object]) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return _ok(body)
+
+    adapter = _adapter(httpx.MockTransport(handler))
+    try:
+        with pytest.raises(ZeppelinGatewayError) as failure:
+            await adapter.restart_interpreter("spark")
+        assert failure.value.tool_error.category == ErrorCategory.UNEXPECTED_RESPONSE
+        assert len(requests) == 1
+    finally:
+        await adapter.close()
+
+
+async def test_contextual_restart_single_deadline_includes_lock_all_stages_and_put(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loop = asyncio.get_running_loop()
+    now = loop.time()
+    monkeypatch.setattr(loop, "time", lambda: now)
+    transport = RestartTransport()
+    transport.pause = "/api/login"
+    transport.pause_put = True
+    socket = selected_socket(pause="connect")
+    adapter, _ = contextual_adapter(transport, socket, request_timeout_seconds=10)
+    lock = asyncio.Lock()
+    monkeypatch.setattr(adapter, "_discovery_lock", lock)
+    await lock.acquire()
+    task = asyncio.create_task(adapter.restart_interpreter("spark", "first"))
+    await asyncio.sleep(0)
+    now += 1
+    lock.release()
+    for path, following in (("/api/login", "/api/notebook/first"),
+                            ("/api/notebook/first", "/api/security/ticket"),
+                            ("/api/security/ticket", "")):
+        await transport.entered[path].wait()
+        now += 1
+        transport.pause = following
+        transport.release[path].set()
+    for stage, following in (("connect", "send"), ("send", "receive"),
+                              ("receive", "close"), ("close", "")):
+        await socket.entered[stage].wait()
+        now += 1
+        socket.pause = following
+        socket.release[stage].set()
+    await transport.put_entered.wait()
+    assert socket.calls[0]["open_timeout"] == 6
+    now += 2.01
+    with pytest.raises(ZeppelinGatewayError) as failure:
+        await task
+    error = failure.value.tool_error
+    assert (error.category, error.operation, error.retryable) == (
+        ErrorCategory.TIMEOUT, ToolOperation.RESTART_INTERPRETER, False,
+    )
+    assert error.identifiers == {"setting_id": "spark", "notebook_id": "first"}
+    assert sum(request.method == "PUT" for request in transport.requests) == 1
+    assert not lock.locked()
+    assert socket.running == set()
+    await adapter.close()
+
+
+async def test_contextual_restart_lock_wait_expires_before_network(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loop = asyncio.get_running_loop()
+    now = loop.time()
+    monkeypatch.setattr(loop, "time", lambda: now)
+    transport = RestartTransport()
+    adapter, _ = contextual_adapter(transport, request_timeout_seconds=10)
+    lock = asyncio.Lock()
+    monkeypatch.setattr(adapter, "_discovery_lock", lock)
+    await lock.acquire()
+    task = asyncio.create_task(adapter.restart_interpreter("spark", "first"))
+    await asyncio.sleep(0)
+    now += 10.01
+    with pytest.raises(ZeppelinGatewayError) as failure:
+        await task
+    assert failure.value.tool_error.category == ErrorCategory.TIMEOUT
+    assert not failure.value.tool_error.retryable
+    assert transport.requests == []
+    lock.release()
+    await adapter.close()
+
+
+@pytest.mark.parametrize("shutdown", [False, True])
+@pytest.mark.parametrize("stage", ["lock", "http", "connect", "send", "receive", "close", "put"])
+async def test_contextual_restart_cancellation_and_shutdown_own_all_work(
+    shutdown: bool, stage: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tasks_before = asyncio.all_tasks()
+    transport = RestartTransport()
+    transport.pause = "/api/login" if stage == "http" else ""
+    transport.pause_put = stage == "put"
+    socket = selected_socket(pause=stage)
+    adapter, _ = contextual_adapter(transport, socket)
+    lock = asyncio.Lock()
+    monkeypatch.setattr(adapter, "_discovery_lock", lock)
+    if stage == "lock":
+        await lock.acquire()
+    task = asyncio.create_task(adapter.restart_interpreter("spark", "first"))
+    if stage == "lock":
+        await asyncio.sleep(0)
+    elif stage == "http":
+        await transport.entered["/api/login"].wait()
+    elif stage == "put":
+        await transport.put_entered.wait()
+    else:
+        await socket.entered[stage].wait()
+    close: asyncio.Task[None] | None = None
+    if shutdown:
+        close = asyncio.create_task(adapter.close())
+        await asyncio.sleep(0)
+    else:
+        task.cancel()
+    if stage == "close":
+        socket.release["close"].set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    if shutdown:
+        assert close is not None
+        await close
+        with pytest.raises(asyncio.CancelledError):
+            await adapter.restart_interpreter("spark", "first")
+    if stage == "lock":
+        lock.release()
+    assert not lock.locked()
+    assert socket.running == set()
+    assert sum(request.method == "PUT" for request in transport.requests) == int(stage == "put")
+    await adapter.close()
+    assert asyncio.all_tasks() == tasks_before
+
+
+async def test_contextual_restart_keeps_lock_through_put_and_waiter_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transport = RestartTransport()
+    transport.pause_put = True
+    socket = selected_socket()
+    adapter, sockets = contextual_adapter(transport, socket)
+    lock = asyncio.Lock()
+    monkeypatch.setattr(adapter, "_discovery_lock", lock)
+    active = asyncio.create_task(adapter.restart_interpreter("spark", "first"))
+    await transport.put_entered.wait()
+    waiter = asyncio.create_task(adapter.restart_interpreter("spark", "second"))
+    await asyncio.sleep(0)
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    assert not active.done()
+    assert lock.locked()
+    assert sockets.calls == 1 and transport.tickets == 1
+    transport.put_release.set()
+    assert (await active).setting_id == "spark"
+    await adapter.close()
+
+
+@pytest.mark.parametrize("stage", ["login", "notebook/first", "security/ticket",
+                                  "connect", "send", "receive", "close"])
+async def test_contextual_restart_discovery_deadline_never_falls_back(
+    stage: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tasks_before = asyncio.all_tasks()
+    loop = asyncio.get_running_loop()
+    now = loop.time()
+    monkeypatch.setattr(loop, "time", lambda: now)
+    transport = RestartTransport()
+    socket = selected_socket(pause=stage)
+    transport.pause = f"/api/{stage}"
+    adapter, sockets = contextual_adapter(transport, socket, request_timeout_seconds=10)
+    caller = asyncio.create_task(adapter.restart_interpreter("spark", "first"))
+    if transport.pause in transport.entered:
+        await transport.entered[transport.pause].wait()
+    else:
+        await socket.entered[stage].wait()
+    now += 10.01
+    with pytest.raises(ZeppelinGatewayError) as failure:
+        await caller
+    assert (failure.value.tool_error.category, failure.value.tool_error.retryable) == (
+        ErrorCategory.TIMEOUT, False,
+    )
+    assert failure.value.tool_error.operation == ToolOperation.RESTART_INTERPRETER
+    assert all(request.method != "PUT" for request in transport.requests)
+    assert sockets.calls <= 1 and socket.running == set()
+    await adapter.close()
+    assert asyncio.all_tasks() == tasks_before
+
+
+@pytest.mark.parametrize("frame,category", [
+    ("invalid", ErrorCategory.UNEXPECTED_RESPONSE),
+    ('{"op":"SESSION_LOGOUT"}', ErrorCategory.AUTHENTICATION_FAILED),
+    ('{"op":"ERROR_INFO","data":{"info":"private"}}', ErrorCategory.UPSTREAM_ERROR),
+])
+async def test_contextual_restart_socket_failures_keep_restart_context(
+    frame: str, category: ErrorCategory,
+) -> None:
+    setting_id, notebook_id = "s" * 300, "n" * 300
+    transport = RestartTransport(setting_id, notebook_id)
+    socket = selected_socket()
+    socket.frames = [frame]
+    adapter, sockets = contextual_adapter(transport, socket)
+    with pytest.raises(ZeppelinGatewayError) as failure:
+        await adapter.restart_interpreter(setting_id, notebook_id)
+    error = failure.value.tool_error
+    assert (error.category, error.operation, error.retryable, error.identifiers) == (
+        category, ToolOperation.RESTART_INTERPRETER, False, {},
+    )
+    assert all(request.method != "PUT" for request in transport.requests)
+    assert sockets.calls == 1
+    await adapter.close()
+
+
+@pytest.mark.parametrize("context", [None, "first"])
+async def test_restart_accepts_exact_field_bounds_and_long_opaque_id(context: str | None) -> None:
+    setting_id = "s" * 300
+    transport = RestartTransport(setting_id)
+    transport.put_response = _ok({"id": setting_id, "name": "n" * 256,
+                                  "group": "g" * 256, "status": "s" * 256})
+    socket = selected_socket()
+    socket.frames = [response([binding(id=setting_id)])]
+    adapter, _ = contextual_adapter(transport, socket, max_opaque_id_chars=300)
+    result = await adapter.restart_interpreter(setting_id, context)
+    assert result.setting_id == setting_id
+    assert (len(result.name), len(result.group), len(result.status)) == (256, 256, 256)
+    await adapter.close()
+
+
+async def test_contextual_restart_rejects_ambiguous_mount_before_login() -> None:
+    transport = RestartTransport()
+    adapter, sockets = contextual_adapter(transport, base_url="https://zep.example/custom")
+    with pytest.raises(ZeppelinGatewayError) as failure:
+        await adapter.restart_interpreter("spark", "first")
+    assert failure.value.tool_error.category == ErrorCategory.CONFIG_ERROR
+    assert failure.value.tool_error.operation == ToolOperation.RESTART_INTERPRETER
+    assert not failure.value.tool_error.retryable
+    assert transport.requests == [] and sockets.calls == 0
+    await adapter.close()
 
 
 async def test_discovery_serializes_http_tickets_and_socket_state(
@@ -698,6 +1193,45 @@ class EOFClosingStream(httpx.AsyncByteStream):
         self.aborts += 1
         self.closed = True
         self.release_close.set()
+
+
+@pytest.mark.parametrize("shutdown", [False, True])
+async def test_contextual_put_cancellation_owns_eof_stream_until_bounded_abort(
+    shutdown: bool, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class RestartStream(EOFClosingStream):
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            yield json.dumps({"status": "OK", "body": {
+                "id": "spark", "name": "n", "group": "g", "status": "s",
+            }}).encode()
+
+    tasks_before = asyncio.all_tasks()
+    loop = asyncio.get_running_loop()
+    now = loop.time()
+    monkeypatch.setattr(loop, "time", lambda: now)
+    stream = RestartStream()
+    transport = RestartTransport()
+    transport.put_response = httpx.Response(
+        200, stream=stream, extensions={"network_stream": stream},
+    )
+    adapter, _ = contextual_adapter(transport, selected_socket(), request_timeout_seconds=2)
+    caller = asyncio.create_task(adapter.restart_interpreter("spark", "first"))
+    await stream.closing.wait()
+    closer: asyncio.Task[None] | None = None
+    if shutdown:
+        closer = asyncio.create_task(adapter.close())
+    else:
+        caller.cancel()
+    await asyncio.sleep(0)
+    now += 2.01
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+    if closer is not None:
+        await closer
+    assert stream.closed and stream.aborts == 1 and stream.close_calls == 1
+    assert sum(request.method == "PUT" for request in transport.requests) == 1
+    await adapter.close()
+    assert asyncio.all_tasks() == tasks_before
 
 
 @pytest.mark.parametrize("shutdown", [False, True])

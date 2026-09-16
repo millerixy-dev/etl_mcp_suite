@@ -42,6 +42,47 @@
 - Also run: `uv run --locked ruff check src/mcp_stdio/plugins/zeppelin/config.py tests/unit/plugins/zeppelin/test_config.py tests/unit/plugins/zeppelin/test_models.py`
 - Commit the task with a focused message and write TDD evidence to the assigned implementation report.
 
+### Task 9: OpenSpec 4.2 — Contextual notebook interpreter restart
+
+**OpenSpec task:** `4.2 Write and run failing service/HTTP tests for notebook-mode restart: local allowlist checked before all network access, fresh selected-binding membership, precise noteId body and encoded setting path, empty/absent/unselected binding rejection, no context-dropping fallback, one overall deadline and one PUT, no auto paragraph execution, non-retryable uncertain result, and strict matching four-field response. Preserve omitted/null legacy calls and mappings with regression tests; implement and refactor.`
+
+**Files:**
+
+- Modify: `tests/unit/plugins/zeppelin/test_service.py`
+- Modify: `tests/unit/plugins/zeppelin/test_http_client.py`
+- Modify: `src/mcp_stdio/plugins/zeppelin/service.py`
+- Modify: `src/mcp_stdio/plugins/zeppelin/http_client.py`
+- Modify gateway/domain helpers only when the tests demonstrate a missing contract seam.
+- Do not modify MCP tool schemas yet, run paragraphs, cache bindings, or add a second transport path.
+
+**RED:**
+
+1. Add service-fake tests proving `setting_id` now uses the bounded opaque-ID validator, `notebook_id=None` and omission preserve the legacy call, a non-null notebook ID is validated, exact allowlist membership is checked before every gateway/network call, and reserved/numeric-leading IDs are preserved without normalization.
+2. Add adapter tests for contextual restart under one serialized discovery-lock scope: fresh readable-notebook/ticket/WebSocket discovery must contain an exact `setting_id` with `selected=true`; valid empty, absent, or unselected membership prevents every restart PUT and returns non-retryable `INVALID_INPUT` attributed to restart. Duplicate setting IDs are malformed upstream data and return `UNEXPECTED_RESPONSE`, as required by the capability spec and design error table.
+3. Prove the sole PUT targets `/interpreter/setting/restart/{setting_id encoded exactly once}` with exactly compact-equivalent JSON `{"noteId": notebook_id}`; notebook ID remains JSON data. Assert there is no paragraph execution, setting-wide fallback, reconnect, login/restart retry, or second PUT on discovery/PUT/response failure.
+4. Use deterministic delayed lock, HTTP, and WebSocket fakes to prove one `request_timeout_seconds` deadline starts before lock acquisition and covers login, precheck, ticket, socket query, cleanup state, and PUT. All contextual failures, including timeout/connection uncertainty after PUT begins, are non-retryable and keep restart operation plus safe setting/notebook identifiers.
+5. Add legacy regression tests for omitted/null calls: no discovery request/socket, no JSON body, existing 401/403, >=400, timeout, connection mappings and retryability remain unchanged.
+6. Add strict restart response tests for actual non-empty control-free strings only, matching returned ID, ID/configured length bounds, name/group/status <=256, extra fields discarded, and complete compact `ensure_ascii=False` UTF-8 result at exact `max_result_bytes`/one byte over. Reject coercible, missing, mismatched, control, oversized, or over-budget responses as non-retryable `UNEXPECTED_RESPONSE` without repeating PUT.
+7. Add cancellation/shutdown regression coverage where contextual restart waits for the lock or is inside discovery/PUT: cancellation propagates after bounded cleanup, close rejects/cancels active contextual work, releases the lock/resources, and leaves no background task.
+8. Run `uv run --locked --no-sync pytest tests/unit/plugins/zeppelin/test_service.py tests/unit/plugins/zeppelin/test_http_client.py -q` before production edits and retain the functional RED.
+
+**GREEN / REFACTOR:**
+
+1. Update the service signature to `restart_interpreter(setting_id, notebook_id=None)`, validate the setting and optional notebook with `validate_opaque_id`, filter safe identifiers, enforce the exact local allowlist before awaiting the gateway, and pass the validated optional notebook unchanged.
+2. Extend the gateway adapter signature. Keep legacy restart on its existing direct path. For contextual restart, derive one monotonic deadline at public entry, acquire the existing discovery lock within that budget, call `_discover_locked` with restart attribution, require exact selected membership, then issue exactly one contextual PUT before releasing the lock.
+3. Reuse the existing lifecycle ownership/cancellation/close machinery without recursive lock acquisition. Track contextual tasks with discovery tasks so shutdown cancels both; preserve `CancelledError`, bounded cleanup, and rejection of new work after close.
+4. Add a remaining-budget wrapper for every contextual stage, including the PUT. Do not reset HTTP timeout, retry, reconnect, or fall back to a bodyless restart. Map all contextual errors to non-retryable safe restart errors while retaining the specified category.
+5. Send `{"noteId": notebook_id}` only in contextual mode. Encode only the setting path segment exactly once; never place the notebook ID in the path or socket URL.
+6. Centralize strict restart-result parsing for both modes: require the four public fields as bounded strings, exact requested ID, discard extras, serialize the full public model compactly with `ensure_ascii=False`, and enforce `max_result_bytes` without truncation. A failure after PUT remains an uncertain non-retryable error and never repeats the request.
+7. Keep the adapter/service dependency boundaries and legacy behavior intact; refactor only after the focused suite is green.
+
+**Verification:**
+
+- Required: `uv run --locked --no-sync pytest tests/unit/plugins/zeppelin/test_service.py tests/unit/plugins/zeppelin/test_http_client.py -q`
+- Also run affected lifecycle/plugin tests: `uv run --locked --no-sync pytest tests/unit/plugins/zeppelin/test_websocket_client.py tests/unit/plugins/zeppelin/test_plugin.py -q`
+- Also run Ruff over changed production/tests and scoped Pyright for `service.py`, `http_client.py`, `gateway.py`, `plugin.py`, and the two task test files; run full Pyright and report remaining baseline separately.
+- Commit the task with a focused message and write TDD evidence to the assigned implementation report.
+
 ### Task 2: OpenSpec 1.2 — Binding models, gateway signatures, and safe error mappings
 
 **OpenSpec task:** `1.2 Write and run failing tests for immutable InterpreterBinding/InterpreterBindingsResult, their exact fields/types/limits, the gateway's new discovery and optional notebook restart signatures, and safe operation/identifier mappings (including IDs exceeding the core limit); implement those shared contracts and update fake gateways so existing tests stay green.`

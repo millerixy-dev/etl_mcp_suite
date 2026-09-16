@@ -25,7 +25,6 @@ from mcp_stdio.plugins.zeppelin.models import (
     RunParagraphResult,
     SafeErrorDetail,
     parse_paragraph_interpreter,
-    validate_interpreter_name,
     validate_notebook_name,
     validate_opaque_id,
     validate_paragraph_body,
@@ -127,19 +126,35 @@ class ZeppelinNotebookService:
             )
         return result
 
-    async def restart_interpreter(self, setting_id: object) -> RestartInterpreterResult:
+    async def restart_interpreter(
+        self, setting_id: object, notebook_id: object = None,
+    ) -> RestartInterpreterResult:
+        operation = ToolOperation.RESTART_INTERPRETER
+        identifiers = safe_error_identifiers(
+            operation, {"setting_id": setting_id, "notebook_id": notebook_id},
+        )
         try:
-            sid = validate_interpreter_name(setting_id)
+            sid = validate_opaque_id(setting_id, max_chars=self._max_id)
+            nb = (
+                None if notebook_id is None
+                else validate_opaque_id(notebook_id, max_chars=self._max_id)
+            )
         except ValueError as exc:
-            raise _invalid_input(
-                ToolOperation.RESTART_INTERPRETER, explanation=str(exc)
+            raise ZeppelinGatewayError(
+                ToolError.create(
+                    category=ErrorCategory.INVALID_INPUT, operation=operation,
+                    retryable=False, identifiers=identifiers, explanation=str(exc),
+                )
             ) from None
         if sid not in self._restartable:
-            raise _invalid_input(
-                ToolOperation.RESTART_INTERPRETER,
-                explanation=f"interpreter setting '{sid}' is not in the restart allowlist",
+            raise ZeppelinGatewayError(
+                ToolError.create(
+                    category=ErrorCategory.INVALID_INPUT, operation=operation,
+                    retryable=False, identifiers=identifiers,
+                    explanation="The interpreter setting is not in the restart allowlist.",
+                )
             ) from None
-        return await self._gateway.restart_interpreter(sid)
+        return await self._gateway.restart_interpreter(sid, nb)
 
     async def create_notebook(self, name: object) -> CreateNotebookResult:
         try:
