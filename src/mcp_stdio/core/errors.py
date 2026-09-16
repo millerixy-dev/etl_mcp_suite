@@ -37,6 +37,7 @@ class ToolOperation(str, Enum):
     RUN_PARAGRAPH = "run_paragraph"
     GET_PARAGRAPH_STATUS = "get_paragraph_status"
     GET_PARAGRAPH_RESULT = "get_paragraph_result"
+    GET_INTERPRETER_BINDINGS = "get_interpreter_bindings"
     RESTART_INTERPRETER = "restart_interpreter"
     CANCEL_PARAGRAPH = "cancel_paragraph"
     GET_SERVER_STATUS = "get_server_status"
@@ -73,7 +74,8 @@ _ALLOWED_IDENTIFIER_KEYS: Mapping[ToolOperation, frozenset[str]] = MappingProxyT
         ToolOperation.RUN_PARAGRAPH: frozenset({"notebook_id", "paragraph_id"}),
         ToolOperation.GET_PARAGRAPH_STATUS: frozenset({"notebook_id", "paragraph_id"}),
         ToolOperation.GET_PARAGRAPH_RESULT: frozenset({"notebook_id", "paragraph_id"}),
-        ToolOperation.RESTART_INTERPRETER: frozenset({"setting_id"}),
+        ToolOperation.GET_INTERPRETER_BINDINGS: frozenset({"notebook_id"}),
+        ToolOperation.RESTART_INTERPRETER: frozenset({"setting_id", "notebook_id"}),
         ToolOperation.CANCEL_PARAGRAPH: frozenset({"notebook_id", "paragraph_id"}),
         ToolOperation.GET_SERVER_STATUS: frozenset(),
         ToolOperation.LIST_OBJECTS: frozenset(),
@@ -103,6 +105,48 @@ def _empty_identifiers() -> dict[str, str]:
 
 def _new_correlation_id() -> str:
     return str(uuid4())
+
+
+def _identifier_key_is_safe(key: object, *, operation: ToolOperation) -> bool:
+    if not isinstance(key, str):
+        return False
+    normalized_key = key.lower()
+    return (
+        not any(part in normalized_key for part in _SENSITIVE_IDENTIFIER_KEY_PARTS)
+        and key in _ALLOWED_IDENTIFIER_KEYS[operation]
+    )
+
+
+def _identifier_value_is_safe(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and 0 < len(value) <= _MAX_IDENTIFIER_LENGTH
+        and not any(ord(character) < 32 or ord(character) == 127 for character in value)
+    )
+
+
+def safe_error_identifiers(
+    operation: ToolOperation,
+    identifiers: Mapping[str, object] | None,
+) -> dict[str, str]:
+    """Filter caller-supplied identifiers without truncating unsafe values."""
+
+    raw_operation = cast(object, operation)
+    if not isinstance(raw_operation, ToolOperation) or identifiers is None:
+        return {}
+    try:
+        identifier_items = dict(identifiers)
+    except Exception:
+        return {}
+    safe_identifiers: dict[str, str] = {}
+    for key, value in identifier_items.items():
+        if _identifier_key_is_safe(key, operation=operation) and _identifier_value_is_safe(
+            value
+        ):
+            assert isinstance(key, str)
+            assert isinstance(value, str)
+            safe_identifiers[key] = value
+    return safe_identifiers
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,21 +182,13 @@ class ToolError:
         except Exception:
             raise ValueError("identifiers must be a string mapping") from None
         identifiers: dict[str, str] = {}
-        allowed_identifier_keys = _ALLOWED_IDENTIFIER_KEYS[operation]
         for key, value in identifier_items.items():
-            normalized_key = key.lower() if isinstance(key, str) else ""
-            if not (
-                isinstance(key, str)
-                and not any(part in normalized_key for part in _SENSITIVE_IDENTIFIER_KEY_PARTS)
-                and key in allowed_identifier_keys
-            ):
+            if not _identifier_key_is_safe(key, operation=operation):
                 raise ValueError("identifier key is not allowed for the operation")
-            if not (
-                isinstance(value, str)
-                and 0 < len(value) <= _MAX_IDENTIFIER_LENGTH
-                and not any(ord(character) < 32 or ord(character) == 127 for character in value)
-            ):
+            if not _identifier_value_is_safe(value):
                 raise ValueError("identifier value is unsafe")
+            assert isinstance(key, str)
+            assert isinstance(value, str)
             identifiers[key] = value
 
         object.__setattr__(self, "identifiers", MappingProxyType(identifiers))

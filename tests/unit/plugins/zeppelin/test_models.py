@@ -559,3 +559,207 @@ def test_cancel_paragraph_result_is_frozen_with_two_fields() -> None:
 def test_cancel_paragraph_result_rejects_extra_fields() -> None:
     with pytest.raises(ValidationError):
         CancelParagraphResult(notebook_id="nb-1", paragraph_id="p-1", status="OK")
+
+
+def test_interpreter_binding_is_strict_frozen_and_has_exact_json_shape() -> None:
+    from mcp_stdio.plugins.zeppelin.models import InterpreterBinding
+
+    binding = InterpreterBinding.model_validate(
+        {
+            "setting_id": "2AY6GV7Q3",
+            "name": "spark_prod",
+            "interpreters": ["spark", "sql"],
+            "selected": True,
+            "restart_allowed": False,
+        }
+    )
+
+    assert binding.interpreters == ("spark", "sql")
+    assert binding.model_dump(mode="json") == {
+        "setting_id": "2AY6GV7Q3",
+        "name": "spark_prod",
+        "interpreters": ["spark", "sql"],
+        "selected": True,
+        "restart_allowed": False,
+    }
+    assert set(InterpreterBinding.model_fields) == {
+        "setting_id",
+        "name",
+        "interpreters",
+        "selected",
+        "restart_allowed",
+    }
+    with pytest.raises(ValidationError):
+        binding.selected = False
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "setting_id": 123,
+            "name": "spark",
+            "interpreters": [],
+            "selected": True,
+            "restart_allowed": False,
+        },
+        {
+            "setting_id": "spark",
+            "name": True,
+            "interpreters": [],
+            "selected": True,
+            "restart_allowed": False,
+        },
+        {
+            "setting_id": "spark",
+            "name": "spark",
+            "interpreters": [1],
+            "selected": True,
+            "restart_allowed": False,
+        },
+        {
+            "setting_id": "spark",
+            "name": "spark",
+            "interpreters": [],
+            "selected": 1,
+            "restart_allowed": False,
+        },
+        {
+            "setting_id": "spark",
+            "name": "spark",
+            "interpreters": [],
+            "selected": True,
+            "restart_allowed": 0,
+        },
+        {
+            "setting_id": "spark",
+            "name": "spark",
+            "interpreters": [],
+            "selected": True,
+            "restart_allowed": False,
+            "cookie": "forbidden",
+        },
+    ],
+)
+def test_interpreter_binding_rejects_coercion_and_extra_fields(
+    payload: dict[str, object],
+) -> None:
+    from mcp_stdio.plugins.zeppelin.models import InterpreterBinding
+
+    with pytest.raises(ValidationError):
+        InterpreterBinding.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("setting_id", ""),
+        ("setting_id", "bad\x00id"),
+        ("setting_id", "x" * 4_097),
+        ("name", ""),
+        ("name", "bad\nname"),
+        ("name", "x" * 257),
+        ("interpreters", [""]),
+        ("interpreters", ["bad\x7fname"]),
+        ("interpreters", ["x" * 257]),
+        ("interpreters", [f"i-{index}" for index in range(65)]),
+    ],
+)
+def test_interpreter_binding_rejects_invalid_or_oversized_public_fields(
+    field: str,
+    value: object,
+) -> None:
+    from mcp_stdio.plugins.zeppelin.models import InterpreterBinding
+
+    payload: dict[str, object] = {
+        "setting_id": "spark",
+        "name": "spark",
+        "interpreters": [],
+        "selected": True,
+        "restart_allowed": False,
+    }
+    payload[field] = value
+
+    with pytest.raises(ValidationError) as exc_info:
+        InterpreterBinding.model_validate(payload)
+
+    messages = " ".join(
+        str(error["msg"]) for error in exc_info.value.errors(include_input=False)
+    )
+    if value:
+        assert str(value) not in messages
+
+
+def test_interpreter_bindings_result_is_frozen_with_exact_json_shape() -> None:
+    from mcp_stdio.plugins.zeppelin.models import InterpreterBindingsResult
+
+    result = InterpreterBindingsResult.model_validate(
+        {
+            "notebook_id": "note-example",
+            "bindings": [
+                {
+                    "setting_id": "spark_prod",
+                    "name": "Spark Production",
+                    "interpreters": ["spark", "sql"],
+                    "selected": True,
+                    "restart_allowed": True,
+                }
+            ],
+        }
+    )
+
+    assert isinstance(result.bindings, tuple)
+    assert result.model_dump(mode="json") == {
+        "notebook_id": "note-example",
+        "bindings": [
+            {
+                "setting_id": "spark_prod",
+                "name": "Spark Production",
+                "interpreters": ["spark", "sql"],
+                "selected": True,
+                "restart_allowed": True,
+            }
+        ],
+    }
+    assert set(InterpreterBindingsResult.model_fields) == {"notebook_id", "bindings"}
+    with pytest.raises(ValidationError):
+        result.notebook_id = "changed"
+
+
+def test_interpreter_bindings_result_rejects_duplicate_or_excessive_bindings() -> None:
+    from mcp_stdio.plugins.zeppelin.models import (
+        InterpreterBinding,
+        InterpreterBindingsResult,
+    )
+
+    def binding(index: int) -> InterpreterBinding:
+        return InterpreterBinding(
+            setting_id=f"setting-{index}",
+            name=f"Setting {index}",
+            interpreters=(),
+            selected=True,
+            restart_allowed=False,
+        )
+
+    with pytest.raises(ValidationError):
+        InterpreterBindingsResult(
+            notebook_id="note-example",
+            bindings=(binding(0), binding(0)),
+        )
+    with pytest.raises(ValidationError):
+        InterpreterBindingsResult(
+            notebook_id="note-example",
+            bindings=tuple(binding(index) for index in range(257)),
+        )
+
+
+@pytest.mark.parametrize("notebook_id", [123, True, "", "bad\nnotebook", "x" * 4_097])
+def test_interpreter_bindings_result_rejects_invalid_notebook_id(
+    notebook_id: object,
+) -> None:
+    from mcp_stdio.plugins.zeppelin.models import InterpreterBindingsResult
+
+    with pytest.raises(ValidationError):
+        InterpreterBindingsResult.model_validate(
+            {"notebook_id": notebook_id, "bindings": []}
+        )

@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import inspect
+
 import pytest
 
 from mcp_stdio.core.errors import ErrorCategory
 from mcp_stdio.plugins.zeppelin.gateway import ZeppelinGatewayError
 from mcp_stdio.plugins.zeppelin.models import (
     CancelParagraphResult,
+    InterpreterBindingRecord,
+    NotebookTreeNode,
     OutputItem,
     OutputKind,
     ParagraphStatus,
@@ -25,7 +29,7 @@ class FakeGateway:
         self.calls: list[tuple[object, ...]] = []
         self.create_result = "nb-1"
         self.add_result = "p-1"
-        self.list_notebooks_result: tuple = ()
+        self.list_notebooks_result: tuple[NotebookTreeNode, ...] = ()
         self.run_status = ParagraphStatus.PENDING
         self.status_result = ParagraphStatus.FINISHED
         self.result_outputs: tuple[OutputItem, ...] = (
@@ -33,8 +37,9 @@ class FakeGateway:
         )
         self.result_error: SafeErrorDetail | None = None
         self.result_truncated = False
+        self.binding_result: tuple[InterpreterBindingRecord, ...] = ()
 
-    async def list_notebooks(self) -> tuple:
+    async def list_notebooks(self) -> tuple[NotebookTreeNode, ...]:
         self.calls.append(("list_notebooks",))
         return self.list_notebooks_result
 
@@ -66,8 +71,16 @@ class FakeGateway:
         self.calls.append(("cancel_paragraph", notebook_id, paragraph_id))
         return CancelParagraphResult(notebook_id=notebook_id, paragraph_id=paragraph_id)
 
-    async def restart_interpreter(self, setting_id: str) -> RestartInterpreterResult:
-        self.calls.append(("restart_interpreter", setting_id))
+    async def get_interpreter_bindings(
+        self, notebook_id: str
+    ) -> tuple[InterpreterBindingRecord, ...]:
+        self.calls.append(("get_interpreter_bindings", notebook_id))
+        return self.binding_result
+
+    async def restart_interpreter(
+        self, setting_id: str, notebook_id: str | None = None
+    ) -> RestartInterpreterResult:
+        self.calls.append(("restart_interpreter", setting_id, notebook_id))
         return RestartInterpreterResult(
             setting_id=setting_id,
             name=setting_id,
@@ -108,6 +121,20 @@ def _service(
         max_opaque_id_chars=max_opaque_id_chars,
     )
     return service, gateway
+
+
+def test_gateway_contract_has_discovery_and_optional_notebook_restart_signatures() -> None:
+    from mcp_stdio.plugins.zeppelin.gateway import ZeppelinGateway
+
+    for contract in (ZeppelinGateway, FakeGateway):
+        discovery = inspect.signature(contract.get_interpreter_bindings)
+        assert list(discovery.parameters) == ["self", "notebook_id"]
+        assert discovery.parameters["notebook_id"].default is inspect.Parameter.empty
+
+        restart = inspect.signature(contract.restart_interpreter)
+        assert list(restart.parameters) == ["self", "setting_id", "notebook_id"]
+        assert restart.parameters["setting_id"].default is inspect.Parameter.empty
+        assert restart.parameters["notebook_id"].default is None
 
 
 async def test_create_notebook_returns_result() -> None:

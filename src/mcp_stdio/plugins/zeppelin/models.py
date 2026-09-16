@@ -13,6 +13,10 @@ _INTERPRETER_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9_.-]{0,63}")
 
 _MAX_OUTPUT_BYTES = 1_048_576
 _MAX_ERROR_MESSAGE_BYTES = 4_096
+_MAX_BINDING_ID_CHARS = 4_096
+_MAX_BINDING_NAME_CHARS = 256
+_MAX_INTERPRETER_NAMES = 64
+_MAX_INTERPRETER_BINDINGS = 256
 
 
 class ParagraphStatus(str, Enum):
@@ -208,6 +212,110 @@ class RestartInterpreterResult(BaseModel):
     name: str
     group: str
     status: str
+
+
+def _validate_binding_text(value: str, *, label: str, max_chars: int) -> str:
+    if not value:
+        raise ValueError(f"{label} must not be empty")
+    if len(value) > max_chars:
+        raise ValueError(f"{label} exceeds the length limit")
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise ValueError(f"{label} must not contain control characters")
+    return value
+
+
+class InterpreterBindingRecord(BaseModel):
+    """Sanitized upstream interpreter binding crossing the gateway boundary."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+
+    setting_id: str
+    name: str
+    interpreters: tuple[str, ...]
+    selected: bool
+
+    @field_validator("setting_id")
+    @classmethod
+    def validate_setting_id(cls, value: str) -> str:
+        return _validate_binding_text(
+            value,
+            label="setting id",
+            max_chars=_MAX_BINDING_ID_CHARS,
+        )
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        return _validate_binding_text(
+            value,
+            label="binding name",
+            max_chars=_MAX_BINDING_NAME_CHARS,
+        )
+
+    @field_validator("interpreters", mode="before")
+    @classmethod
+    def normalize_interpreters(cls, value: object) -> object:
+        if not isinstance(value, (list, tuple)):
+            raise ValueError("interpreters must be a sequence")
+        items = cast("list[object] | tuple[object, ...]", value)
+        return tuple(items)
+
+    @field_validator("interpreters")
+    @classmethod
+    def validate_interpreters(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if len(value) > _MAX_INTERPRETER_NAMES:
+            raise ValueError("interpreters exceeds the item limit")
+        for interpreter in value:
+            _validate_binding_text(
+                interpreter,
+                label="interpreter name",
+                max_chars=_MAX_BINDING_NAME_CHARS,
+            )
+        return value
+
+
+class InterpreterBinding(InterpreterBindingRecord):
+    """One immutable public interpreter binding with local restart policy."""
+
+    restart_allowed: bool
+
+
+class InterpreterBindingsResult(BaseModel):
+    """Immutable public interpreter bindings for one notebook."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+
+    notebook_id: str
+    bindings: tuple[InterpreterBinding, ...]
+
+    @field_validator("notebook_id")
+    @classmethod
+    def validate_notebook_id(cls, value: str) -> str:
+        return _validate_binding_text(
+            value,
+            label="notebook id",
+            max_chars=_MAX_BINDING_ID_CHARS,
+        )
+
+    @field_validator("bindings", mode="before")
+    @classmethod
+    def normalize_bindings(cls, value: object) -> object:
+        if not isinstance(value, (list, tuple)):
+            raise ValueError("bindings must be a sequence")
+        items = cast("list[object] | tuple[object, ...]", value)
+        return tuple(items)
+
+    @field_validator("bindings")
+    @classmethod
+    def validate_bindings(
+        cls, value: tuple[InterpreterBinding, ...]
+    ) -> tuple[InterpreterBinding, ...]:
+        if len(value) > _MAX_INTERPRETER_BINDINGS:
+            raise ValueError("bindings exceeds the item limit")
+        setting_ids = tuple(binding.setting_id for binding in value)
+        if len(set(setting_ids)) != len(setting_ids):
+            raise ValueError("binding setting ids must be unique")
+        return value
 
 
 class ParagraphStatusResult(BaseModel):
