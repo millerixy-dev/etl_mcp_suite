@@ -14,6 +14,7 @@ dependencies = [
     "pyhive[hive_pure_sasl]==0.7.0",
     "pyyaml>=6,<7",
     "thrift>=0.20,<1",
+    "websockets>=15,<16",
 ]
 
 [project.scripts]

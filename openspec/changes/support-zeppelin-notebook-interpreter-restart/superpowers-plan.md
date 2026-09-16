@@ -149,3 +149,42 @@
 - Also run: `uv run --locked ruff check src/mcp_stdio/plugins/zeppelin/http_client.py tests/unit/plugins/zeppelin/test_http_client.py`
 - Also run: `uv run --locked pyright src/mcp_stdio/plugins/zeppelin/http_client.py`
 - Commit the task with a focused message and write TDD evidence to the assigned implementation report.
+
+### Task 5: OpenSpec 3.1 — One-shot WebSocket binding query and strict parsing
+
+**OpenSpec task:** `3.1 Write and run failing tests for the proposed websocket_client.py helper using injected fake connections: exact authenticated GET_INTERPRETER_BINDINGS envelope, isolated response without correlation echo, strict id/name/interpreters/selected parsing, empty lists, upstream order, duplicate IDs, extra-field discard, collection/name limits, frame/cumulative-byte limits, unrelated envelopes, binary/invalid JSON, AUTH_INFO, SESSION_LOGOUT, ERROR_INFO, and safe connection/handshake failure mapping. Add the direct dependency via uv add 'websockets>=15,<16', update uv.lock, implement the minimal adapter and refactor.`
+
+**Files:**
+
+- Create: `src/mcp_stdio/plugins/zeppelin/websocket_client.py`
+- Create: `tests/unit/plugins/zeppelin/test_websocket_client.py`
+- Modify through uv only: `pyproject.toml`, `uv.lock`
+- Reuse: `InterpreterBindingRecord`, `ZeppelinGatewayError`, `ToolOperation`, and safe identifier filtering.
+- Do not compose the helper into `ZeppelinHttpClient`, implement application-service discovery, add concurrency locking, or implement shutdown-race ownership in this task.
+
+**RED:**
+
+1. Create injected fake connector/connection tests for the exact compact JSON request envelope: `op=GET_INTERPRETER_BINDINGS`, `data.noteId`, server-issued principal/ticket/roles, and injected deterministic `msgId`; caller cannot add fields.
+2. Prove a valid `INTERPRETER_BINDINGS` response without echoed `noteId`/`msgId` is accepted on the isolated connection, preserving binding and interpreter order; valid empty result returns an empty tuple.
+3. Cover strict payload parsing of `id`, `name`, `interpreters[*].name`, and boolean `selected`; discard extra upstream fields; reject missing/coercible/wrong types, empty/control/overlong text, more than 256 bindings, more than 64 interpreter names, and duplicate setting IDs.
+4. Cover at most 32 received application messages, `max_response_bytes` for each text frame and cumulative UTF-8 bytes, unrelated well-formed string-op envelopes within bounds, binary frames, invalid JSON/envelope/data, and malformed expected payloads.
+5. Cover `AUTH_INFO`/`SESSION_LOGOUT` -> non-retryable `AUTHENTICATION_FAILED`, `ERROR_INFO` -> non-retryable `UPSTREAM_ERROR`, connection/premature close -> `CONNECTION_FAILED`, timeout -> `TIMEOUT`, and handshake 401/403/404/other status mappings without copying raw upstream text.
+6. Assert connector arguments: exact URL/origin, only optional Cookie header, `proxy=None`, `compression=None`, `max_queue=1`, `max_size=max_response_bytes`, no redirect/reconnect iterator, and a silent private logger.
+7. Run `uv run --locked pytest tests/unit/plugins/zeppelin/test_websocket_client.py -q` before production implementation and record the expected import/contract failure.
+
+**GREEN / REFACTOR:**
+
+1. Run `uv add 'websockets>=15,<16'` so `pyproject.toml` and `uv.lock` are resolved by uv; keep Python 3.10 compatibility and add no other dependency.
+2. Implement a small injected-connector helper with one connection per query. Accept explicit private auth/context values and operation/error identifiers; do not retain them on a long-lived public object or include them in repr/logs.
+3. Serialize one request and receive until the expected operation or a fixed bound. Count every application frame's UTF-8 byte length cumulatively; reject binary/invalid frames and limits without returning partial results.
+4. Parse the verified schema into immutable `InterpreterBindingRecord` values, use its strict validators plus fixed collection/duplicate checks, and discard extra fields.
+5. Map known library handshake/close/timeout exceptions to stable safe errors. Do not retry, reconnect, follow redirects, use environment proxies, or emit raw exception/frame/auth data.
+6. Keep lifecycle implementation minimal here; Task 3.2 will establish the single end-to-end deadline, serialization, cancellation, bounded close/abort, and shutdown ownership.
+
+**Verification:**
+
+- Required: `uv sync --locked`
+- Required: `uv run --locked pytest tests/unit/plugins/zeppelin/test_websocket_client.py -q`
+- Required: `uv run --locked pyright`
+- Also run: `uv run --locked ruff check src/mcp_stdio/plugins/zeppelin/websocket_client.py tests/unit/plugins/zeppelin/test_websocket_client.py`
+- Commit the task with a focused message and write TDD evidence to the assigned implementation report.
