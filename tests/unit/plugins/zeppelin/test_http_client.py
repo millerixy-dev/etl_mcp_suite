@@ -1529,6 +1529,141 @@ async def test_discovery_rejects_sensitive_substrings_in_every_public_binding_fi
     await gateway.close()
 
 
+@pytest.mark.parametrize(
+    "cookie_header",
+    [
+        "bad name=cookie-secret-sentinel",
+        "good=first-cookie-sentinel; bad name=cookie-secret-sentinel",
+        'good=first-cookie-sentinel; broken="unterminated-cookie-sentinel',
+    ],
+)
+async def test_discovery_rejects_invalid_or_partially_parsed_cookie_header_before_websocket(
+    cookie_header: str,
+    caplog: pytest.LogCaptureFixture,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/notebook/note":
+            return _ok({"id": "note"})
+        assert request.url.path == "/api/security/ticket"
+        return _ok(_ticket())
+
+    socket = LifecycleSocket()
+    socket.frames = [response([binding(name="cookie-secret-sentinel")])]
+    sockets = DiscoverySockets(socket)
+
+    class HeaderClient(ZeppelinHttpClient):
+        async def _ensure_client(self) -> httpx.AsyncClient:
+            client = await super()._ensure_client()
+            client.headers["cookie"] = cookie_header
+            return client
+
+    gateway = HeaderClient(
+        settings=_settings(),
+        secrets=_no_secrets(),
+        transport=_mock_transport(handler),
+        websocket_connector=sockets,
+    )
+    caplog.set_level(logging.DEBUG)
+
+    with pytest.raises(ZeppelinGatewayError) as error:
+        await gateway.get_interpreter_bindings("note")
+
+    captured = capsys.readouterr()
+    rendered = " ".join((str(error.value), repr(error.value), caplog.text,
+                         captured.out, captured.err))
+    assert error.value.tool_error.category == ErrorCategory.UNEXPECTED_RESPONSE
+    assert error.value.tool_error.operation == ToolOperation.GET_INTERPRETER_BINDINGS
+    assert error.value.tool_error.retryable is False
+    assert sockets.calls == 0
+    for sentinel in (
+        "cookie-secret-sentinel", "first-cookie-sentinel", "unterminated-cookie-sentinel",
+    ):
+        assert sentinel not in rendered
+    await gateway.close()
+
+
+@pytest.mark.parametrize(
+    "cookie_value",
+    [
+        "plain-cookie-sentinel",
+        "quoted-cookie-sentinel",
+        "escaped;cookie-sentinel",
+        "semi;cookie-sentinel",
+        "left=right-cookie-sentinel",
+    ],
+)
+async def test_discovery_scans_every_value_from_complete_quoted_cookie_header(
+    cookie_value: str,
+) -> None:
+    cookie_header = (
+        'plain=plain-cookie-sentinel; quoted="quoted-cookie-sentinel"; '
+        'escaped="escaped\\073cookie-sentinel"; semi="semi;cookie-sentinel"; '
+        "equals=left=right-cookie-sentinel"
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/notebook/note":
+            return _ok({"id": "note"})
+        assert request.url.path == "/api/security/ticket"
+        return _ok(_ticket())
+
+    socket = LifecycleSocket()
+    socket.frames = [response([binding(name=f"prefix-{cookie_value}-suffix")])]
+    sockets = DiscoverySockets(socket)
+
+    class HeaderClient(ZeppelinHttpClient):
+        async def _ensure_client(self) -> httpx.AsyncClient:
+            client = await super()._ensure_client()
+            client.headers["cookie"] = cookie_header
+            return client
+
+    gateway = HeaderClient(
+        settings=_settings(),
+        secrets=_no_secrets(),
+        transport=_mock_transport(handler),
+        websocket_connector=sockets,
+    )
+
+    with pytest.raises(ZeppelinGatewayError) as error:
+        await gateway.get_interpreter_bindings("note")
+
+    assert error.value.tool_error.category == ErrorCategory.UNEXPECTED_RESPONSE
+    assert sockets.calls == 1
+    assert socket.closes == 1
+    assert cookie_value not in str(error.value)
+    await gateway.close()
+
+
+@pytest.mark.parametrize(
+    ("roles", "public_name"),
+    [("[]", "Public [] setting"), ('[""]', 'Public [""] setting')],
+)
+async def test_empty_decoded_roles_do_not_taint_clean_public_fields(
+    roles: str,
+    public_name: str,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/notebook/note":
+            return _ok({"id": "note"})
+        assert request.url.path == "/api/security/ticket"
+        return _ok(_ticket(roles=roles))
+
+    socket = LifecycleSocket()
+    socket.frames = [response([binding(name=public_name)])]
+    gateway = ZeppelinHttpClient(
+        settings=_settings(),
+        secrets=_no_secrets(),
+        transport=_mock_transport(handler),
+        websocket_connector=DiscoverySockets(socket),
+    )
+
+    result = await gateway.get_interpreter_bindings("note")
+
+    assert result[0].name == public_name
+    await gateway.close()
+
+
 async def test_http_stream_and_client_close_failures_never_emit_sensitive_text(
     caplog: pytest.LogCaptureFixture,
     capsys: pytest.CaptureFixture[str],

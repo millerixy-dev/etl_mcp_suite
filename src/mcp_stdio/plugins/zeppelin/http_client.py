@@ -5,9 +5,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
-from http.cookies import SimpleCookie
+from http.cookies import CookieError, SimpleCookie
 from typing import Any, cast
 from urllib.parse import urlsplit, urlunsplit
 
@@ -41,6 +42,7 @@ from mcp_stdio.plugins.zeppelin.websocket_client import (
 logger = logging.getLogger("mcp_stdio.zeppelin")
 
 _ZEPPELIN_STATUS_OK = "OK"
+_COOKIE_NAME_PATTERN = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
 
 # A non-cooperative transport must not hold shutdown open or lose task ownership.
 _http_close_tasks: set[asyncio.Task[None]] = set()
@@ -133,9 +135,50 @@ def _derive_discovery_target(base_url: str) -> _DiscoveryTarget:
 def _cookie_values(cookie_header: str | None) -> tuple[str, ...]:
     if cookie_header is None:
         return ()
-    cookies = SimpleCookie()
-    cookies.load(cookie_header)
-    return tuple(morsel.value for morsel in cookies.values() if morsel.value)
+    segments: list[str] = []
+    start = 0
+    quoted = False
+    escaped = False
+    for index, character in enumerate(cookie_header):
+        if escaped:
+            escaped = False
+        elif quoted and character == "\\":
+            escaped = True
+        elif character == '"':
+            quoted = not quoted
+        elif character == ";" and not quoted:
+            segments.append(cookie_header[start:index])
+            start = index + 1
+    if quoted or escaped:
+        raise ValueError("invalid Cookie header")
+    segments.append(cookie_header[start:])
+
+    values: list[str] = []
+    for raw_segment in segments:
+        segment = raw_segment.strip(" \t")
+        raw_name, separator, raw_value = segment.partition("=")
+        name = raw_name.strip(" \t")
+        coded_value = raw_value.strip(" \t")
+        if (
+            not segment
+            or not separator
+            or _COOKIE_NAME_PATTERN.fullmatch(name) is None
+        ):
+            raise ValueError("invalid Cookie header")
+        cookie = SimpleCookie()
+        try:
+            cookie.load(f"mcp_cookie={coded_value}")
+        except CookieError:
+            raise ValueError("invalid Cookie header") from None
+        if (
+            len(cookie) != 1
+            or "mcp_cookie" not in cookie
+            or cookie["mcp_cookie"].coded_value != coded_value
+        ):
+            raise ValueError("invalid Cookie header")
+        if cookie["mcp_cookie"].value:
+            values.append(cookie["mcp_cookie"].value)
+    return tuple(values)
 
 
 class ZeppelinHttpClient:
@@ -350,6 +393,15 @@ class ZeppelinHttpClient:
         ):
             raise self._gateway_error(ErrorCategory.UNEXPECTED_RESPONSE, operation, identifiers)
         cookie_header = client.build_request("GET", target.http_url).headers.get("cookie")
+        try:
+            cookie_values = _cookie_values(cookie_header)
+        except ValueError:
+            raise self._gateway_error(
+                ErrorCategory.UNEXPECTED_RESPONSE,
+                operation,
+                identifiers,
+                retryable=False,
+            ) from None
         configured_secrets = tuple(
             secret.get_secret_value()
             for secret in (self._secrets.username, self._secrets.password)
@@ -369,10 +421,8 @@ class ZeppelinHttpClient:
                 *configured_secrets,
                 principal,
                 ticket,
-                roles,
                 *role_values,
-                cookie_header,
-                *_cookie_values(cookie_header),
+                *cookie_values,
             ) if value),
         )
 
