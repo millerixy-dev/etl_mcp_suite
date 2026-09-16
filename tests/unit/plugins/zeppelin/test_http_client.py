@@ -503,6 +503,10 @@ async def test_discovery_derives_strict_same_origin_websocket_target(
         "https://zep.example/proxy/custom",
         "https://zep.example/api/v2",
         "https://zep.example/proxy/%61pi",
+        "http://:9443/api",
+        "https://:443/api",
+        "http://zep.example:not-a-port/api",
+        "https://zep.example:not-a-port/api",
     ],
 )
 @pytest.mark.parametrize(

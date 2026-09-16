@@ -54,11 +54,17 @@ class _DiscoveryTarget:
 def _derive_discovery_target(base_url: str) -> _DiscoveryTarget:
     """Derive the documented same-origin Zeppelin WebSocket target."""
     parts = urlsplit(base_url)
+    try:
+        hostname = parts.hostname
+        _ = parts.port
+    except ValueError:
+        raise ValueError("base URL has no unambiguous WebSocket mapping") from None
     websocket_scheme = {"http": "ws", "https": "wss"}.get(parts.scheme)
     prefix, separator, final_component = parts.path.rpartition("/")
     if (
         websocket_scheme is None
         or not parts.netloc
+        or not hostname
         or parts.username is not None
         or parts.password is not None
         or parts.query
