@@ -6,7 +6,7 @@
 ## 2. Session and notebook discovery prerequisites
 
 - [x] 2.1 Write and run focused failing HTTP-mock tests for readable/existing notebook precheck with matching response ID, missing/denied notebook, bounded streamed response, discarded paragraph content, correctly form-encoded credentials, fresh ticket acquisition in the same session, string-array roles validation, anonymous policy, and attribution to the initiating operation. Implement the smallest session/ticket helpers without changing unrelated tool behavior, then refactor. Verify with `uv run --locked pytest tests/unit/plugins/zeppelin/test_http_client.py -q`.
-- [ ] 2.2 Write and run failing tests for HTTP(S) `/api` to WS(S) `/ws` derivation, proxy-prefix preservation, fail-before-network for ambiguous mounts, and scoped Cookie/Origin handling. Implement the URL and private authentication context needed by discovery, then refactor. Verify with `uv run --locked pytest tests/unit/plugins/zeppelin/test_http_client.py -q`; no requests may go to alternate origins or guessed routes.
+- [x] 2.2 Write and run failing tests for HTTP(S) `/api` to WS(S) `/ws` derivation, proxy-prefix preservation, fail-before-network for ambiguous mounts, and scoped Cookie/Origin handling. Implement the URL and private authentication context needed by discovery, then refactor. Verify with `uv run --locked pytest tests/unit/plugins/zeppelin/test_http_client.py -q`; no requests may go to alternate origins or guessed routes.
 
 ## 3. WebSocket query adapter
 
