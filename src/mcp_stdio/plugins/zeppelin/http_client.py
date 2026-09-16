@@ -7,8 +7,7 @@ import json
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
-from socket import SHUT_RDWR
-from typing import Any, Protocol, cast, runtime_checkable
+from typing import Any, cast
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
@@ -16,6 +15,7 @@ import httpx
 from mcp_stdio.core.errors import ErrorCategory, ToolError, ToolOperation, safe_error_identifiers
 from mcp_stdio.plugins.zeppelin.config import ZeppelinSecrets, ZeppelinSettings
 from mcp_stdio.plugins.zeppelin.gateway import ZeppelinGatewayError
+from mcp_stdio.plugins.zeppelin.http_resources import HttpResources, abort_http_response
 from mcp_stdio.plugins.zeppelin.models import (
     CancelParagraphResult,
     InterpreterBindingRecord,
@@ -49,37 +49,6 @@ def _observe_http_close(task: asyncio.Task[None]) -> None:
     _http_close_tasks.discard(task)
     if not task.cancelled():
         task.exception()
-
-
-@runtime_checkable
-class _NetworkStream(Protocol):
-    def get_extra_info(self, info: str) -> object: ...
-
-
-@runtime_checkable
-class _SocketShutdown(Protocol):
-    def shutdown(self, how: int) -> None: ...
-
-
-@runtime_checkable
-class _SocketClose(Protocol):
-    def close(self) -> None: ...
-
-
-def _abort_http_response(response: httpx.Response) -> None:
-    """Release the response socket through httpcore's network-stream extension."""
-    network = response.extensions.get("network_stream")
-    if not isinstance(network, _NetworkStream):
-        return
-    raw_socket = network.get_extra_info("socket")
-    # asyncio's TransportSocket exposes shutdown but deliberately omits close.
-    if isinstance(raw_socket, _SocketShutdown):
-        try:
-            raw_socket.shutdown(SHUT_RDWR)
-        except OSError:
-            pass
-    if isinstance(raw_socket, _SocketClose):
-        raw_socket.close()
 
 
 class _OwnedResponseStream(httpx.AsyncByteStream):
@@ -173,6 +142,7 @@ class ZeppelinHttpClient:
         self._settings = settings
         self._secrets = secrets
         self._transport = transport
+        self._http_resources = HttpResources()
         self._client: httpx.AsyncClient | None = None
         self._authenticated = False
         self._closed = False
@@ -275,7 +245,7 @@ class ZeppelinHttpClient:
             self._client = httpx.AsyncClient(
                 base_url=self._settings.base_url,
                 timeout=self._settings.request_timeout_seconds,
-                transport=self._transport,
+                transport=self._http_resources.attach(self._transport),
                 trust_env=False,
                 follow_redirects=False,
             )
@@ -592,7 +562,10 @@ class ZeppelinHttpClient:
             task.cancel()
         await asyncio.gather(*discoveries, return_exceptions=True)
         if self._client is not None:
-            await self._close_http_resource(self._client, deadline=deadline)
+            await self._close_http_resource(
+                self._client, deadline=deadline, abort=self._http_resources.abort,
+            )
+            self._http_resources.clear()
             self._client = None
 
     async def _close_http_resource(
@@ -615,6 +588,8 @@ class ZeppelinHttpClient:
                     abort()
                 except Exception:
                     pass
+                # asyncio transport abort schedules the final descriptor close.
+                await asyncio.sleep(0)
             if not task.done():
                 task.cancel()
                 # Give cooperative closers one turn; retain and observe the rest.
@@ -666,11 +641,12 @@ class ZeppelinHttpClient:
                     client.build_request(method, path, json=json_payload, data=form_data),
                     stream=True,
                 )
+                self._http_resources.record(response.extensions.get("network_stream"))
                 stream = cast(httpx.AsyncByteStream, response.stream)
                 owned_stream = _OwnedResponseStream(
                     stream,
                     lambda: self._close_http_resource(
-                        stream, abort=lambda: _abort_http_response(response),
+                        stream, abort=lambda: abort_http_response(response),
                     ),
                 )
                 response.stream = owned_stream
@@ -684,6 +660,7 @@ class ZeppelinHttpClient:
                     await await_cleanup(asyncio.create_task(owned_stream.finish(response)))
             else:
                 response = await client.request(method, path, json=json_payload, data=form_data)
+                self._http_resources.record(response.extensions.get("network_stream"))
                 bounded = await self._bound_response(response)
                 self._check_http_status(bounded, operation, identifiers)
                 content = bounded.content

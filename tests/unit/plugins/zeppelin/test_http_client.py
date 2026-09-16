@@ -6,7 +6,9 @@ import asyncio
 import gc
 import json
 import logging
+import socket
 from collections.abc import AsyncIterator
+from typing import Protocol, cast
 from urllib.parse import parse_qs
 
 import httpx
@@ -458,6 +460,9 @@ async def test_http_client_close_has_hard_deadline_when_transport_rejects_cancel
     class StubbornCloseTransport(DiscoveryTransport):
         close_task: asyncio.Task[object] | None = None
 
+        def abort(self) -> None:
+            owned_socket.close()
+
         async def aclose(self) -> None:
             self.closes += 1
             self.close_task = asyncio.current_task()
@@ -469,6 +474,7 @@ async def test_http_client_close_has_hard_deadline_when_transport_rejects_cancel
                     continue
             raise OSError("late close failure")
 
+    owned_socket, peer_socket = socket.socketpair()
     transport = StubbornCloseTransport()
     gateway = discovery_adapter(transport, DiscoverySockets(LifecycleSocket()))
     assert await gateway.get_interpreter_bindings("first") == ()
@@ -482,7 +488,10 @@ async def test_http_client_close_has_hard_deadline_when_transport_rejects_cancel
     try:
         assert first.done() and second.done(), "HTTP close waited past the global deadline"
         assert transport.close_task is not None and not transport.close_task.done()
+        assert owned_socket.fileno() == -1, "retained closer still owns a live socket"
     finally:
+        owned_socket.close()
+        peer_socket.close()
         transport.close_release.set()
         await asyncio.gather(first, second, return_exceptions=True)
         for _ in range(10):
@@ -494,6 +503,172 @@ async def test_http_client_close_has_hard_deadline_when_transport_rejects_cancel
         loop.set_exception_handler(previous_handler)
     assert failures == []
     assert transport.closes == 1
+
+
+@pytest.fixture
+async def local_http_peer() -> AsyncIterator[str]:
+    handlers: set[asyncio.Task[None]] = set()
+
+    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        task = asyncio.current_task()
+        assert task is not None
+        handlers.add(task)
+        try:
+            while True:
+                headers = await reader.readuntil(b"\r\n\r\n")
+                body = {
+                    "principal": "fake-user", "ticket": "fake-ticket", "roles": "[]",
+                } if b"/security/ticket " in headers else {"id": "first"}
+                content = json.dumps({"status": "OK", "body": body}).encode()
+                writer.write(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: " + str(len(content)).encode()
+                    + b"\r\n\r\n" + content,
+                )
+                await writer.drain()
+        except (asyncio.IncompleteReadError, ConnectionError):
+            pass
+        finally:
+            writer.close()
+            await writer.wait_closed()
+            handlers.discard(task)
+
+    server = await asyncio.start_server(handle, "127.0.0.1", 0)
+    try:
+        yield f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}/api"
+    finally:
+        server.close()
+        await server.wait_closed()
+        for task in tuple(handlers):
+            task.cancel()
+        await asyncio.gather(*tuple(handlers), return_exceptions=True)
+
+
+class LocalNetworkStream(Protocol):
+    def get_extra_info(self, info: str) -> socket.socket: ...
+
+
+class LocalSocketTransport(httpx.AsyncHTTPTransport):
+    def __init__(self, *, expose_network: bool = True) -> None:
+        super().__init__()
+        self.expose_network = expose_network
+        self.network: LocalNetworkStream | None = None
+        self.close_entered = asyncio.Event()
+        self.release_close = asyncio.Event()
+        self.close_task: asyncio.Task[object] | None = None
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        result = await super().handle_async_request(request)
+        self.network = result.extensions["network_stream"]
+        if not self.expose_network:
+            del result.extensions["network_stream"]
+        return result
+
+    async def aclose(self) -> None:
+        self.close_task = asyncio.current_task()
+        self.close_entered.set()
+        while not self.release_close.is_set():
+            try:
+                await self.release_close.wait()
+            except asyncio.CancelledError:
+                continue
+        await super().aclose()
+
+
+@pytest.mark.parametrize("expose_network", [False, True])
+async def test_http_client_deadline_force_closes_real_idle_connection(
+    monkeypatch: pytest.MonkeyPatch, local_http_peer: str, expose_network: bool,
+) -> None:
+    transport = LocalSocketTransport(expose_network=expose_network)
+    gateway = ZeppelinHttpClient(
+        settings=_settings(base_url=local_http_peer), secrets=_no_secrets(), transport=transport,
+        websocket_connector=DiscoverySockets(LifecycleSocket()),
+    )
+    assert await gateway.get_interpreter_bindings("first") == ()
+    assert transport.network is not None
+    raw_socket = transport.network.get_extra_info("socket")
+    assert raw_socket.fileno() >= 0
+    loop = asyncio.get_running_loop()
+    now = loop.time()
+    monkeypatch.setattr(loop, "time", lambda: now)
+    first = asyncio.create_task(gateway.close())
+    await transport.close_entered.wait()
+    second = asyncio.create_task(gateway.close())
+    await asyncio.sleep(0)
+    now += 5.01
+    for _ in range(30):
+        await asyncio.sleep(0)
+    try:
+        assert first.done() and second.done()
+        assert raw_socket.fileno() == -1, "shared client left its pooled socket open"
+        assert transport.close_task is not None and not transport.close_task.done()
+    finally:
+        transport.release_close.set()
+        await asyncio.gather(first, second, return_exceptions=True)
+        if transport.close_task is not None:
+            await transport.close_task
+
+
+@pytest.mark.parametrize("close_failure", [False, True])
+async def test_response_abort_closes_real_asyncio_transport_socket(
+    monkeypatch: pytest.MonkeyPatch, local_http_peer: str, close_failure: bool,
+) -> None:
+    closing = asyncio.Event()
+    release = asyncio.Event()
+    network: LocalNetworkStream | None = None
+
+    class BlockedStream(httpx.AsyncByteStream):
+        def __init__(self, stream: httpx.AsyncByteStream) -> None:
+            self.stream = stream
+
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            async for chunk in self.stream:
+                yield chunk
+
+        async def aclose(self) -> None:
+            closing.set()
+            if close_failure:
+                raise OSError("close failed")
+            await release.wait()
+            await self.stream.aclose()
+
+    class Transport(httpx.AsyncHTTPTransport):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            nonlocal network
+            result = await super().handle_async_request(request)
+            network = result.extensions["network_stream"]
+            result.stream = BlockedStream(cast(httpx.AsyncByteStream, result.stream))
+            if close_failure:
+                result.status_code = 403
+            return result
+
+    transport = Transport()
+    gateway = ZeppelinHttpClient(
+        settings=_settings(base_url=local_http_peer), secrets=_no_secrets(), transport=transport,
+        websocket_connector=DiscoverySockets(),
+    )
+    caller = asyncio.create_task(gateway.get_interpreter_bindings("first"))
+    await closing.wait()
+    assert network is not None
+    raw_socket = network.get_extra_info("socket")
+    try:
+        if close_failure:
+            with pytest.raises(ZeppelinGatewayError) as error:
+                await caller
+            assert error.value.tool_error.category == ErrorCategory.PERMISSION_DENIED
+        else:
+            loop = asyncio.get_running_loop()
+            now = loop.time()
+            monkeypatch.setattr(loop, "time", lambda: now)
+            caller.cancel()
+            await asyncio.sleep(0)
+            now += 5.01
+            with pytest.raises(asyncio.CancelledError):
+                await caller
+        assert raw_socket.fileno() == -1, "shutdown() left TransportSocket's fd open"
+    finally:
+        release.set()
+        await asyncio.gather(caller, return_exceptions=True)
+        await gateway.close()
 
 
 class EOFClosingStream(httpx.AsyncByteStream):
@@ -519,7 +694,7 @@ class EOFClosingStream(httpx.AsyncByteStream):
     def get_extra_info(self, info: str) -> EOFClosingStream | None:
         return self if info == "socket" else None
 
-    def shutdown(self, how: int) -> None:
+    def close(self) -> None:
         self.aborts += 1
         self.closed = True
         self.release_close.set()
