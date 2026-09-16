@@ -90,6 +90,7 @@ async def query(
     operation: ToolOperation = ToolOperation.GET_INTERPRETER_BINDINGS,
     identifiers: dict[str, str] | None = None,
     cookie_header: str | None = "session=fake-cookie",
+    sensitive_values: tuple[str, ...] | None = None,
 ) -> tuple[InterpreterBindingRecord, ...]:
     return await query_bindings(
         url="wss://zep.example:9443/proxy/ws",
@@ -106,7 +107,18 @@ async def query(
         identifiers={"notebook_id": "123/note ?#"} if identifiers is None else identifiers,
         connector=connector,
         msg_id_factory=lambda: "deterministic-id",
+        sensitive_values=() if sensitive_values is None else sensitive_values,
     )
+
+
+_SENSITIVE_SENTINELS = (
+    "username-secret-sentinel",
+    "password-secret-sentinel",
+    "principal-secret-sentinel",
+    "ticket-secret-sentinel",
+    "roles-secret-sentinel",
+    "cookie-secret-sentinel",
+)
 
 
 async def test_exact_request_accepts_uncorrelated_response_and_discards_extra_fields() -> None:
@@ -127,6 +139,53 @@ async def test_exact_request_accepts_uncorrelated_response_and_discards_extra_fi
     ]
     assert isinstance(result, tuple)
     assert connector.connection.closed
+
+
+@pytest.mark.parametrize("sentinel", _SENSITIVE_SENTINELS)
+@pytest.mark.parametrize("field", ["id", "name", "interpreter"])
+async def test_sensitive_substrings_in_any_public_binding_field_reject_complete_result(
+    sentinel: str,
+    field: str,
+) -> None:
+    contaminated = f"safe-prefix-{sentinel}-safe-suffix"
+    item = binding(id="clean-id", name="Clean", interpreters=[{"name": "clean"}])
+    if field == "interpreter":
+        item["interpreters"] = [{"name": contaminated}]
+    else:
+        item[field] = contaminated
+    connector = FakeConnector([response([binding(id="first-clean"), item])])
+
+    with pytest.raises(ZeppelinGatewayError) as error:
+        await query(connector, sensitive_values=_SENSITIVE_SENTINELS)
+
+    assert error.value.tool_error.category == ErrorCategory.UNEXPECTED_RESPONSE
+    assert error.value.tool_error.to_dict(secret_values=())["category"] == "UNEXPECTED_RESPONSE"
+    assert sentinel not in str(error.value)
+    assert sentinel not in repr(error.value)
+    assert sentinel not in repr(error.value.tool_error)
+    assert connector.connection.closed
+
+
+async def test_empty_sensitive_values_are_ignored_and_discarded_fields_are_not_returned(
+) -> None:
+    connector = FakeConnector([response([
+        binding(properties={"password": "discarded-secret-sentinel"}),
+    ])])
+
+    result = await query(
+        connector,
+        sensitive_values=("", "discarded-secret-sentinel"),
+    )
+
+    assert result == (
+        InterpreterBindingRecord(
+            setting_id="spark-setting",
+            name="Spark production",
+            interpreters=("sql", "spark"),
+            selected=True,
+        ),
+    )
+    assert "discarded-secret-sentinel" not in repr(result)
 
 
 @pytest.mark.parametrize("cookie_header", [None, "session=fake-cookie"])
@@ -451,6 +510,62 @@ async def test_cleanup_failure_preserves_primary_outcome(primary: str) -> None:
         assert await task == ()
     assert socket.aborts == 1
     assert socket.closes == 1
+    assert socket.running == set()
+
+
+@pytest.mark.parametrize("primary", ["error", "cancel"])
+async def test_cleanup_and_abort_failures_are_silent_and_preserve_primary_outcome(
+    primary: str,
+    caplog: pytest.LogCaptureFixture,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    cleanup_secret = "cleanup-secret-sentinel raw-frame Authorization"
+    abort_secret = "abort-secret-sentinel raw-cookie"
+    loop_contexts: list[dict[str, object]] = []
+    loop = asyncio.get_running_loop()
+    previous_handler = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: loop_contexts.append(context))
+
+    class SecretCleanupSocket(LifecycleSocket):
+        async def __aexit__(
+            self, exc_type: type[BaseException] | None, exc: BaseException | None,
+            traceback: TracebackType | None,
+        ) -> None:
+            self.closes += 1
+            await self.stage("close")
+            raise RuntimeError(cleanup_secret)
+
+        def abort(self) -> None:
+            super().abort()
+            raise RuntimeError(abort_secret)
+
+    caplog.set_level(logging.DEBUG)
+    socket = SecretCleanupSocket(pause="receive" if primary == "cancel" else "")
+    socket.frames = ["malformed"]
+    task = asyncio.create_task(lifecycle_query(socket))
+    caught: BaseException
+    try:
+        if primary == "cancel":
+            await socket.entered["receive"].wait()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError) as cancelled:
+                await task
+            caught = cancelled.value
+        else:
+            with pytest.raises(ZeppelinGatewayError) as error:
+                await task
+            caught = error.value
+            assert error.value.tool_error.category == ErrorCategory.UNEXPECTED_RESPONSE
+            assert error.value.__suppress_context__
+    finally:
+        loop.set_exception_handler(previous_handler)
+
+    captured = capsys.readouterr()
+    rendered = " ".join((str(caught), repr(caught), caplog.text, captured.out, captured.err,
+                         repr(loop_contexts)))
+    assert cleanup_secret not in rendered
+    assert abort_secret not in rendered
+    assert loop_contexts == []
     assert socket.running == set()
 
 

@@ -7,6 +7,7 @@ import json
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
+from http.cookies import SimpleCookie
 from typing import Any, cast
 from urllib.parse import urlsplit, urlunsplit
 
@@ -87,6 +88,7 @@ class _TicketContext:
     websocket_url: str
     origin: str
     cookie_header: str | None
+    sensitive_values: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,6 +128,14 @@ def _derive_discovery_target(base_url: str) -> _DiscoveryTarget:
         http_url=urlunsplit((parts.scheme, parts.netloc, websocket_path, "", "")),
         origin=urlunsplit((parts.scheme, parts.netloc, "", "", "")),
     )
+
+
+def _cookie_values(cookie_header: str | None) -> tuple[str, ...]:
+    if cookie_header is None:
+        return ()
+    cookies = SimpleCookie()
+    cookies.load(cookie_header)
+    return tuple(morsel.value for morsel in cookies.values() if morsel.value)
 
 
 class ZeppelinHttpClient:
@@ -235,7 +245,7 @@ class ZeppelinHttpClient:
                 max_opaque_id_chars=self._settings.max_opaque_id_chars,
                 request_timeout_seconds=self._settings.request_timeout_seconds,
                 operation=operation, identifiers=identifiers, connector=self._websocket_connector,
-                deadline=deadline,
+                deadline=deadline, sensitive_values=context.sensitive_values,
             )
         finally:
             del context
@@ -340,6 +350,14 @@ class ZeppelinHttpClient:
         ):
             raise self._gateway_error(ErrorCategory.UNEXPECTED_RESPONSE, operation, identifiers)
         cookie_header = client.build_request("GET", target.http_url).headers.get("cookie")
+        configured_secrets = tuple(
+            secret.get_secret_value()
+            for secret in (self._secrets.username, self._secrets.password)
+            if secret is not None and secret.get_secret_value()
+        )
+        role_values = tuple(
+            role for role in cast(list[str], decoded_roles) if role
+        )
         return _TicketContext(
             principal=principal,
             ticket=ticket,
@@ -347,6 +365,15 @@ class ZeppelinHttpClient:
             websocket_url=target.websocket_url,
             origin=target.origin,
             cookie_header=cookie_header,
+            sensitive_values=tuple(value for value in (
+                *configured_secrets,
+                principal,
+                ticket,
+                roles,
+                *role_values,
+                cookie_header,
+                *_cookie_values(cookie_header),
+            ) if value),
         )
 
     async def list_notebooks(self) -> tuple[NotebookTreeNode, ...]:

@@ -38,7 +38,7 @@ def _no_secrets() -> ZeppelinSecrets:
 
 def _secrets() -> ZeppelinSecrets:
     return ZeppelinSecrets.model_validate(
-        {"username": "u", "password": "p"}
+        {"username": "configured-user-sentinel", "password": "configured-pass-sentinel"}
     )
 
 
@@ -1459,6 +1459,125 @@ async def test_discovery_prepares_fresh_tickets_with_one_lazy_authenticated_sess
         assert secret not in repr(contexts)
         assert secret not in caplog.text
     await adapter.close()
+
+
+@pytest.mark.parametrize(
+    "sentinel",
+    [
+        "username-secret-sentinel",
+        "password-secret-sentinel",
+        "principal-secret-sentinel",
+        "ticket-secret-sentinel",
+        "roles-secret-sentinel",
+        "cookie-secret-sentinel",
+    ],
+)
+@pytest.mark.parametrize("field", ["id", "name", "interpreter"])
+async def test_discovery_rejects_sensitive_substrings_in_every_public_binding_field(
+    sentinel: str,
+    field: str,
+    caplog: pytest.LogCaptureFixture,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    username = "username-secret-sentinel"
+    password = "password-secret-sentinel"
+    principal = "principal-secret-sentinel"
+    ticket = "ticket-secret-sentinel"
+    role = "roles-secret-sentinel"
+    cookie = "cookie-secret-sentinel"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/login":
+            return httpx.Response(
+                200, headers={"set-cookie": f"JSESSIONID={cookie}; Path=/"},
+            )
+        if request.url.path == "/api/notebook/note":
+            return _ok({"id": "note", "paragraphs": [{"text": ticket}]})
+        assert request.url.path == "/api/security/ticket"
+        return _ok(_ticket(principal=principal, ticket=ticket, roles=json.dumps([role])))
+
+    contaminated = f"clean-prefix-{sentinel}-clean-suffix"
+    item = binding(id="clean-id", name="Clean", interpreters=[{"name": "clean"}])
+    if field == "interpreter":
+        item["interpreters"] = [{"name": contaminated}]
+    else:
+        item[field] = contaminated
+    socket = LifecycleSocket()
+    socket.frames = [response([binding(id="first-clean"), item])]
+    gateway = ZeppelinHttpClient(
+        settings=_settings(),
+        secrets=ZeppelinSecrets.model_validate({"username": username, "password": password}),
+        transport=_mock_transport(handler),
+        websocket_connector=DiscoverySockets(socket),
+    )
+    caplog.set_level(logging.DEBUG)
+
+    with pytest.raises(ZeppelinGatewayError) as error:
+        await gateway.get_interpreter_bindings("note")
+
+    captured = capsys.readouterr()
+    serialized = json.dumps(error.value.tool_error.to_dict(secret_values=()), sort_keys=True)
+    for secret in (username, password, principal, ticket, role, cookie):
+        assert secret not in str(error.value)
+        assert secret not in repr(error.value)
+        assert secret not in serialized
+        assert secret not in caplog.text
+        assert secret not in captured.out
+        assert secret not in captured.err
+    assert error.value.tool_error.category == ErrorCategory.UNEXPECTED_RESPONSE
+    assert socket.closes == 1
+    await gateway.close()
+
+
+async def test_http_stream_and_client_close_failures_never_emit_sensitive_text(
+    caplog: pytest.LogCaptureFixture,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    stream_secret = "stream-close-secret-sentinel raw-body"
+    client_secret = "client-close-secret-sentinel raw-header"
+    loop_contexts: list[dict[str, object]] = []
+    loop = asyncio.get_running_loop()
+    previous_handler = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: loop_contexts.append(context))
+
+    class SecretCloseStream(httpx.AsyncByteStream):
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            yield b"denied-body-must-not-escape"
+
+        async def aclose(self) -> None:
+            raise OSError(stream_secret)
+
+    class SecretCloseTransport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            return httpx.Response(403, stream=SecretCloseStream())
+
+        async def aclose(self) -> None:
+            raise OSError(client_secret)
+
+    caplog.set_level(logging.DEBUG)
+    gateway = ZeppelinHttpClient(
+        settings=_settings(),
+        secrets=_no_secrets(),
+        transport=SecretCloseTransport(),
+        websocket_connector=DiscoverySockets(),
+    )
+    try:
+        with pytest.raises(ZeppelinGatewayError) as error:
+            await gateway.get_interpreter_bindings("note")
+        assert error.value.tool_error.category == ErrorCategory.PERMISSION_DENIED
+        await gateway.close()
+        for _ in range(3):
+            await asyncio.sleep(0)
+    finally:
+        loop.set_exception_handler(previous_handler)
+
+    captured = capsys.readouterr()
+    rendered = " ".join((str(error.value), repr(error.value), caplog.text, captured.out,
+                         captured.err, repr(loop_contexts)))
+    assert stream_secret not in rendered
+    assert client_secret not in rendered
+    assert "denied-body-must-not-escape" not in rendered
+    assert loop_contexts == []
 
 
 @pytest.mark.parametrize("body", [None, [], "note", {}, {"id": 1}, {"id": "other"}])

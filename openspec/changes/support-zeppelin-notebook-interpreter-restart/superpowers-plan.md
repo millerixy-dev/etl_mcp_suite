@@ -227,3 +227,40 @@
 - Also run: `uv run --locked ruff check src/mcp_stdio/plugins/zeppelin/websocket_client.py src/mcp_stdio/plugins/zeppelin/http_client.py tests/unit/plugins/zeppelin/test_websocket_client.py tests/unit/plugins/zeppelin/test_http_client.py tests/unit/plugins/zeppelin/test_plugin.py`
 - Also run scoped Pyright over changed production modules and task tests; run full `uv run --locked pyright` and report any remaining baseline separately.
 - Commit the task with a focused message and write TDD evidence to the assigned implementation report.
+
+### Task 7: OpenSpec 3.3 — Fail-closed secret scanning and silent transport errors
+
+**OpenSpec task:** `3.3 Write and run failing tests with fake credential/ticket/cookie sentinels in exception messages, debug logs and returned string fields, including cleanup errors; implement fail-closed public-field sanitization and non-emitting transport logging, then refactor.`
+
+**Files:**
+
+- Modify: `tests/unit/plugins/zeppelin/test_websocket_client.py`
+- Modify: `tests/unit/plugins/zeppelin/test_http_client.py`
+- Modify: `src/mcp_stdio/plugins/zeppelin/websocket_client.py`
+- Modify: `src/mcp_stdio/plugins/zeppelin/http_client.py`
+- Modify private resource cleanup helpers only if a demonstrated cleanup-error leak requires it.
+- Do not add public config fields, expose authentication data, or implement service/tool behavior.
+
+**RED:**
+
+1. Inject distinct username, password, principal, ticket, roles, and cookie sentinels and place each sentinel in every public binding string location (`setting_id`, setting `name`, interpreter name), including substring cases. Assert fail-closed `UNEXPECTED_RESPONSE` and no partial result.
+2. Inject the same sentinels into connector/handshake/send/receive/close/abort/HTTP stream/client-close exception messages and library debug-log attempts. Assert fixed safe errors or propagated cancellation as appropriate, with no sentinel or raw protocol/header/frame/body in `str`, `repr`, `ToolError.to_dict`, captured logs, stdout, or stderr.
+3. Test success responses and extra discarded upstream fields containing sentinels: approved public fields must be scanned; discarded fields must never be returned or logged. Empty sensitive values are ignored so they do not taint every string.
+4. Test cleanup failure after a primary safe failure and after caller cancellation. Cleanup text must not replace the primary error/cancellation or emit through exception chaining, loop exception handlers, logs, stdout, or stderr.
+5. Prove private auth/context/request objects remain non-repr and are cleared/released after the isolated query; no credentials/ticket/cookie persist in public/domain models or adapter results.
+6. Run `uv run --locked pytest tests/unit/plugins/zeppelin/test_websocket_client.py tests/unit/plugins/zeppelin/test_http_client.py -q` and record functional RED before production edits.
+
+**GREEN / REFACTOR:**
+
+1. Pass a private tuple of configured secret values and current transient principal/ticket/cookie values from the HTTP gateway into the query helper; do not store it in public models or long-lived cache.
+2. After strict binding parsing and before returning, scan every public string field for non-empty sensitive substrings. Any taint rejects the complete result with a fixed `UNEXPECTED_RESPONSE` path.
+3. Keep transport logger disabled/non-propagating and never log exception representations, frames, headers, bodies, auth context, or cleanup failures. Consume late task outcomes without emitting them.
+4. Preserve cancellation and primary error precedence through cleanup; remove transient references at query exit.
+5. Avoid generic redaction-by-replacement in IDs/results because it would mutate upstream identity; reject instead.
+
+**Verification:**
+
+- Required: `uv run --locked pytest tests/unit/plugins/zeppelin/test_websocket_client.py tests/unit/plugins/zeppelin/test_http_client.py -q`
+- Also run: `uv run --locked ruff check src/mcp_stdio/plugins/zeppelin/websocket_client.py src/mcp_stdio/plugins/zeppelin/http_client.py tests/unit/plugins/zeppelin/test_websocket_client.py tests/unit/plugins/zeppelin/test_http_client.py`
+- Also run scoped Pyright over changed production modules and new/changed test regions; report existing full-suite diagnostics separately.
+- Commit the task with a focused message and write TDD evidence to the assigned implementation report.

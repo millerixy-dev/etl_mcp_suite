@@ -94,7 +94,8 @@ class _BindingQuery:
 
     def __init__(
         self, context: AbstractAsyncContextManager[_Connection], *, payload: str,
-        max_response_bytes: int, max_opaque_id_chars: int, cleanup_seconds: float,
+        max_response_bytes: int, max_opaque_id_chars: int,
+        sensitive_values: tuple[str, ...], cleanup_seconds: float,
     ) -> None:
         self._context = context
         self._connection: _Connection | None = None
@@ -102,17 +103,18 @@ class _BindingQuery:
         self._aborted = False
         self._close_task: asyncio.Task[None] | None = None
         self.work = asyncio.create_task(self._exchange(
-            payload, max_response_bytes, max_opaque_id_chars,
+            payload, max_response_bytes, max_opaque_id_chars, sensitive_values,
         ))
 
     async def _exchange(
         self, payload: str, max_response_bytes: int, max_opaque_id_chars: int,
+        sensitive_values: tuple[str, ...],
     ) -> tuple[InterpreterBindingRecord, ...]:
         self._connection = await self._context.__aenter__()
         await self._connection.send(payload)
         return await _receive_bindings(
             self._connection, max_response_bytes=max_response_bytes,
-            max_opaque_id_chars=max_opaque_id_chars,
+            max_opaque_id_chars=max_opaque_id_chars, sensitive_values=sensitive_values,
         )
 
     def _abort(self) -> None:
@@ -180,6 +182,7 @@ async def query_bindings(
     connector: SocketConnector = SingleQueryConnection,
     msg_id_factory: Callable[[], str] = _message_id,
     deadline: float | None = None,
+    sensitive_values: tuple[str, ...] = (),
 ) -> tuple[InterpreterBindingRecord, ...]:
     """Query using validated adapter-only auth; retain no session state.
 
@@ -220,6 +223,7 @@ async def query_bindings(
             ),
             max_response_bytes=max_response_bytes,
             max_opaque_id_chars=max_opaque_id_chars,
+            sensitive_values=tuple(value for value in sensitive_values if value),
             cleanup_seconds=min(5.0, request_timeout_seconds),
         )
         try:
@@ -276,6 +280,7 @@ def _reject_json_constant(value: str) -> None:
 
 def _parse_bindings(
     data: dict[str, object], *, max_opaque_id_chars: int,
+    sensitive_values: tuple[str, ...],
 ) -> tuple[InterpreterBindingRecord, ...]:
     items = _array(data.get("interpreterBindings"))
     if len(items) > _MAX_BINDINGS:
@@ -294,6 +299,9 @@ def _parse_bindings(
             "selected": binding.get("selected"),
         })
         validate_opaque_id(record.setting_id, max_chars=max_opaque_id_chars)
+        public_values = (record.setting_id, record.name, *record.interpreters)
+        if any(secret in value for secret in sensitive_values for value in public_values):
+            raise ValueError("sensitive public binding field")
         if record.setting_id in setting_ids:
             raise ValueError("duplicate setting id")
         setting_ids.add(record.setting_id)
@@ -303,6 +311,7 @@ def _parse_bindings(
 
 async def _receive_bindings(
     connection: _Connection, *, max_response_bytes: int, max_opaque_id_chars: int,
+    sensitive_values: tuple[str, ...],
 ) -> tuple[InterpreterBindingRecord, ...]:
     received_bytes = 0
     for _ in range(_MAX_MESSAGES):
@@ -322,5 +331,9 @@ async def _receive_bindings(
             raise _QueryFailure(ErrorCategory.UPSTREAM_ERROR)
         data = _object(envelope.get("data"))
         if op == "INTERPRETER_BINDINGS":
-            return _parse_bindings(data, max_opaque_id_chars=max_opaque_id_chars)
+            return _parse_bindings(
+                data,
+                max_opaque_id_chars=max_opaque_id_chars,
+                sensitive_values=sensitive_values,
+            )
     raise ValueError("message limit exceeded")
