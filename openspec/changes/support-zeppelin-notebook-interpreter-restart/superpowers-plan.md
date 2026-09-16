@@ -188,3 +188,42 @@
 - Required: `uv run --locked pyright`
 - Also run: `uv run --locked ruff check src/mcp_stdio/plugins/zeppelin/websocket_client.py tests/unit/plugins/zeppelin/test_websocket_client.py`
 - Commit the task with a focused message and write TDD evidence to the assigned implementation report.
+
+### Task 6: OpenSpec 3.2 — End-to-end deadline, serialization, cancellation, and shutdown
+
+**OpenSpec task:** `3.2 Write and run failing fake-transport tests for one end-to-end deadline (including lock waiting), serialized concurrent discovery, waiter cancellation, mid-connect/mid-receive cancellation, shutdown races, idempotent close, bounded close/abort, no surviving receive tasks, and no retry or redirect/auth forwarding. Implement and refactor lifecycle ownership in the helper/gateway.`
+
+**Files:**
+
+- Modify: `tests/unit/plugins/zeppelin/test_websocket_client.py`
+- Modify: `tests/unit/plugins/zeppelin/test_http_client.py`
+- Modify: `tests/unit/plugins/zeppelin/test_plugin.py`
+- Modify: `src/mcp_stdio/plugins/zeppelin/websocket_client.py`
+- Modify: `src/mcp_stdio/plugins/zeppelin/http_client.py`
+- Modify plugin composition only if needed for an injected helper seam; do not add service/tool behavior.
+
+**RED:**
+
+1. Add deterministic fake-clock/transport tests showing one `request_timeout_seconds` wall-clock budget starts before lock acquisition and covers login, notebook precheck, ticket, WebSocket connect/send/receive; no stage resets the deadline.
+2. Overlap two gateway discovery calls and prove per-process serialization includes HTTP/ticket work, each call uses its own session ticket/socket/response state, lock waiting consumes the second call's deadline, and cancellation of a waiting caller does not cancel the active caller.
+3. Test caller cancellation during connect, send, receive, and lock wait. Cancellation must propagate after bounded cleanup, never become a success/error result, and leave no receive/background task.
+4. Test gateway/runtime close while waiting, connecting, receiving, and immediately before/after query completion. Close rejects new discovery, cancels active work, closes owned WebSocket and HTTP resources, and is idempotent.
+5. Test context-manager close that succeeds, raises, or hangs. Cleanup gets at most `min(5, request_timeout_seconds)` additional seconds; after expiry abort the underlying socket transport through a narrow injected seam. No cleanup exception/raw repr replaces caller cancellation or the primary safe error.
+6. Assert no automatic reconnect/retry and no redirected or cross-origin auth forwarding. Connector invocation remains once per query with Task 3.1's secure options.
+7. Run `uv run --locked pytest tests/unit/plugins/zeppelin/test_websocket_client.py tests/unit/plugins/zeppelin/test_http_client.py tests/unit/plugins/zeppelin/test_plugin.py -q` and retain functional RED before implementation.
+
+**GREEN / REFACTOR:**
+
+1. Introduce explicit lifecycle ownership around the one-shot helper: track active context/connection/receive task without exposing transport details outside the adapter; make close idempotent and bounded.
+2. Add a gateway-level serialized discovery method implementing `get_interpreter_bindings`. Derive a monotonic deadline at entry and use Python-3.10-compatible `asyncio.wait_for` with remaining budget for lock and all upstream work.
+3. Ensure one lock covers session login, notebook precheck, fresh ticket, socket query, and cleanup state. Never recursively acquire it; later notebook restart may call an internal already-locked path.
+4. Preserve `CancelledError` and isolate waiter cancellation from active work. Track/cancel owned tasks explicitly; after every exit no receive task may survive.
+5. On shutdown mark the gateway closed before cancellation, reject new discovery deterministically, clean active socket/query work within the cleanup allowance, then close HTTP client. Suppress cleanup failures without logging exception representations.
+6. Keep discovery timeout/connection failures retryable and restart-attributed failures non-retryable. Do not implement service decoration or contextual restart PUT yet.
+
+**Verification:**
+
+- Required: `uv run --locked pytest tests/unit/plugins/zeppelin/test_websocket_client.py tests/unit/plugins/zeppelin/test_http_client.py tests/unit/plugins/zeppelin/test_plugin.py -q`
+- Also run: `uv run --locked ruff check src/mcp_stdio/plugins/zeppelin/websocket_client.py src/mcp_stdio/plugins/zeppelin/http_client.py tests/unit/plugins/zeppelin/test_websocket_client.py tests/unit/plugins/zeppelin/test_http_client.py tests/unit/plugins/zeppelin/test_plugin.py`
+- Also run scoped Pyright over changed production modules and task tests; run full `uv run --locked pyright` and report any remaining baseline separately.
+- Commit the task with a focused message and write TDD evidence to the assigned implementation report.

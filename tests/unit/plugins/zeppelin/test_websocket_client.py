@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from collections.abc import AsyncGenerator, Sequence
 from contextlib import asynccontextmanager
+from types import TracebackType
+from typing import cast
 
 import pytest
 from websockets.datastructures import Headers
@@ -16,7 +19,11 @@ from websockets.http11 import Response
 from mcp_stdio.core.errors import ErrorCategory, ToolOperation
 from mcp_stdio.plugins.zeppelin.gateway import ZeppelinGatewayError
 from mcp_stdio.plugins.zeppelin.models import InterpreterBindingRecord
-from mcp_stdio.plugins.zeppelin.websocket_client import SingleQueryConnection, query_bindings
+from mcp_stdio.plugins.zeppelin.websocket_client import (
+    SingleQueryConnection,
+    await_cleanup,
+    query_bindings,
+)
 
 
 class FakeConnection:
@@ -341,3 +348,220 @@ async def test_default_connector_rejects_redirect_without_opening_another_connec
     failure = handshake(302)
     failure.response.headers["Location"] = "wss://other.example/ws"
     assert connection.process_redirect(failure) is failure
+
+
+class LifecycleSocket:
+    """An event-driven context/connection with observable ownership and abort."""
+
+    def __init__(self, *, pause: str = "", close_mode: str = "ok") -> None:
+        self.pause = pause
+        self.close_mode = close_mode
+        self.entered = {stage: asyncio.Event() for stage in ("connect", "send", "receive", "close")}
+        self.release = {stage: asyncio.Event() for stage in self.entered}
+        self.running: set[str] = set()
+        self.closes = 0
+        self.aborts = 0
+        self.frames: list[str] = [response([])]
+        self.sent: list[dict[str, object]] = []
+        self.calls: list[dict[str, object]] = []
+
+    def __call__(self, url: str, **options: object) -> LifecycleSocket:
+        self.calls.append({"url": url, **options})
+        return self
+
+    async def stage(self, name: str) -> None:
+        self.running.add(name)
+        self.entered[name].set()
+        try:
+            if self.pause == name:
+                await self.release[name].wait()
+        finally:
+            self.running.remove(name)
+
+    async def __aenter__(self) -> LifecycleSocket:
+        await self.stage("connect")
+        return self
+
+    async def __aexit__(
+        self, exc_type: type[BaseException] | None, exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        self.closes += 1
+        await self.stage("close")
+        if self.close_mode == "raise":
+            raise RuntimeError("cleanup failed")
+
+    async def send(self, message: str) -> None:
+        self.sent.append(cast(dict[str, object], json.loads(message)))
+        await self.stage("send")
+
+    async def recv(self) -> str:
+        await self.stage("receive")
+        return self.frames.pop(0)
+
+    def abort(self) -> None:
+        self.aborts += 1
+        for release in self.release.values():
+            release.set()
+
+
+async def lifecycle_query(socket: LifecycleSocket, *, timeout: float = 3) -> object:
+    return await query_bindings(
+        url="wss://zep.example/ws", origin="https://zep.example",
+        principal="fake-principal", ticket="fake-ticket", roles="[]", cookie_header=None,
+        notebook_id="note", max_response_bytes=10000, max_opaque_id_chars=512,
+        request_timeout_seconds=timeout, operation=ToolOperation.GET_INTERPRETER_BINDINGS,
+        identifiers={"notebook_id": "note"}, connector=socket,
+    )
+
+
+@pytest.mark.parametrize("stage", ["connect", "send", "receive"])
+@pytest.mark.parametrize("close_mode", ["ok", "raise"])
+async def test_cancellation_owns_all_socket_work(stage: str, close_mode: str) -> None:
+    tasks_before = asyncio.all_tasks()
+    socket = LifecycleSocket(pause=stage, close_mode=close_mode)
+    task = asyncio.create_task(lifecycle_query(socket))
+    await asyncio.wait_for(socket.entered[stage].wait(), 1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert socket.running == set()
+    assert len(socket.calls) == 1
+    assert socket.aborts >= (1 if stage == "connect" or close_mode == "raise" else 0)
+    assert socket.closes == (0 if stage == "connect" else 1)
+    assert asyncio.all_tasks() == tasks_before
+
+
+@pytest.mark.parametrize("primary", ["success", "error", "cancel"])
+async def test_cleanup_failure_preserves_primary_outcome(primary: str) -> None:
+    socket = LifecycleSocket(pause="receive" if primary == "cancel" else "", close_mode="raise")
+    if primary == "error":
+        socket.frames = ["malformed"]
+    task = asyncio.create_task(lifecycle_query(socket))
+    if primary == "cancel":
+        await socket.entered["receive"].wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    elif primary == "error":
+        with pytest.raises(ZeppelinGatewayError) as error:
+            await task
+        assert error.value.tool_error.category == ErrorCategory.UNEXPECTED_RESPONSE
+    else:
+        assert await task == ()
+    assert socket.aborts == 1
+    assert socket.closes == 1
+    assert socket.running == set()
+
+
+@pytest.mark.parametrize("timeout", [2.0, 30.0])
+async def test_hanging_cleanup_is_aborted_at_its_separate_allowance(
+    timeout: float, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loop = asyncio.get_running_loop()
+    now = loop.time()
+    monkeypatch.setattr(loop, "time", lambda: now)
+    socket = LifecycleSocket(pause="close")
+    task = asyncio.create_task(lifecycle_query(socket, timeout=timeout))
+    await socket.entered["close"].wait()
+    now += min(5, timeout) + 0.01
+    for _ in range(20):
+        await asyncio.sleep(0)
+    try:
+        assert task.done(), "cleanup exceeded its allowance"
+    finally:
+        socket.release["close"].set()
+        await asyncio.gather(task, return_exceptions=True)
+    assert await task == ()
+    assert socket.aborts == 1
+    assert socket.closes == 1
+    assert socket.running == set()
+
+
+async def test_repeated_cancellation_during_cleanup_does_not_orphan_close() -> None:
+    socket = LifecycleSocket(pause="close")
+    task = asyncio.create_task(lifecycle_query(socket))
+    await socket.entered["close"].wait()
+    task.cancel()
+    await asyncio.sleep(0)
+    task.cancel()
+    socket.release["close"].set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert socket.running == set()
+    assert socket.closes == 1
+
+
+async def test_cleanup_join_preserves_cancellation_when_owned_task_later_fails() -> None:
+    release = asyncio.Event()
+
+    async def fail() -> None:
+        await release.wait()
+        raise OSError("cleanup failed")
+
+    owned = asyncio.create_task(fail())
+    waiter = asyncio.create_task(await_cleanup(owned))
+    await asyncio.sleep(0)
+    waiter.cancel()
+    await asyncio.sleep(0)
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    assert owned.done()
+
+
+@pytest.mark.parametrize("stage", ["connect", "send", "receive"])
+async def test_socket_work_timeout_never_reconnects_and_leaves_no_tasks(
+    stage: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tasks_before = asyncio.all_tasks()
+    loop = asyncio.get_running_loop()
+    now = loop.time()
+    monkeypatch.setattr(loop, "time", lambda: now)
+    socket = LifecycleSocket(pause=stage)
+    task = asyncio.create_task(lifecycle_query(socket))
+    await socket.entered[stage].wait()
+    now += 3.01
+    with pytest.raises(ZeppelinGatewayError) as error:
+        await task
+    assert error.value.tool_error.category == ErrorCategory.TIMEOUT
+    assert error.value.tool_error.retryable
+    assert len(socket.calls) == 1
+    assert socket.running == set()
+    assert asyncio.all_tasks() == tasks_before
+
+
+async def test_abort_unblocks_receive_that_does_not_immediately_acknowledge_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loop = asyncio.get_running_loop()
+    now = loop.time()
+    monkeypatch.setattr(loop, "time", lambda: now)
+    cancellation_received = asyncio.Event()
+
+    class SlowCancellationSocket(LifecycleSocket):
+        async def recv(self) -> str:
+            self.running.add("receive")
+            self.entered["receive"].set()
+            try:
+                try:
+                    await self.release["receive"].wait()
+                except asyncio.CancelledError:
+                    cancellation_received.set()
+                    await self.release["receive"].wait()
+                return response([])
+            finally:
+                self.running.remove("receive")
+
+    tasks_before = asyncio.all_tasks()
+    socket = SlowCancellationSocket()
+    task = asyncio.create_task(lifecycle_query(socket))
+    await socket.entered["receive"].wait()
+    task.cancel()
+    await cancellation_received.wait()
+    now += 3.01
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert socket.aborts == 1
+    assert socket.running == set()
+    assert asyncio.all_tasks() == tasks_before

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from dataclasses import dataclass
@@ -15,6 +16,7 @@ from mcp_stdio.plugins.zeppelin.config import ZeppelinSecrets, ZeppelinSettings
 from mcp_stdio.plugins.zeppelin.gateway import ZeppelinGatewayError
 from mcp_stdio.plugins.zeppelin.models import (
     CancelParagraphResult,
+    InterpreterBindingRecord,
     NotebookTreeNode,
     OutputItem,
     OutputKind,
@@ -25,6 +27,12 @@ from mcp_stdio.plugins.zeppelin.models import (
     normalize_paragraph_status,
     truncate_utf8,
     validate_opaque_id,
+)
+from mcp_stdio.plugins.zeppelin.websocket_client import (
+    SingleQueryConnection,
+    SocketConnector,
+    await_cleanup,
+    query_bindings,
 )
 
 logger = logging.getLogger("mcp_stdio.zeppelin")
@@ -92,6 +100,7 @@ class ZeppelinHttpClient:
         settings: ZeppelinSettings,
         secrets: ZeppelinSecrets,
         transport: httpx.AsyncBaseTransport | None = None,
+        websocket_connector: SocketConnector = SingleQueryConnection,
     ) -> None:
         self._settings = settings
         self._secrets = secrets
@@ -99,6 +108,99 @@ class ZeppelinHttpClient:
         self._client: httpx.AsyncClient | None = None
         self._authenticated = False
         self._closed = False
+        self._websocket_connector = websocket_connector
+        self._discovery_lock = asyncio.Lock()
+        self._discoveries: set[asyncio.Task[tuple[InterpreterBindingRecord, ...]]] = set()
+        self._close_task: asyncio.Task[None] | None = None
+
+    async def get_interpreter_bindings(
+        self, notebook_id: str,
+    ) -> tuple[InterpreterBindingRecord, ...]:
+        deadline = asyncio.get_running_loop().time() + self._settings.request_timeout_seconds
+        if self._closed:
+            raise asyncio.CancelledError
+        cancelled = asyncio.Event()
+        task = asyncio.create_task(self._serialized_discovery(notebook_id, deadline, cancelled))
+        self._discoveries.add(task)
+        try:
+            try:
+                return await asyncio.shield(task)
+            except asyncio.CancelledError:
+                cancelled.set()
+                task.cancel()
+                try:
+                    await await_cleanup(task)
+                except (Exception, asyncio.CancelledError):
+                    pass
+                raise
+        finally:
+            self._discoveries.discard(task)
+
+    async def _serialized_discovery(
+        self, notebook_id: str, deadline: float, cancelled: asyncio.Event,
+    ) -> tuple[InterpreterBindingRecord, ...]:
+        operation = ToolOperation.GET_INTERPRETER_BINDINGS
+        identifiers = {"notebook_id": notebook_id}
+        acquisition = asyncio.create_task(self._discovery_lock.acquire())
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(acquisition),
+                max(0, deadline - asyncio.get_running_loop().time()),
+            )
+            if self._closed or cancelled.is_set():
+                raise asyncio.CancelledError
+            result = await self._discover_locked(
+                notebook_id, deadline=deadline, operation=operation, identifiers=identifiers,
+                cancelled=cancelled,
+            )
+            if self._closed or cancelled.is_set():
+                raise asyncio.CancelledError
+            return result
+        except asyncio.TimeoutError:
+            raise self._gateway_error(ErrorCategory.TIMEOUT, operation, identifiers) from None
+        finally:
+            if not acquisition.done():
+                acquisition.cancel()
+            try:
+                await await_cleanup(asyncio.gather(acquisition, return_exceptions=True))
+            finally:
+                if not acquisition.cancelled() and acquisition.exception() is None:
+                    if acquisition.result():
+                        self._discovery_lock.release()
+
+    async def _discover_locked(
+        self, notebook_id: str, *, deadline: float, operation: ToolOperation,
+        identifiers: dict[str, str],
+        cancelled: asyncio.Event | None = None,
+    ) -> tuple[InterpreterBindingRecord, ...]:
+        """Use only with the discovery lock held; never acquire it recursively."""
+        preparation = asyncio.create_task(
+            self._prepare_discovery(notebook_id, operation=operation, identifiers=identifiers),
+        )
+        try:
+            context = await asyncio.wait_for(
+                asyncio.shield(preparation),
+                max(0, deadline - asyncio.get_running_loop().time()),
+            )
+        finally:
+            if not preparation.done():
+                preparation.cancel()
+            # Python 3.10/3.11 wait_for must not detach a stream on a second cancel.
+            await await_cleanup(asyncio.gather(preparation, return_exceptions=True))
+        try:
+            if self._closed or (cancelled is not None and cancelled.is_set()):
+                raise asyncio.CancelledError
+            return await query_bindings(
+                url=context.websocket_url, origin=context.origin, principal=context.principal,
+                ticket=context.ticket, roles=context.roles, cookie_header=context.cookie_header,
+                notebook_id=notebook_id, max_response_bytes=self._settings.max_response_bytes,
+                max_opaque_id_chars=self._settings.max_opaque_id_chars,
+                request_timeout_seconds=self._settings.request_timeout_seconds,
+                operation=operation, identifiers=identifiers, connector=self._websocket_connector,
+                deadline=deadline,
+            )
+        finally:
+            del context
 
     async def _ensure_client(self) -> httpx.AsyncClient:
         if self._client is None:
@@ -408,15 +510,37 @@ class ZeppelinHttpClient:
             ) from None
 
     async def close(self) -> None:
-        if self._closed:
-            return
         self._closed = True
+        if self._close_task is None:
+            deadline = asyncio.get_running_loop().time() + min(
+                5.0, self._settings.request_timeout_seconds,
+            )
+            self._close_task = asyncio.create_task(self._close(deadline))
+        await await_cleanup(self._close_task)
+
+    async def _close(self, deadline: float) -> None:
+        discoveries = tuple(self._discoveries)
+        for task in discoveries:
+            task.cancel()
+        await asyncio.gather(*discoveries, return_exceptions=True)
         if self._client is not None:
-            try:
-                await self._client.aclose()
-            except Exception:
-                logger.debug("error closing zeppelin http client", exc_info=True)
+            await self._close_http_resource(self._client, deadline=deadline)
             self._client = None
+
+    async def _close_http_resource(
+        self, resource: httpx.Response | httpx.AsyncClient, *, deadline: float | None = None,
+    ) -> None:
+        remaining = min(5.0, self._settings.request_timeout_seconds) if deadline is None else (
+            max(0, deadline - asyncio.get_running_loop().time())
+        )
+        task = asyncio.create_task(resource.aclose())
+        try:
+            # Even with an exhausted allowance, initiate resource closure once.
+            if remaining == 0:
+                await asyncio.sleep(0)
+            await asyncio.wait_for(task, remaining)
+        except Exception:
+            pass
 
     def _encode_id(self, opaque_id: str) -> str:
         from urllib.parse import quote
@@ -460,14 +584,18 @@ class ZeppelinHttpClient:
     ) -> Any:
         try:
             if discovery:
-                async with client.stream(
-                    method, path, json=json_payload, data=form_data,
-                ) as response:
+                response = await client.send(
+                    client.build_request(method, path, json=json_payload, data=form_data),
+                    stream=True,
+                )
+                try:
                     self._check_http_status(
                         response, operation, identifiers, discovery=True,
                         notebook_precheck=notebook_precheck,
                     )
                     content = await self._read_bounded(response, operation, identifiers)
+                finally:
+                    await await_cleanup(asyncio.create_task(self._close_http_resource(response)))
             else:
                 response = await client.request(method, path, json=json_payload, data=form_data)
                 bounded = await self._bound_response(response)

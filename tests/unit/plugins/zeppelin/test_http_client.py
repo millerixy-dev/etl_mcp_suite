@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from collections.abc import AsyncIterator
@@ -10,7 +11,7 @@ from urllib.parse import parse_qs
 import httpx
 import pytest
 
-from mcp_stdio.core.errors import ErrorCategory, ToolOperation
+from mcp_stdio.core.errors import ErrorCategory, ToolError, ToolOperation
 from mcp_stdio.plugins.zeppelin.config import ZeppelinSecrets, ZeppelinSettings
 from mcp_stdio.plugins.zeppelin.gateway import ZeppelinGatewayError
 from mcp_stdio.plugins.zeppelin.http_client import ZeppelinHttpClient
@@ -19,6 +20,7 @@ from mcp_stdio.plugins.zeppelin.models import (
     ParagraphStatus,
     RestartInterpreterResult,
 )
+from tests.unit.plugins.zeppelin.test_websocket_client import LifecycleSocket, binding, response
 
 
 def _settings(**overrides: object) -> ZeppelinSettings:
@@ -58,6 +60,388 @@ def _adapter(
 
 def _ok(body: object) -> httpx.Response:
     return httpx.Response(200, json={"status": "OK", "message": "", "body": body})
+
+
+class DiscoveryTransport(httpx.AsyncBaseTransport):
+    def __init__(self) -> None:
+        self.paths: list[str] = []
+        self.pause = ""
+        self.entered = {path: asyncio.Event() for path in (
+            "/api/login", "/api/notebook/first", "/api/security/ticket",
+        )}
+        self.release = {path: asyncio.Event() for path in self.entered}
+        self.tickets = 0
+        self.closes = 0
+        self.close_entered = asyncio.Event()
+        self.close_release = asyncio.Event()
+        self.pause_close = False
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        self.paths.append(path)
+        if path in self.entered:
+            self.entered[path].set()
+        if self.pause == path:
+            await self.release[path].wait()
+        if path.endswith("/login"):
+            return _ok(None)
+        if path.endswith("/ticket"):
+            self.tickets += 1
+            return _ok({
+                "principal": "fake-user", "ticket": f"ticket-{self.tickets}", "roles": "[]",
+            })
+        return _ok({"id": path.rsplit("/", 1)[-1]})
+
+    async def aclose(self) -> None:
+        self.closes += 1
+        self.close_entered.set()
+        if self.pause_close:
+            await self.close_release.wait()
+
+
+class DiscoverySockets:
+    def __init__(self, *sockets: LifecycleSocket) -> None:
+        self.sockets = list(sockets)
+        self.calls = 0
+
+    def __call__(self, url: str, **options: object) -> LifecycleSocket:
+        socket = self.sockets[self.calls]
+        self.calls += 1
+        return socket(url, **options)
+
+
+def discovery_adapter(
+    transport: DiscoveryTransport, sockets: DiscoverySockets, timeout: float = 10,
+) -> ZeppelinHttpClient:
+    return ZeppelinHttpClient(
+        settings=_settings(request_timeout_seconds=timeout), secrets=_secrets(),
+        transport=transport, websocket_connector=sockets,
+    )
+
+
+async def test_discovery_serializes_http_tickets_and_socket_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loop = asyncio.get_running_loop()
+    now = loop.time()
+    monkeypatch.setattr(loop, "time", lambda: now)
+    transport = DiscoveryTransport()
+    first = LifecycleSocket(pause="receive")
+    first.frames = [response([binding(id="first-setting")])]
+    second = LifecycleSocket()
+    second.frames = [response([binding(id="second-setting")])]
+    sockets = DiscoverySockets(first, second)
+    gateway = discovery_adapter(transport, sockets)
+    active = asyncio.create_task(gateway.get_interpreter_bindings("first"))
+    await first.entered["receive"].wait()
+    waiter = asyncio.create_task(gateway.get_interpreter_bindings("second"))
+    await asyncio.sleep(0)
+    assert transport.paths == ["/api/login", "/api/notebook/first", "/api/security/ticket"]
+    assert sockets.calls == 1
+    now += 3
+    first.release["receive"].set()
+    assert (await active)[0].setting_id == "first-setting"
+    assert (await waiter)[0].setting_id == "second-setting"
+    assert [first.sent[0]["ticket"], second.sent[0]["ticket"]] == ["ticket-1", "ticket-2"]
+    assert first.sent[0]["data"] == {"noteId": "first"}
+    assert second.sent[0]["data"] == {"noteId": "second"}
+    assert second.calls[0]["open_timeout"] == 7
+    assert first.closes == second.closes == 1
+    await gateway.close()
+
+
+async def test_one_deadline_covers_login_notebook_ticket_connect_send_receive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loop = asyncio.get_running_loop()
+    now = loop.time()
+    monkeypatch.setattr(loop, "time", lambda: now)
+    transport = DiscoveryTransport()
+    transport.pause = "/api/login"
+    socket = LifecycleSocket(pause="connect")
+    gateway = discovery_adapter(transport, DiscoverySockets(socket))
+    task = asyncio.create_task(gateway.get_interpreter_bindings("first"))
+    for path, following in (
+        ("/api/login", "/api/notebook/first"),
+        ("/api/notebook/first", "/api/security/ticket"),
+        ("/api/security/ticket", ""),
+    ):
+        await transport.entered[path].wait()
+        now += 2
+        transport.pause = following
+        transport.release[path].set()
+    for stage, following in (("connect", "send"), ("send", "receive")):
+        await socket.entered[stage].wait()
+        now += 1
+        socket.pause = following
+        socket.release[stage].set()
+    await socket.entered["receive"].wait()
+    now += 2.01
+    with pytest.raises(ZeppelinGatewayError) as error:
+        await task
+    assert error.value.tool_error.category == ErrorCategory.TIMEOUT
+    assert error.value.tool_error.retryable
+    assert socket.calls[0]["open_timeout"] == 4
+    assert socket.calls[0]["close_timeout"] == 5
+    assert socket.closes == 1
+    assert socket.running == set()
+    await gateway.close()
+
+
+async def test_cancelled_waiter_never_touches_active_query() -> None:
+    transport = DiscoveryTransport()
+    socket = LifecycleSocket(pause="receive")
+    sockets = DiscoverySockets(socket)
+    gateway = discovery_adapter(transport, sockets)
+    active = asyncio.create_task(gateway.get_interpreter_bindings("first"))
+    await socket.entered["receive"].wait()
+    waiter = asyncio.create_task(gateway.get_interpreter_bindings("second"))
+    await asyncio.sleep(0)
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    assert not active.done()
+    assert socket.running == {"receive"}
+    socket.release["receive"].set()
+    assert await active == ()
+    assert sockets.calls == 1
+    await gateway.close()
+
+
+async def test_lock_wait_consumes_deadline_without_starting_upstream_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loop = asyncio.get_running_loop()
+    now = loop.time()
+    monkeypatch.setattr(loop, "time", lambda: now)
+    transport = DiscoveryTransport()
+    socket = LifecycleSocket(pause="receive")
+    gateway = discovery_adapter(transport, DiscoverySockets(socket))
+    active = asyncio.create_task(gateway.get_interpreter_bindings("first"))
+    await socket.entered["receive"].wait()
+    waiter = asyncio.create_task(gateway.get_interpreter_bindings("second"))
+    await asyncio.sleep(0)
+    now += 10.01
+    for task in (waiter, active):
+        with pytest.raises(ZeppelinGatewayError) as error:
+            await task
+        assert error.value.tool_error.category == ErrorCategory.TIMEOUT
+    assert "/api/notebook/second" not in transport.paths
+    assert socket.running == set()
+    await gateway.close()
+
+
+@pytest.mark.parametrize("stage", ["http", "connect", "send", "receive", "close", "complete"])
+async def test_shutdown_cancels_active_and_waiting_discovery_and_rejects_new_work(
+    stage: str,
+) -> None:
+    transport = DiscoveryTransport()
+    if stage == "http":
+        transport.pause = "/api/login"
+    socket = LifecycleSocket(pause=stage)
+    gateway = discovery_adapter(transport, DiscoverySockets(socket))
+    active = asyncio.create_task(gateway.get_interpreter_bindings("first"))
+    if stage == "http":
+        await transport.entered["/api/login"].wait()
+    elif stage == "complete":
+        assert await active == ()
+    else:
+        await socket.entered[stage].wait()
+    waiter = asyncio.create_task(gateway.get_interpreter_bindings("second"))
+    close = asyncio.create_task(gateway.close())
+    await asyncio.sleep(0)
+    if stage == "close":
+        socket.release["close"].set()
+    await close
+    if stage != "complete":
+        with pytest.raises(asyncio.CancelledError):
+            await active
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    with pytest.raises(asyncio.CancelledError):
+        await gateway.get_interpreter_bindings("third")
+    await gateway.close()
+    assert transport.closes == 1
+    assert socket.running == set()
+    assert "/api/notebook/second" not in transport.paths
+
+
+@pytest.mark.parametrize("stage", ["connect", "send", "receive"])
+async def test_gateway_caller_cancellation_cleans_socket_and_allows_next_query(stage: str) -> None:
+    transport = DiscoveryTransport()
+    first = LifecycleSocket(pause=stage)
+    second = LifecycleSocket()
+    gateway = discovery_adapter(transport, DiscoverySockets(first, second))
+    task = asyncio.create_task(gateway.get_interpreter_bindings("first"))
+    await first.entered[stage].wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert first.running == set()
+    assert await gateway.get_interpreter_bindings("second") == ()
+    await gateway.close()
+
+
+async def test_shutdown_uses_one_cleanup_allowance_for_socket_and_http(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loop = asyncio.get_running_loop()
+    now = loop.time()
+    monkeypatch.setattr(loop, "time", lambda: now)
+    transport = DiscoveryTransport()
+    transport.pause_close = True
+    socket = LifecycleSocket(pause="close")
+    gateway = discovery_adapter(transport, DiscoverySockets(socket))
+    active = asyncio.create_task(gateway.get_interpreter_bindings("first"))
+    await socket.entered["close"].wait()
+    close = asyncio.create_task(gateway.close())
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    now += 4
+    socket.release["close"].set()
+    await transport.close_entered.wait()
+    now += 1.01
+    for _ in range(30):
+        await asyncio.sleep(0)
+    try:
+        assert close.done(), "socket and HTTP close reset the shutdown allowance"
+    finally:
+        transport.close_release.set()
+        await asyncio.gather(active, close, return_exceptions=True)
+    with pytest.raises(asyncio.CancelledError):
+        await active
+    assert transport.closes == 1
+
+
+class BlockingCloseStream(httpx.AsyncByteStream):
+    def __init__(self) -> None:
+        self.reading = asyncio.Event()
+        self.closing = asyncio.Event()
+        self.release_close = asyncio.Event()
+        self.closed = False
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        self.reading.set()
+        await asyncio.Event().wait()
+        yield b""
+
+    async def aclose(self) -> None:
+        self.closing.set()
+        try:
+            await self.release_close.wait()
+        finally:
+            self.closed = True
+
+
+async def test_cancelling_http_read_bounds_response_stream_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loop = asyncio.get_running_loop()
+    now = loop.time()
+    monkeypatch.setattr(loop, "time", lambda: now)
+    stream = BlockingCloseStream()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=stream)
+
+    gateway = ZeppelinHttpClient(
+        settings=_settings(request_timeout_seconds=10), secrets=_no_secrets(),
+        transport=httpx.MockTransport(handler),
+        websocket_connector=DiscoverySockets(),
+    )
+    task = asyncio.create_task(gateway.get_interpreter_bindings("first"))
+    await stream.reading.wait()
+    task.cancel()
+    await stream.closing.wait()
+    now += 5.01
+    for _ in range(30):
+        await asyncio.sleep(0)
+    try:
+        assert task.done(), "HTTP response stream close outlived its cleanup allowance"
+    finally:
+        stream.release_close.set()
+        await asyncio.gather(task, return_exceptions=True)
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert stream.closed
+    await gateway.close()
+
+
+async def test_caller_cancellation_wins_race_with_completed_gateway_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gateway = discovery_adapter(DiscoveryTransport(), DiscoverySockets())
+
+    async def fail_and_cancel(
+        notebook_id: str, deadline: float, cancelled: asyncio.Event,
+    ) -> tuple[()]:
+        caller.cancel()
+        raise ZeppelinGatewayError(ToolError.create(
+            category=ErrorCategory.CONNECTION_FAILED,
+            operation=ToolOperation.GET_INTERPRETER_BINDINGS,
+            retryable=True,
+        ))
+
+    monkeypatch.setattr(gateway, "_serialized_discovery", fail_and_cancel)
+    caller = asyncio.create_task(gateway.get_interpreter_bindings("first"))
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+    await gateway.close()
+
+
+async def test_shutdown_during_caller_cancellation_joins_http_stream_cleanup() -> None:
+    stream = BlockingCloseStream()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=stream)
+
+    gateway = ZeppelinHttpClient(
+        settings=_settings(), secrets=_no_secrets(), transport=httpx.MockTransport(handler),
+        websocket_connector=DiscoverySockets(),
+    )
+    tasks_before = asyncio.all_tasks()
+    caller = asyncio.create_task(gateway.get_interpreter_bindings("first"))
+    await stream.reading.wait()
+    caller.cancel()
+    await stream.closing.wait()
+    shutdown = asyncio.create_task(gateway.close())
+    for _ in range(20):
+        await asyncio.sleep(0)
+    try:
+        assert not shutdown.done(), "shutdown detached an in-progress HTTP cleanup"
+    finally:
+        stream.release_close.set()
+        await asyncio.gather(caller, shutdown, return_exceptions=True)
+    assert stream.closed
+    assert asyncio.all_tasks() == tasks_before
+
+
+async def test_waiter_cancellation_at_lock_handoff_starts_no_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transport = DiscoveryTransport()
+    first = LifecycleSocket(pause="receive")
+    sockets = DiscoverySockets(first, LifecycleSocket())
+    gateway = discovery_adapter(transport, sockets)
+
+    class HandoffLock(asyncio.Lock):
+        def release(self) -> None:
+            super().release()
+            waiter.cancel()
+
+    monkeypatch.setattr(gateway, "_discovery_lock", HandoffLock())
+    active = asyncio.create_task(gateway.get_interpreter_bindings("first"))
+    await first.entered["receive"].wait()
+    waiter = asyncio.create_task(gateway.get_interpreter_bindings("second"))
+    for _ in range(5):
+        await asyncio.sleep(0)
+    first.release["receive"].set()
+    assert await active == ()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    assert "/api/notebook/second" not in transport.paths
+    assert sockets.calls == 1
+    await gateway.close()
 
 
 async def test_create_notebook_returns_id() -> None:

@@ -32,7 +32,6 @@ class ZeppelinRuntime:
         self._tools = tools
         self._gateway = gateway
         self._redaction_values = tuple(value for value in redaction_values if value)
-        self._closed = False
 
     @property
     def name(self) -> BuiltinPluginName:
@@ -46,9 +45,6 @@ class ZeppelinRuntime:
         self._tools.register_tools(registrar)
 
     async def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
         await self._gateway.close()
 
 

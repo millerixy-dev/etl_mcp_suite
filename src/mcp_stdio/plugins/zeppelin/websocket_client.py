@@ -7,7 +7,7 @@ import json
 import logging
 from collections.abc import Callable, Mapping
 from contextlib import AbstractAsyncContextManager
-from typing import Protocol, cast
+from typing import Protocol, TypeVar, cast, runtime_checkable
 from uuid import uuid4
 
 from websockets.asyncio.client import connect
@@ -34,7 +34,7 @@ class _Connection(Protocol):
     async def recv(self) -> str | bytes: ...
 
 
-class _Connector(Protocol):
+class SocketConnector(Protocol):
     def __call__(
         self,
         url: str,
@@ -57,6 +57,100 @@ class SingleQueryConnection(connect):
 
     def process_redirect(self, exc: Exception) -> Exception:
         return exc
+
+    def abort(self) -> None:
+        if hasattr(self, "connection"):
+            self.connection.transport.abort()
+
+
+@runtime_checkable
+class _Abortable(Protocol):
+    def abort(self) -> None: ...
+
+
+_T = TypeVar("_T")
+
+
+async def await_cleanup(task: asyncio.Future[_T]) -> _T:
+    """Join owned cleanup even on repeated cancellation, then preserve cancellation."""
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled = True
+        except Exception:
+            break
+    if cancelled:
+        # Consume a cleanup failure without replacing the caller's cancellation.
+        if not task.cancelled():
+            task.exception()
+        raise asyncio.CancelledError
+    return task.result()
+
+
+class _BindingQuery:
+    """Own the entire connect/send/receive task and one bounded cleanup task."""
+
+    def __init__(
+        self, context: AbstractAsyncContextManager[_Connection], *, payload: str,
+        max_response_bytes: int, max_opaque_id_chars: int, cleanup_seconds: float,
+    ) -> None:
+        self._context = context
+        self._connection: _Connection | None = None
+        self._cleanup_seconds = cleanup_seconds
+        self._aborted = False
+        self._close_task: asyncio.Task[None] | None = None
+        self.work = asyncio.create_task(self._exchange(
+            payload, max_response_bytes, max_opaque_id_chars,
+        ))
+
+    async def _exchange(
+        self, payload: str, max_response_bytes: int, max_opaque_id_chars: int,
+    ) -> tuple[InterpreterBindingRecord, ...]:
+        self._connection = await self._context.__aenter__()
+        await self._connection.send(payload)
+        return await _receive_bindings(
+            self._connection, max_response_bytes=max_response_bytes,
+            max_opaque_id_chars=max_opaque_id_chars,
+        )
+
+    def _abort(self) -> None:
+        if self._aborted:
+            return
+        self._aborted = True
+        try:
+            if isinstance(self._context, _Abortable):
+                self._context.abort()
+        except Exception:
+            pass
+
+    async def _finish(self) -> None:
+        await asyncio.gather(self.work, return_exceptions=True)
+        if self._connection is None:
+            self._abort()
+        else:
+            await self._context.__aexit__(None, None, None)
+
+    async def _close(self) -> None:
+        if not self.work.done():
+            self.work.cancel()
+        cleanup = asyncio.create_task(self._finish())
+        try:
+            # Shield so expiry can abort before waiting for cancellation to settle.
+            await asyncio.wait_for(asyncio.shield(cleanup), self._cleanup_seconds)
+        except (Exception, asyncio.CancelledError):
+            self._abort()
+            self.work.cancel()
+            cleanup.cancel()
+            await asyncio.gather(self.work, cleanup, return_exceptions=True)
+        finally:
+            self._connection = None
+
+    async def close(self) -> None:
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(self._close())
+        await await_cleanup(self._close_task)
 
 
 class _QueryFailure(Exception):
@@ -83,16 +177,22 @@ async def query_bindings(
     request_timeout_seconds: float,
     operation: ToolOperation,
     identifiers: Mapping[str, str],
-    connector: _Connector = SingleQueryConnection,
+    connector: SocketConnector = SingleQueryConnection,
     msg_id_factory: Callable[[], str] = _message_id,
+    deadline: float | None = None,
 ) -> tuple[InterpreterBindingRecord, ...]:
     """Query using validated adapter-only auth; retain no session state.
 
-    The caller owns the complete discovery deadline. Connection establishment
-    and ordinary context-manager closure use the supplied timeout allowance.
+    An optional absolute loop deadline includes the caller's HTTP and lock work.
+    Cleanup has its own bounded allowance and never replaces a primary failure.
     """
+    remaining = request_timeout_seconds if deadline is None else (
+        deadline - asyncio.get_running_loop().time()
+    )
     try:
-        async with connector(
+        if remaining <= 0:
+            raise asyncio.TimeoutError
+        context = connector(
             url,
             origin=Origin(origin),
             additional_headers=None if cookie_header is None else {"Cookie": cookie_header},
@@ -100,11 +200,13 @@ async def query_bindings(
             compression=None,
             max_queue=1,
             max_size=max_response_bytes,
-            open_timeout=request_timeout_seconds,
+            open_timeout=remaining,
             close_timeout=min(5.0, request_timeout_seconds),
             logger=_transport_logger,
-        ) as connection:
-            await connection.send(json.dumps(
+        )
+        query = _BindingQuery(
+            context,
+            payload=json.dumps(
                 {
                     "op": "GET_INTERPRETER_BINDINGS",
                     "data": {"noteId": notebook_id},
@@ -115,12 +217,15 @@ async def query_bindings(
                 },
                 ensure_ascii=False,
                 separators=(",", ":"),
-            ))
-            return await _receive_bindings(
-                connection,
-                max_response_bytes=max_response_bytes,
-                max_opaque_id_chars=max_opaque_id_chars,
-            )
+            ),
+            max_response_bytes=max_response_bytes,
+            max_opaque_id_chars=max_opaque_id_chars,
+            cleanup_seconds=min(5.0, request_timeout_seconds),
+        )
+        try:
+            return await asyncio.wait_for(asyncio.shield(query.work), remaining)
+        finally:
+            await query.close()
     except _QueryFailure as exc:
         category = exc.category
     except InvalidStatus as exc:
