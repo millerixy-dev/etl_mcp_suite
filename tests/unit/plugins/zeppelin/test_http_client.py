@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 import logging
 from collections.abc import AsyncIterator
@@ -441,6 +442,172 @@ async def test_waiter_cancellation_at_lock_handoff_starts_no_request(
         await waiter
     assert "/api/notebook/second" not in transport.paths
     assert sockets.calls == 1
+    await gateway.close()
+
+
+async def test_http_client_close_has_hard_deadline_when_transport_rejects_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loop = asyncio.get_running_loop()
+    now = loop.time()
+    monkeypatch.setattr(loop, "time", lambda: now)
+    failures: list[dict[str, object]] = []
+    previous_handler = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: failures.append(context))
+
+    class StubbornCloseTransport(DiscoveryTransport):
+        close_task: asyncio.Task[object] | None = None
+
+        async def aclose(self) -> None:
+            self.closes += 1
+            self.close_task = asyncio.current_task()
+            self.close_entered.set()
+            while not self.close_release.is_set():
+                try:
+                    await self.close_release.wait()
+                except asyncio.CancelledError:
+                    continue
+            raise OSError("late close failure")
+
+    transport = StubbornCloseTransport()
+    gateway = discovery_adapter(transport, DiscoverySockets(LifecycleSocket()))
+    assert await gateway.get_interpreter_bindings("first") == ()
+    first = asyncio.create_task(gateway.close())
+    await transport.close_entered.wait()
+    second = asyncio.create_task(gateway.close())
+    await asyncio.sleep(0)
+    now += 5.01
+    for _ in range(30):
+        await asyncio.sleep(0)
+    try:
+        assert first.done() and second.done(), "HTTP close waited past the global deadline"
+        assert transport.close_task is not None and not transport.close_task.done()
+    finally:
+        transport.close_release.set()
+        await asyncio.gather(first, second, return_exceptions=True)
+        for _ in range(10):
+            await asyncio.sleep(0)
+        assert transport.close_task is not None and transport.close_task.done()
+        # Remove the test's own reference so an unobserved late failure is reported.
+        transport.close_task = None
+        gc.collect()
+        loop.set_exception_handler(previous_handler)
+    assert failures == []
+    assert transport.closes == 1
+
+
+class EOFClosingStream(httpx.AsyncByteStream):
+    def __init__(self) -> None:
+        self.closing = asyncio.Event()
+        self.release_close = asyncio.Event()
+        self.closed = False
+        self.aborts = 0
+        self.close_calls = 0
+        self.close_failure: Exception | None = None
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        yield b'{"status":"OK","body":{"id":"first"}}'
+
+    async def aclose(self) -> None:
+        self.close_calls += 1
+        self.closing.set()
+        await self.release_close.wait()
+        if self.close_failure is not None:
+            raise self.close_failure
+        self.closed = True
+
+    def get_extra_info(self, info: str) -> EOFClosingStream | None:
+        return self if info == "socket" else None
+
+    def shutdown(self, how: int) -> None:
+        self.aborts += 1
+        self.closed = True
+        self.release_close.set()
+
+
+@pytest.mark.parametrize("shutdown", [False, True])
+async def test_eof_response_close_is_owned_after_httpx_marks_response_closed(
+    shutdown: bool,
+) -> None:
+    stream = EOFClosingStream()
+    response = httpx.Response(200, stream=stream, extensions={"network_stream": stream})
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return response
+
+    gateway = ZeppelinHttpClient(
+        settings=_settings(), secrets=_no_secrets(), transport=httpx.MockTransport(handler),
+        websocket_connector=DiscoverySockets(),
+    )
+    before = asyncio.all_tasks()
+    caller = asyncio.create_task(gateway.get_interpreter_bindings("first"))
+    await stream.closing.wait()
+    assert response.is_closed and not stream.closed
+    if shutdown:
+        closer = asyncio.create_task(gateway.close())
+    else:
+        caller.cancel()
+        closer = caller
+    for _ in range(20):
+        await asyncio.sleep(0)
+    try:
+        assert not closer.done(), "HTTPX's closed flag detached the actual stream closure"
+    finally:
+        stream.release_close.set()
+        await asyncio.gather(caller, closer, return_exceptions=True)
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+    assert stream.closed
+    assert stream.close_calls == 1
+    await gateway.close()
+    assert asyncio.all_tasks() == before
+
+
+async def test_eof_stream_close_is_force_released_at_cleanup_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loop = asyncio.get_running_loop()
+    now = loop.time()
+    monkeypatch.setattr(loop, "time", lambda: now)
+    stream = EOFClosingStream()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=stream, extensions={"network_stream": stream})
+
+    gateway = ZeppelinHttpClient(
+        settings=_settings(), secrets=_no_secrets(), transport=httpx.MockTransport(handler),
+        websocket_connector=DiscoverySockets(),
+    )
+    caller = asyncio.create_task(gateway.get_interpreter_bindings("first"))
+    await stream.closing.wait()
+    caller.cancel()
+    await asyncio.sleep(0)
+    now += 5.01
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+    assert stream.aborts == 1
+    assert stream.closed
+    assert stream.close_calls == 1
+    await gateway.close()
+
+
+async def test_response_close_failure_aborts_stream_without_replacing_primary_error() -> None:
+    stream = EOFClosingStream()
+    stream.close_failure = OSError("close failed")
+    stream.release_close.set()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, stream=stream, extensions={"network_stream": stream})
+
+    gateway = ZeppelinHttpClient(
+        settings=_settings(), secrets=_no_secrets(), transport=httpx.MockTransport(handler),
+        websocket_connector=DiscoverySockets(),
+    )
+    with pytest.raises(ZeppelinGatewayError) as error:
+        await gateway.get_interpreter_bindings("first")
+    assert error.value.tool_error.category == ErrorCategory.PERMISSION_DENIED
+    assert stream.closed and stream.aborts == 1
+    assert stream.close_calls == 1
     await gateway.close()
 
 

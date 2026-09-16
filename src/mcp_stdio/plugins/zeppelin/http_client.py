@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any, cast
+from socket import SHUT_RDWR
+from typing import Any, Protocol, cast, runtime_checkable
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
@@ -38,6 +40,72 @@ from mcp_stdio.plugins.zeppelin.websocket_client import (
 logger = logging.getLogger("mcp_stdio.zeppelin")
 
 _ZEPPELIN_STATUS_OK = "OK"
+
+# A non-cooperative transport must not hold shutdown open or lose task ownership.
+_http_close_tasks: set[asyncio.Task[None]] = set()
+
+
+def _observe_http_close(task: asyncio.Task[None]) -> None:
+    _http_close_tasks.discard(task)
+    if not task.cancelled():
+        task.exception()
+
+
+@runtime_checkable
+class _NetworkStream(Protocol):
+    def get_extra_info(self, info: str) -> object: ...
+
+
+@runtime_checkable
+class _SocketShutdown(Protocol):
+    def shutdown(self, how: int) -> None: ...
+
+
+@runtime_checkable
+class _SocketClose(Protocol):
+    def close(self) -> None: ...
+
+
+def _abort_http_response(response: httpx.Response) -> None:
+    """Release the response socket through httpcore's network-stream extension."""
+    network = response.extensions.get("network_stream")
+    if not isinstance(network, _NetworkStream):
+        return
+    raw_socket = network.get_extra_info("socket")
+    # asyncio's TransportSocket exposes shutdown but deliberately omits close.
+    if isinstance(raw_socket, _SocketShutdown):
+        try:
+            raw_socket.shutdown(SHUT_RDWR)
+        except OSError:
+            pass
+    if isinstance(raw_socket, _SocketClose):
+        raw_socket.close()
+
+
+class _OwnedResponseStream(httpx.AsyncByteStream):
+    """Own EOF-triggered closure independently of HTTPX's early is_closed flag."""
+
+    def __init__(
+        self, stream: httpx.AsyncByteStream, close: Callable[[], Awaitable[None]],
+    ) -> None:
+        self._stream = stream
+        self._close = close
+        self._close_task: asyncio.Future[None] | None = None
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        async for chunk in self._stream:
+            yield chunk
+
+    async def aclose(self) -> None:
+        if self._close_task is None:
+            self._close_task = asyncio.ensure_future(self._close())
+        await await_cleanup(self._close_task)
+
+    async def finish(self, response: httpx.Response) -> None:
+        try:
+            await response.aclose()
+        finally:
+            await self.aclose()
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -528,19 +596,29 @@ class ZeppelinHttpClient:
             self._client = None
 
     async def _close_http_resource(
-        self, resource: httpx.Response | httpx.AsyncClient, *, deadline: float | None = None,
+        self, resource: httpx.Response | httpx.AsyncClient | httpx.AsyncByteStream, *,
+        deadline: float | None = None, abort: Callable[[], None] | None = None,
     ) -> None:
         remaining = min(5.0, self._settings.request_timeout_seconds) if deadline is None else (
             max(0, deadline - asyncio.get_running_loop().time())
         )
         task = asyncio.create_task(resource.aclose())
+        _http_close_tasks.add(task)
+        task.add_done_callback(_observe_http_close)
         try:
-            # Even with an exhausted allowance, initiate resource closure once.
-            if remaining == 0:
+            # wait_for waits for cancellation acknowledgement and isn't a hard cap.
+            await asyncio.wait((task,), timeout=remaining)
+        finally:
+            failed = task.done() and (task.cancelled() or task.exception() is not None)
+            if (not task.done() or failed) and abort is not None:
+                try:
+                    abort()
+                except Exception:
+                    pass
+            if not task.done():
+                task.cancel()
+                # Give cooperative closers one turn; retain and observe the rest.
                 await asyncio.sleep(0)
-            await asyncio.wait_for(task, remaining)
-        except Exception:
-            pass
 
     def _encode_id(self, opaque_id: str) -> str:
         from urllib.parse import quote
@@ -588,6 +666,14 @@ class ZeppelinHttpClient:
                     client.build_request(method, path, json=json_payload, data=form_data),
                     stream=True,
                 )
+                stream = cast(httpx.AsyncByteStream, response.stream)
+                owned_stream = _OwnedResponseStream(
+                    stream,
+                    lambda: self._close_http_resource(
+                        stream, abort=lambda: _abort_http_response(response),
+                    ),
+                )
+                response.stream = owned_stream
                 try:
                     self._check_http_status(
                         response, operation, identifiers, discovery=True,
@@ -595,7 +681,7 @@ class ZeppelinHttpClient:
                     )
                     content = await self._read_bounded(response, operation, identifiers)
                 finally:
-                    await await_cleanup(asyncio.create_task(self._close_http_resource(response)))
+                    await await_cleanup(asyncio.create_task(owned_stream.finish(response)))
             else:
                 response = await client.request(method, path, json=json_payload, data=form_data)
                 bounded = await self._bound_response(response)

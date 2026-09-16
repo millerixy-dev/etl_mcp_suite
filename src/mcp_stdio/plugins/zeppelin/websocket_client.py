@@ -223,7 +223,11 @@ async def query_bindings(
             cleanup_seconds=min(5.0, request_timeout_seconds),
         )
         try:
-            return await asyncio.wait_for(asyncio.shield(query.work), remaining)
+            # Await the owned task without wait_for's pre-3.12 result/cancel race.
+            done, _ = await asyncio.wait((query.work,), timeout=remaining)
+            if not done:
+                raise asyncio.TimeoutError
+            return query.work.result()
         finally:
             await query.close()
     except _QueryFailure as exc:

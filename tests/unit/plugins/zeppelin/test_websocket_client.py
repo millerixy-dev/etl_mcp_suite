@@ -565,3 +565,18 @@ async def test_abort_unblocks_receive_that_does_not_immediately_acknowledge_canc
     assert socket.aborts == 1
     assert socket.running == set()
     assert asyncio.all_tasks() == tasks_before
+
+
+async def test_helper_cancellation_same_tick_as_receive_completion_is_preserved() -> None:
+    class CompletingSocket(LifecycleSocket):
+        async def recv(self) -> str:
+            asyncio.get_running_loop().call_soon(caller.cancel)
+            return response([])
+
+    socket = CompletingSocket()
+    before = asyncio.all_tasks()
+    caller = asyncio.create_task(lifecycle_query(socket))
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+    assert socket.closes == 1
+    assert asyncio.all_tasks() == before
