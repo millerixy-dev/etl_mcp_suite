@@ -264,3 +264,39 @@
 - Also run: `uv run --locked ruff check src/mcp_stdio/plugins/zeppelin/websocket_client.py src/mcp_stdio/plugins/zeppelin/http_client.py tests/unit/plugins/zeppelin/test_websocket_client.py tests/unit/plugins/zeppelin/test_http_client.py`
 - Also run scoped Pyright over changed production modules and new/changed test regions; report existing full-suite diagnostics separately.
 - Commit the task with a focused message and write TDD evidence to the assigned implementation report.
+
+### Task 8: OpenSpec 4.1 — Public discovery service use case
+
+**OpenSpec task:** `4.1 Write and run service-fake failing tests for input validation, discovery without execution/restart permission, local restart_allowed decoration, exact result-byte bounds, and safe operation attribution. Implement the discovery service use case and refactor.`
+
+**Files:**
+
+- Modify: `tests/unit/plugins/zeppelin/test_service.py`
+- Modify: `src/mcp_stdio/plugins/zeppelin/service.py`
+- Modify: `src/mcp_stdio/plugins/zeppelin/plugin.py` only to pass the existing `max_result_bytes` setting into the service constructor.
+- Do not import HTTP/WebSocket modules into service or add MCP tool wiring.
+
+**RED:**
+
+1. Add service-fake tests for `get_interpreter_bindings(notebook_id)` validating strict non-empty/control-free opaque IDs bounded by `max_opaque_id_chars`, preserving numeric-leading/reserved syntax, and making zero gateway calls on invalid input.
+2. Prove discovery works with empty paragraph execution and restart allowlists; every valid upstream binding remains visible in original order with `restart_allowed=false` and no restart/paragraph call.
+3. Prove exact case-sensitive local ID membership sets `restart_allowed` independently per binding, without using setting name, interpreter names, group inference, selection, or upstream permission assumptions.
+4. Prove empty upstream records return `InterpreterBindingsResult(notebook_id=..., bindings=())`, while gateway failures retain operation `get_interpreter_bindings`, safe notebook identifier filtering, category, and retryability.
+5. Build compact `ensure_ascii=False` JSON test fixtures at exactly `max_result_bytes` and one byte over, including multibyte characters. Exact fit succeeds; overflow returns non-retryable `UNEXPECTED_RESPONSE` attributed to discovery without truncating/skipping entries.
+6. Assert public result fields are exact, immutable, JSON serializable, and contain no transport/auth fields.
+7. Run `uv run --locked pytest tests/unit/plugins/zeppelin/test_service.py -q` and retain functional RED before production edits.
+
+**GREEN / REFACTOR:**
+
+1. Add an async service method that validates notebook input, calls only `gateway.get_interpreter_bindings`, decorates each immutable record into `InterpreterBinding` using exact local allowlist membership, and returns `InterpreterBindingsResult`.
+2. Add `max_result_bytes` to the service's validated constructor inputs and plugin composition. Do not couple it to transport response limits.
+3. Serialize the complete public result compactly as UTF-8 with `ensure_ascii=False`; accept exact fit and fail the whole call with safe `UNEXPECTED_RESPONSE` on overflow.
+4. Use fixed safe errors and `safe_error_identifiers` for caller IDs longer than the core public limit; do not catch or relabel gateway errors that already carry the correct discovery attribution.
+5. Keep service imports limited to domain/gateway/core safety modules.
+
+**Verification:**
+
+- Required: `uv run --locked pytest tests/unit/plugins/zeppelin/test_service.py -q`
+- Also run: `uv run --locked ruff check src/mcp_stdio/plugins/zeppelin/service.py src/mcp_stdio/plugins/zeppelin/plugin.py tests/unit/plugins/zeppelin/test_service.py`
+- Also run scoped Pyright over changed production modules and service tests; report pre-existing diagnostics separately.
+- Commit the task with a focused message and write TDD evidence to the assigned implementation report.

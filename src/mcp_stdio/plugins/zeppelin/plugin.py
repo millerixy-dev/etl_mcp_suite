@@ -84,6 +84,7 @@ def _create_runtime(
         max_paragraph_title_chars=loaded.settings.max_paragraph_title_chars,
         max_paragraph_body_bytes=loaded.settings.max_paragraph_body_bytes,
         max_opaque_id_chars=loaded.settings.max_opaque_id_chars,
+        max_result_bytes=loaded.settings.max_result_bytes,
     )
     secrets = _secret_values(loaded.secrets)
     tools = ZeppelinToolAdapter(service=service, secret_values=secrets)

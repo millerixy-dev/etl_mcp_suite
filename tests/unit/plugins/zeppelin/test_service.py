@@ -3,14 +3,23 @@
 from __future__ import annotations
 
 import inspect
+import json
 
 import pytest
+from pydantic import ValidationError
 
-from mcp_stdio.core.errors import ErrorCategory
+from mcp_stdio.core.errors import (
+    ErrorCategory,
+    ToolError,
+    ToolOperation,
+    safe_error_identifiers,
+)
 from mcp_stdio.plugins.zeppelin.gateway import ZeppelinGatewayError
 from mcp_stdio.plugins.zeppelin.models import (
     CancelParagraphResult,
+    InterpreterBinding,
     InterpreterBindingRecord,
+    InterpreterBindingsResult,
     NotebookTreeNode,
     OutputItem,
     OutputKind,
@@ -38,6 +47,7 @@ class FakeGateway:
         self.result_error: SafeErrorDetail | None = None
         self.result_truncated = False
         self.binding_result: tuple[InterpreterBindingRecord, ...] = ()
+        self.binding_error: ZeppelinGatewayError | None = None
 
     async def list_notebooks(self) -> tuple[NotebookTreeNode, ...]:
         self.calls.append(("list_notebooks",))
@@ -75,6 +85,8 @@ class FakeGateway:
         self, notebook_id: str
     ) -> tuple[InterpreterBindingRecord, ...]:
         self.calls.append(("get_interpreter_bindings", notebook_id))
+        if self.binding_error is not None:
+            raise self.binding_error
         return self.binding_result
 
     async def restart_interpreter(
@@ -99,6 +111,7 @@ def _service(
     max_paragraph_title_chars: int = 256,
     max_paragraph_body_bytes: int = 65_536,
     max_opaque_id_chars: int = 512,
+    max_result_bytes: int = 65_536,
     sql_write_allowed_databases: tuple[str, ...] = ("tmp_dc_ep",),
     sh_allowed_commands: tuple[str, ...] = (),
     sql_forbidden_keywords: tuple[str, ...] = ("DROP", "TRUNCATE"),
@@ -119,8 +132,17 @@ def _service(
         max_paragraph_title_chars=max_paragraph_title_chars,
         max_paragraph_body_bytes=max_paragraph_body_bytes,
         max_opaque_id_chars=max_opaque_id_chars,
+        max_result_bytes=max_result_bytes,
     )
     return service, gateway
+
+
+def _compact_result_bytes(result: InterpreterBindingsResult) -> bytes:
+    return json.dumps(
+        result.model_dump(mode="json"),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
 
 
 def test_gateway_contract_has_discovery_and_optional_notebook_restart_signatures() -> None:
@@ -135,6 +157,242 @@ def test_gateway_contract_has_discovery_and_optional_notebook_restart_signatures
         assert list(restart.parameters) == ["self", "setting_id", "notebook_id"]
         assert restart.parameters["setting_id"].default is inspect.Parameter.empty
         assert restart.parameters["notebook_id"].default is None
+
+
+@pytest.mark.parametrize("notebook_id", [None, "", "bad\ncontrol", "12345"])
+async def test_get_interpreter_bindings_rejects_invalid_id_before_network(
+    notebook_id: object,
+) -> None:
+    service, gateway = _service(max_opaque_id_chars=4)
+
+    with pytest.raises(ZeppelinGatewayError) as exc_info:
+        await service.get_interpreter_bindings(notebook_id)
+
+    assert exc_info.value.tool_error.category is ErrorCategory.INVALID_INPUT
+    assert exc_info.value.tool_error.operation is ToolOperation.GET_INTERPRETER_BINDINGS
+    assert exc_info.value.tool_error.retryable is False
+    assert gateway.calls == []
+
+
+async def test_get_interpreter_bindings_preserves_numeric_and_reserved_id() -> None:
+    service, gateway = _service(max_opaque_id_chars=64)
+    notebook_id = "2AY6/path?x=1#frag"
+
+    result = await service.get_interpreter_bindings(notebook_id)
+
+    assert result.notebook_id == notebook_id
+    assert gateway.calls == [("get_interpreter_bindings", notebook_id)]
+
+
+async def test_get_interpreter_bindings_needs_no_execution_or_restart_permission() -> None:
+    service, gateway = _service(
+        allowed_interpreters=(),
+        restartable_interpreter_settings=(),
+    )
+    gateway.binding_result = (
+        InterpreterBindingRecord(
+            setting_id="spark_prod",
+            name="production spark",
+            interpreters=("spark", "sql"),
+            selected=True,
+        ),
+        InterpreterBindingRecord(
+            setting_id="sh",
+            name="shell",
+            interpreters=("sh",),
+            selected=False,
+        ),
+    )
+
+    result = await service.get_interpreter_bindings("note-1")
+
+    assert tuple(binding.setting_id for binding in result.bindings) == (
+        "spark_prod",
+        "sh",
+    )
+    assert tuple(binding.restart_allowed for binding in result.bindings) == (False, False)
+    assert gateway.calls == [("get_interpreter_bindings", "note-1")]
+
+
+async def test_get_interpreter_bindings_decorates_exact_case_sensitive_id_membership() -> None:
+    service, gateway = _service(
+        allowed_interpreters=(),
+        restartable_interpreter_settings=("Allowed-ID", "2/id?x=1"),
+    )
+    gateway.binding_result = (
+        InterpreterBindingRecord(
+            setting_id="Allowed-ID",
+            name="unrelated",
+            interpreters=("other",),
+            selected=False,
+        ),
+        InterpreterBindingRecord(
+            setting_id="allowed-id",
+            name="Allowed-ID",
+            interpreters=("Allowed-ID",),
+            selected=True,
+        ),
+        InterpreterBindingRecord(
+            setting_id="2/id?x=1",
+            name="opaque",
+            interpreters=(),
+            selected=False,
+        ),
+    )
+
+    result = await service.get_interpreter_bindings("note-1")
+
+    assert tuple(binding.restart_allowed for binding in result.bindings) == (
+        True,
+        False,
+        True,
+    )
+
+
+async def test_get_interpreter_bindings_preserves_empty_upstream_result() -> None:
+    service, gateway = _service()
+
+    result = await service.get_interpreter_bindings("note-empty")
+
+    assert result == InterpreterBindingsResult(notebook_id="note-empty", bindings=())
+    assert gateway.calls == [("get_interpreter_bindings", "note-empty")]
+
+
+async def test_get_interpreter_bindings_preserves_gateway_error_metadata() -> None:
+    service, gateway = _service()
+    upstream_error = ToolError.create(
+        category=ErrorCategory.CONNECTION_FAILED,
+        operation=ToolOperation.GET_INTERPRETER_BINDINGS,
+        retryable=True,
+        identifiers={"notebook_id": "note-1"},
+    )
+    gateway.binding_error = ZeppelinGatewayError(upstream_error)
+
+    with pytest.raises(ZeppelinGatewayError) as exc_info:
+        await service.get_interpreter_bindings("note-1")
+
+    assert exc_info.value.tool_error is upstream_error
+
+
+async def test_get_interpreter_bindings_omits_long_id_from_gateway_error() -> None:
+    notebook_id = "n" * 257
+    service, gateway = _service(max_opaque_id_chars=512)
+    upstream_error = ToolError.create(
+        category=ErrorCategory.TIMEOUT,
+        operation=ToolOperation.GET_INTERPRETER_BINDINGS,
+        retryable=True,
+        identifiers=safe_error_identifiers(
+            ToolOperation.GET_INTERPRETER_BINDINGS,
+            {"notebook_id": notebook_id},
+        ),
+    )
+    gateway.binding_error = ZeppelinGatewayError(upstream_error)
+
+    with pytest.raises(ZeppelinGatewayError) as exc_info:
+        await service.get_interpreter_bindings(notebook_id)
+
+    error = exc_info.value.tool_error
+    assert error.operation is ToolOperation.GET_INTERPRETER_BINDINGS
+    assert error.category is ErrorCategory.TIMEOUT
+    assert error.retryable is True
+    assert dict(error.identifiers) == {}
+
+
+async def test_get_interpreter_bindings_accepts_exact_compact_utf8_result_size() -> None:
+    record = InterpreterBindingRecord(
+        setting_id="spark-数",
+        name="计算",
+        interpreters=("spark",),
+        selected=True,
+    )
+    expected = InterpreterBindingsResult(
+        notebook_id="note-数",
+        bindings=(
+            InterpreterBinding(
+                **record.model_dump(),
+                restart_allowed=True,
+            ),
+        ),
+    )
+    exact_bytes = len(_compact_result_bytes(expected))
+    service, gateway = _service(
+        restartable_interpreter_settings=(record.setting_id,),
+        max_result_bytes=exact_bytes,
+    )
+    gateway.binding_result = (record,)
+
+    result = await service.get_interpreter_bindings(expected.notebook_id)
+
+    assert result == expected
+    assert len(_compact_result_bytes(result)) == exact_bytes
+
+
+async def test_get_interpreter_bindings_rejects_complete_result_one_byte_over_limit() -> None:
+    record = InterpreterBindingRecord(
+        setting_id="spark-数",
+        name="计算",
+        interpreters=("spark",),
+        selected=True,
+    )
+    expected = InterpreterBindingsResult(
+        notebook_id="note-数",
+        bindings=(
+            InterpreterBinding(
+                **record.model_dump(),
+                restart_allowed=False,
+            ),
+        ),
+    )
+    exact_bytes = len(_compact_result_bytes(expected))
+    service, gateway = _service(max_result_bytes=exact_bytes - 1)
+    gateway.binding_result = (record,)
+
+    with pytest.raises(ZeppelinGatewayError) as exc_info:
+        await service.get_interpreter_bindings(expected.notebook_id)
+
+    error = exc_info.value.tool_error
+    assert error.category is ErrorCategory.UNEXPECTED_RESPONSE
+    assert error.operation is ToolOperation.GET_INTERPRETER_BINDINGS
+    assert error.retryable is False
+    assert dict(error.identifiers) == {"notebook_id": expected.notebook_id}
+    assert gateway.calls == [("get_interpreter_bindings", expected.notebook_id)]
+
+
+async def test_get_interpreter_bindings_public_result_is_exact_immutable_json() -> None:
+    service, gateway = _service(restartable_interpreter_settings=("spark_prod",))
+    gateway.binding_result = (
+        InterpreterBindingRecord(
+            setting_id="spark_prod",
+            name="production",
+            interpreters=("spark", "sql"),
+            selected=True,
+        ),
+    )
+
+    result = await service.get_interpreter_bindings("note-1")
+    public = result.model_dump(mode="json")
+
+    assert set(public) == {"notebook_id", "bindings"}
+    assert set(public["bindings"][0]) == {
+        "setting_id",
+        "name",
+        "interpreters",
+        "selected",
+        "restart_allowed",
+    }
+    assert {
+        "ticket",
+        "principal",
+        "roles",
+        "cookie",
+        "headers",
+        "transport",
+    }.isdisjoint(public["bindings"][0])
+    assert json.loads(_compact_result_bytes(result)) == public
+    with pytest.raises(ValidationError):
+        result.__setattr__("notebook_id", "changed")
+    with pytest.raises(ValidationError):
+        result.bindings[0].__setattr__("selected", False)
 
 
 async def test_create_notebook_returns_result() -> None:
