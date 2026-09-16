@@ -1,7 +1,7 @@
 ## 1. Shared contracts and setting-ID validation
 
 - [x] 1.1 Following Apply preflight, write and run failing tests for opaque restart IDs (including numeric-leading/reserved characters), exact allowlist comparison, cross-field ID length, no scalar coercion, JSON-array env overrides, and unchanged paragraph interpreter validation; implement the minimal config/model changes and refactor with tests green. Verify with `uv run --locked pytest tests/unit/plugins/zeppelin/test_config.py tests/unit/plugins/zeppelin/test_models.py -q`.
-- [ ] 1.2 Write and run failing tests for immutable `InterpreterBinding`/`InterpreterBindingsResult`, their exact fields/types/limits, the gateway's new discovery and optional notebook restart signatures, and safe operation/identifier mappings (including IDs exceeding the core limit); implement those shared contracts and update fake gateways so existing tests stay green. Verify with `uv run --locked pytest tests/unit/core/test_errors.py tests/unit/plugins/zeppelin/test_models.py tests/unit/plugins/zeppelin/test_service.py -q`. Keep shared-contract work serial.
+- [x] 1.2 Write and run failing tests for immutable `InterpreterBinding`/`InterpreterBindingsResult`, their exact fields/types/limits, the gateway's new discovery and optional notebook restart signatures, and safe operation/identifier mappings (including IDs exceeding the core limit); implement those shared contracts and update fake gateways so existing tests stay green. Verify with `uv run --locked pytest tests/unit/core/test_errors.py tests/unit/plugins/zeppelin/test_models.py tests/unit/plugins/zeppelin/test_service.py -q`. Keep shared-contract work serial.
 
 ## 2. Session and notebook discovery prerequisites
 
