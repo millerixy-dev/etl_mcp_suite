@@ -4,7 +4,7 @@
 
 一个轻量级、基于插件的 MCP（Model Context Protocol）stdio Server。每个子进程只加载一个内置插件，并且只向 MCP Host 暴露该插件的工具。
 
-内置插件包括：用于只读 HiveServer2 元数据查询（数据库、表、字段、分区与可选 DDL）的 **Hive schema plugin**、用于 **Zeppelin 笔记本执行**的插件，以及用于 **DolphinScheduler 调度**的插件。
+内置插件包括：用于只读 HiveServer2 元数据查询（数据库、表、字段、分区与可选 DDL）的 **Hive schema plugin**、**Zeppelin 笔记本执行**、**DolphinScheduler 调度**，以及 **Spark event log 下载**。
 
 ## 前置条件
 
@@ -531,9 +531,98 @@ uv run mcp-stdio --plugin dolphinscheduler \
 
 该进程暴露 `get_server_status`、`list_objects`、`get_object`、`search_objects`、`start_workflow`、`get_task_log` 与 `extract_log_links`。`start_workflow` 在 `dry_run=0` 时会启动工作流；使用 `dry_run=1` 可只做校验、不实际执行，实际启动前必须获得用户批准。其余工具均为只读；结果和任务日志均有边界，服务不提供对象创建、更新、删除、暂停、恢复或停止操作。
 
+## Spark event log 下载
+
+Spark 只暴露 `fetch_spark_event_log(application_id, attempt_id=None, refresh=False)`。
+它下载配置的 Spark History Server ZIP，校验身份、CRC 和 JSONL，脱敏后保存 JSONL 与一份
+清单，后续诊断工具直接读取本地路径。首版格式以已验证的 Spark 2.4.7 单文件 JSONL 为依据。
+
+| 参数 | 默认值 | 含义 |
+| --- | --- | --- |
+| application_id | 必填 | YARN ID，例如 `application_1700000000000_0042` |
+| attempt_id | null | 指定 attempt；省略时下载上游提供的全部 attempts |
+| refresh | false | 默认复用；true 重新下载到新目录 |
+
+未知参数和非法原始类型会被拒绝，错误不回显参数值。调用者不能指定 URL、输出目录、
+凭据或关闭 TLS 校验。
+
+| 设置 | 默认值 | 含义 |
+| --- | --- | --- |
+| history_server_url | 必填 | HTTPS 根地址，保留网关路径，不带 `/api/v1`、凭据或 query |
+| cache_dir | 必填 | 绝对专用本地目录；支持 POSIX macOS/Linux |
+| ca_bundle_path | null | 私有证书所需的可信可读 PEM CA |
+| request_timeout_seconds | 300 | 整个调用含查缓存、排队和处理的时间预算，最多 900 秒 |
+| max_bytes | 268435456 | 分别限制 ZIP、展开源文件总量和输出 JSONL 总量 |
+
+使用 [spark.yaml](docs/examples/spark.yaml) 或 [spark.json](docs/examples/spark.json)。
+通过安全环境注入已有登录 Cookie 到 `SPARK_GATEWAY_COOKIE`，配置文件只写变量名。
+匿名部署可以省略 secret 引用。私有证书需提供可信 CA；工具不会自动登录或绕过证书校验。
+
+```sh
+uv run --locked mcp-stdio --plugin spark --config docs/examples/spark.yaml
+```
+
+只用环境变量启动：
+
+```sh
+export SPARK_HISTORY_SERVER_URL='https://history.example.invalid:8443/gateway/analytics/sparkhistory'
+export SPARK_CACHE_DIR='/var/tmp/mcp-spark-l3'
+export SPARK_CA_BUNDLE_PATH='/etc/mcp/spark-ca.pem'
+# SPARK_GATEWAY_COOKIE 已安全注入；可选覆盖：
+# SPARK_REQUEST_TIMEOUT_SECONDS、SPARK_MAX_BYTES。
+uv run --locked mcp-stdio --plugin spark
+```
+
+MCP host 使用前文的已安装 release 入口，通过 host 的安全环境向子进程传入 Cookie：
+
+```json
+{
+  "mcpServers": {
+    "spark": {
+      "command": "/absolute/path/to/hive-cli-mcp-stdio-prod/current/venv/bin/mcp-stdio",
+      "args": ["--plugin", "spark", "--config", "/absolute/path/to/spark.yaml"]
+    }
+  }
+}
+```
+
+本地 MCP 是 stdio，HTTPS 是向 History Server 发起的上游连接。host 的工具超时应大于
+配置的整次调用预算。
+
+结果字段为 `application_id`、`requested_attempt_id`、`cache_hit`、`downloaded_at`、
+`manifest_path`、`files`。每个文件记录 `attempt_id`、`local_path`、`spark_version`、
+`size_bytes`、`sha256`、`source_sha256`、`event_count`、`application_end_seen`。
+两个摘要分别对应脱敏输出和原始成员字节；ApplicationEnd 不代表 YARN 最终状态。
+
+JSONL 在下载后的校验/脱敏阶段生成于私有暂存目录。全部成员通过后移除 ZIP，
+将整个目录 rename 发布到：
+
+```text
+<cache_dir>/<application_id>/all|attempt-<id>/<random-id>/
+  eventlog-0001.jsonl
+  manifest.json
+```
+
+清单包含结果中除 `cache_hit` 外的字段，以及 `format_version=1` 和规范化源地址。
+不保留原始 ZIP、未脱敏 JSON、索引或摘要旁车文件。事件行序和数值指标保留；
+凭据字段及白名单以外的环境属性脱敏。压缩/滚动 event log 和损坏尾行直接报错。
+
+只有同来源、同 attempt 选择且文件摘要正确才命中，保留原下载时间且不联网；
+缓存不保证上游最新性。refresh 产生新目录，旧证据保留。目录跨会话存在，直到你手工清理，
+首版没有 TTL、去重或 GC。同根目录只能由一个活动进程使用。失败、取消和正常关闭清理
+本次暂存目录；强杀残留的 `.part-*` 不参与复用，可手工清理。
+
+真实下载测试需要显式设置 `MCP_STDIO_SPARK_INTEGRATION=1`、
+`MCP_STDIO_SPARK_APPLICATION_ID`、可选 `MCP_STDIO_SPARK_ATTEMPT_ID` 和
+SPARK URL/cache/Cookie/CA 部署环境，再运行：
+
+```sh
+uv run --locked pytest -m integration tests/integration/test_spark_server.py
+```
+
 ## 进程隔离
 
-每个 `mcp-stdio` 进程只加载一个插件。各进程不共享内存、凭据、连接、缓存或可变运行时状态。某个插件进程失败时，独立启动的其他插件进程不受影响。
+每个 `mcp-stdio` 进程只加载一个插件。各进程不共享内存、凭据、连接、活动缓存或可变运行时状态。Spark 的持久证据允许前一目录所有者退出后被后续进程复用。某个插件进程失败时，独立启动的其他插件进程不受影响。
 
 ## 工具错误
 

@@ -165,3 +165,13 @@ Live test requires explicit gate, application ID and SPARK deployment URL/cache/
 3. VERIFY: same command; focused lint/type checks. Stdio asserts protocol-only stdout, sanitized error/results, no raw ZIP and released root lock.
 4. COMMIT: `git add src/mcp_stdio/plugins/spark/cache.py tests/contract/test_spark_stdio.py tests/unit/plugins/spark/test_cache.py tests/integration openspec/changes/add-spark-event-log-download`; `git commit -m "test(spark): verify stdio acquisition and shutdown lifecycle"`.
 Self-review 3.3: transport/file matrices stay in unit tests; live download is never enabled implicitly.
+
+## Task 4.1 — Usage, configuration and architecture documentation
+
+Files: README.md, README.zh-CN.md, docs/examples/spark.{yaml,json}, docs/architecture/{runtime-flow,modules}.md, AGENTS.md; tests/unit/plugins/spark/test_config.py.
+Consumes implemented settings/tool/result contracts. Produces equivalent executable examples and coherent four-plugin documentation.
+1. RED: add example-loading test with cache/env overrides and synthetic Cookie, run `PYTHONPATH=src uv run --locked pytest tests/unit/plugins/spark/test_config.py --tb=short -q`; expected missing Spark examples.
+2. EDIT: add five-setting table, file/env-only/host launch, fetch/refresh contract, output example, provenance/redaction/retention and opt-in instructions. Update process topology and Spark ownership/modules; correct stale DolphinScheduler delivery descriptions while touching the topology.
+3. VERIFY: run the configuration test and strict change validation; manually compare documented fields, defaults, paths, transport and cleanup to design/specs. No code behavior is changed in this task.
+4. COMMIT: `git add README.md README.zh-CN.md docs/examples/spark.yaml docs/examples/spark.json docs/architecture AGENTS.md tests/unit/plugins/spark/test_config.py openspec/changes/add-spark-event-log-download`; `git commit -m "docs(spark): document event log acquisition and local evidence"`.
+Self-review 4.1: examples use placeholders, optional CA and environment secret names; no live fixture or credential values.

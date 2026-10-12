@@ -10,6 +10,7 @@ The active OpenSpec change remains normative:
 - `openspec/specs/plugin-stdio-runtime/spec.md` (synced main spec)
 - `openspec/changes/build-plugin-mcp-stdio/` (multi-plugin runtime, partially deferred)
 - `openspec/changes/deliver-zeppelin-plugin-slice/` (Zeppelin notebook tools and write-safety)
+- `openspec/changes/add-spark-event-log-download/` (Spark acquisition, local evidence and raw argument validation)
 
 If this document differs from an active OpenSpec artifact, update the OpenSpec artifact first and then synchronize this explanation.
 
@@ -26,13 +27,17 @@ MCP Host
 ├── mcp-stdio --plugin zeppelin [--config zeppelin.yaml]   # --config optional; ZEPPELIN_* env vars may supply everything
 │     └── Zeppelin plugin ── HTTP / WebSocket ── Zeppelin Server
 │
-└── mcp-stdio --plugin dolphinscheduler --config dolphinscheduler.json   (deferred)
-      └── DolphinScheduler plugin ── REST ── DolphinScheduler             (deferred)
+├── mcp-stdio --plugin dolphinscheduler [--config dolphinscheduler.json]
+│     └── DolphinScheduler plugin ── REST ── DolphinScheduler
+│
+└── mcp-stdio --plugin spark [--config spark.yaml]
+      └── Spark plugin ── HTTPS ── Spark History Server
+            └── private local JSONL + manifest (persistent L3)
 ```
 
-Every child process has its own stdin/stdout MCP channel, configuration, secrets, clients, caches, failures, and shutdown lifecycle. Processes share installed package files only.
+Every child process owns its stdio channel, configuration, credentials, clients and live state. Spark permits sequential reuse of a dedicated persistent directory after the previous owner exits; a root lock prevents concurrent owners, and source/request matching prevents cross-source adoption.
 
-The Hive plugin ships via `deliver-hive-plugin-slice` and the Zeppelin plugin via `deliver-zeppelin-plugin-slice`; both are delivered. The DolphinScheduler process remains deferred; its registry loader is a placeholder that rejects runtime construction until implemented.
+The fixed registry contains the delivered Hive, Zeppelin, DolphinScheduler and Spark plugins. Every process loads only its selected plugin.
 
 ## Startup Flow
 
@@ -96,6 +101,8 @@ sequenceDiagram
 ```
 
 The application service does not know about FastMCP, PyHive, or HTTP. It works with domain models and gateway interfaces, which allows unit tests to use fake gateways.
+
+Before SDK argument preprocessing, the stdio boundary validates the original argument dictionary against the declared tool model. Unknown arguments and strict-type violations yield fixed INVALID_INPUT errors without input values. tools/list publishes closed input schemas.
 
 ## Hive Request Flow
 
@@ -165,7 +172,7 @@ Local MCP transport remains JSON-RPC over stdio. HTTP and WebSocket are outgoing
 
 ## DolphinScheduler Request Flow
 
-The v1 DolphinScheduler plugin exposes only `get_server_status`. This plugin is **deferred** to a follow-up change; the flow below describes the planned behavior for reference.
+The delivered DolphinScheduler plugin exposes get_server_status, list_objects, get_object, search_objects, start_workflow, get_task_log and extract_log_links. Its status flow is:
 
 ```text
 get_server_status
@@ -176,7 +183,25 @@ get_server_status
   -> discard raw headers, cookies, tokens, and unbounded bodies
 ```
 
-The MCP caller cannot select an HTTP method, URL, path, headers, or body. Workflow operations are not registered.
+The MCP caller cannot select an HTTP method, URL, path or headers. Scheduling inputs follow the active scheduling capability specs.
+
+## Spark Request Flow
+
+```text
+fetch_spark_event_log(application_id, attempt_id=None, refresh=False)
+  -> strict input validation and one total deadline
+  -> exact source/application/attempt lookup unless refresh=true
+  -> verified cache hit returns existing paths and original download time
+  -> otherwise serialize one bounded HTTPS GET with environment Cookie
+  -> private .part directory: ZIP CRC/JSONL/identity validation and credential redaction
+  -> source/output digests, event counts and ApplicationEnd observation
+  -> write one manifest, remove ZIP, rename the whole directory
+  -> return JSONL + manifest paths
+```
+
+Startup acquires a local exclusive directory lock without connecting upstream. TLS stays verified with optional trusted CA; redirects, ambient proxy/CA overrides and automatic login/retries are excluded. All available attempts are separate files; none is automatically selected as latest. Malformed tails and compressed/rolling event logs fail.
+
+Evidence persists until user cleanup. Refresh creates another directory; there is no TTL, deduplication or GC. Cancellation/failure deletes only the call's unpublished directory. Shutdown cancels and awaits owned acquisition workers before closing the HTTP client and releasing the root lock. Force-kill remnants are ignored .part directories for manual cleanup.
 
 ## Error Flow
 
@@ -230,4 +255,4 @@ The implementation must provide automated evidence for:
 - Hive connection isolation and cache behavior;
 - subprocess startup and shutdown behavior.
 
-Zeppelin interpreter denial and write-safety gating are verified. DolphinScheduler status-only access is required once that deferred plugin ships.
+Zeppelin write-safety and DolphinScheduler scheduling contracts have their own suites. Spark adds synthetic archive/redaction, exact cache-scope/lock, real stdio download/reuse and opt-in live-download checks.

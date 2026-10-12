@@ -8,7 +8,7 @@ plugin's tools to an MCP host.
 
 The built-in plugins are the **Hive schema plugin** for read-only HiveServer2
 metadata inspection (databases, tables, columns, partitions, and optional DDL),
-**Zeppelin notebook execution**, and **DolphinScheduler scheduling**.
+**Zeppelin notebook execution**, **DolphinScheduler scheduling**, and **Spark event-log download**.
 
 ## Requirements
 
@@ -596,10 +596,107 @@ The remaining tools are read-only. Results and task logs are bounded, and the
 server does not expose object create, update, delete, pause, resume, or stop
 operations.
 
+## Spark event log download
+
+Spark exposes exactly `fetch_spark_event_log(application_id, attempt_id=None, refresh=False)`.
+It downloads the configured Spark History Server logs ZIP, validates identities/CRC/JSONL,
+redacts credentials and saves local JSONL files plus one manifest for later diagnosis tools.
+The first format target is the verified Spark 2.4.7 single-file JSONL layout.
+
+| Input | Default | Meaning |
+| --- | --- | --- |
+| application_id | required | YARN ID such as `application_1700000000000_0042` |
+| attempt_id | null | Exact attempt; omitted requests all available attempt logs |
+| refresh | false | Reuse matching saved files; true downloads to a new directory |
+
+Unknown arguments and invalid raw types are rejected without echoing argument values.
+No caller URL, output path, credentials or TLS bypass is supported.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| history_server_url | required | HTTPS root including the gateway mount, without `/api/v1`, credentials or query |
+| cache_dir | required | Absolute dedicated local directory; POSIX macOS/Linux |
+| ca_bundle_path | null | Optional readable trusted PEM CA for private certificates |
+| request_timeout_seconds | 300 | Whole-call budget, including lookup, queueing and processing (maximum 900) |
+| max_bytes | 268435456 | Independently bounds ZIP bytes, expanded input and output JSONL totals |
+
+Use [spark.yaml](docs/examples/spark.yaml) or [spark.json](docs/examples/spark.json).
+Safely inject an existing login Cookie into `SPARK_GATEWAY_COOKIE`; configuration contains
+only its environment-variable name. Anonymous deployments may omit the secret reference.
+Private certificates require a trusted CA; the tool never disables verification or logs in.
+
+```sh
+uv run --locked mcp-stdio --plugin spark --config docs/examples/spark.yaml
+```
+
+Environment-only startup uses the same field names with the SPARK prefix:
+
+```sh
+export SPARK_HISTORY_SERVER_URL='https://history.example.invalid:8443/gateway/analytics/sparkhistory'
+export SPARK_CACHE_DIR='/var/tmp/mcp-spark-l3'
+export SPARK_CA_BUNDLE_PATH='/etc/mcp/spark-ca.pem'
+# SPARK_GATEWAY_COOKIE is already safely injected; optional overrides:
+# SPARK_REQUEST_TIMEOUT_SECONDS and SPARK_MAX_BYTES.
+uv run --locked mcp-stdio --plugin spark
+```
+
+For an MCP host, point to the installed release entry point described above and pass the
+Cookie through the host's protected environment:
+
+```json
+{
+  "mcpServers": {
+    "spark": {
+      "command": "/absolute/path/to/hive-cli-mcp-stdio-prod/current/venv/bin/mcp-stdio",
+      "args": ["--plugin", "spark", "--config", "/absolute/path/to/spark.yaml"]
+    }
+  }
+}
+```
+
+Local MCP transport is stdio; outgoing HTTPS is the History Server connection.
+Set the host tool timeout above the configured whole-call budget.
+
+The result contains `application_id`, `requested_attempt_id`, `cache_hit`,
+`downloaded_at`, `manifest_path` and `files`. Each file contains `attempt_id`,
+`local_path`, `spark_version`, `size_bytes`, `sha256`, `source_sha256`,
+`event_count` and `application_end_seen`. The two digests describe sanitized output and
+original source bytes respectively; ApplicationEnd is not a YARN final status.
+
+JSONL is generated during post-download validation/redaction in a private temporary
+directory. After every member passes, the ZIP is removed and the directory is renamed to:
+
+```text
+<cache_dir>/<application_id>/all|attempt-<id>/<random-id>/
+  eventlog-0001.jsonl
+  manifest.json
+```
+
+The manifest adds `format_version=1` and the normalized source URL to the result fields,
+excluding `cache_hit`. No raw ZIP, unsanitized JSON, index or digest sidecar is retained.
+Events retain line order and numeric metrics; credential fields and non-allowlisted
+environment properties are redacted. Compressed/rolling logs and malformed tails fail.
+
+Reuse requires the same source URL and exact attempt selection plus verified file hashes.
+It preserves the original download time and makes no upstream request, so it does not
+guarantee freshness. Refresh saves another directory, preserving previous evidence.
+Directories persist until you clean them manually; there is no TTL, deduplication or GC.
+One process owns a cache root at a time. Failure/cancellation/shutdown clean owned staging;
+a force-killed process may leave ignored `.part-*` directories for manual cleanup.
+
+Live download is opt-in: supply `MCP_STDIO_SPARK_INTEGRATION=1`,
+`MCP_STDIO_SPARK_APPLICATION_ID`, optional `MCP_STDIO_SPARK_ATTEMPT_ID`, and the SPARK
+URL/cache/Cookie/CA deployment environment, then run:
+
+```sh
+uv run --locked pytest -m integration tests/integration/test_spark_server.py
+```
+
 ## Process isolation
 
 Each `mcp-stdio` process loads exactly one plugin. Processes do not share
-memory, credentials, connections, caches, or mutable runtime state. If one
+memory, credentials, connections, live caches, or mutable runtime state. Spark permits sequential
+reuse of persistent evidence after the previous cache-directory owner exits. If one
 plugin process fails, independently launched plugin processes are unaffected.
 
 ## Tool errors

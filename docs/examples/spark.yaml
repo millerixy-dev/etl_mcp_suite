@@ -1,0 +1,14 @@
+version: 1
+plugin: spark
+settings:
+  # HTTPS History Server root, preserving its gateway mount; omit /api/v1.
+  history_server_url: https://history.example.invalid:8443/gateway/analytics/sparkhistory
+  # Dedicated local L3; each active instance needs its own directory.
+  cache_dir: /var/tmp/mcp-spark-l3
+  # For a private CA, uncomment with a trusted readable PEM:
+  # ca_bundle_path: /etc/mcp/spark-ca.pem
+  request_timeout_seconds: 300.0
+  max_bytes: 268435456
+secrets:
+  # Environment-variable name, never the Cookie value.
+  gateway_cookie: SPARK_GATEWAY_COOKIE

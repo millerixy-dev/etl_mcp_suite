@@ -6,7 +6,7 @@ This document describes the package structure, module responsibilities, dependen
 
 The active OpenSpec proposal, specs, design, and tasks are the normative source of truth. This document is an explanatory architecture view and must be synchronized after approved OpenSpec changes.
 
-The Hive plugin ships via `deliver-hive-plugin-slice` and the Zeppelin plugin via `deliver-zeppelin-plugin-slice`; both are delivered. The DolphinScheduler module is described for reference but remains deferred; its registry loader is a placeholder that rejects runtime construction until implemented.
+The fixed registry contains delivered Hive, Zeppelin, DolphinScheduler and Spark slices. The active Spark download change governs its acquisition and local evidence behavior.
 
 ## Architectural Style
 
@@ -88,7 +88,7 @@ bootstrap.py (parse_args) → registry.py (select zeppelin) → plugin.py (_crea
 The inward dependency rule is enforced by `tests/contract/test_architecture.py` via `tests/contract/import_rules.py`, which defines four rules:
 
 - **core-to-plugin**: `core.*` must not import any `plugins.*`.
-- **service-to-infrastructure**: a `*.service` module must not import `httpx`, `mcp`, `pyhive`, `websockets`, or sibling modules `http_client`, `plugin`, `pyhive`, `tools`, `websocket_client`.
+- **service-to-infrastructure**: a `*.service` module must not import external client/MCP libraries or HTTP/plugin/tool/file adapters, including Spark files/cache. Hive's existing pure domain cache remains an application dependency.
 - **shared-to-plugin**: only `registry.py` may import a concrete plugin from shared code.
 - **plugin-to-plugin**: one plugin must not import another.
 
@@ -103,10 +103,13 @@ One installed package
 └── mcp-stdio entry point
 ├── process A: shared runtime + Hive plugin
 ├── process B: shared runtime + Zeppelin plugin
-└── process C: shared runtime + DolphinScheduler plugin (deferred)
+├── process C: shared runtime + DolphinScheduler plugin
+└── process D: shared runtime + Spark plugin
 ```
 
 The package boundary simplifies installation and versioning. The process boundary isolates credentials, failures, connections, caches, and mutable state.
+
+Spark persistent evidence permits sequential reuse of one dedicated directory with a process lock; it does not share live clients or credentials.
 
 ## Planned Source Layout
 
@@ -144,12 +147,22 @@ src/mcp_stdio/
     │   ├── http_client.py
     │   ├── websocket_client.py
     │   └── tools.py
-    └── dolphinscheduler/
+    ├── dolphinscheduler/
         ├── plugin.py
         ├── config.py
         ├── service.py
         ├── gateway.py
         ├── http_client.py
+        └── tools.py
+    └── spark/
+        ├── plugin.py
+        ├── config.py
+        ├── models.py
+        ├── gateway.py
+        ├── service.py
+        ├── http_client.py
+        ├── files.py
+        ├── cache.py
         └── tools.py
 ```
 
@@ -165,8 +178,8 @@ Files may become subpackages when they grow, but their responsibility and depend
 | `core/config.py` | Safe YAML/JSON loading (optional file), versioning, env-var-only startup, prefix overrides, secret references | Standard library, Pydantic, PyYAML | Plugin tool behavior or network clients |
 | `core/errors.py` | Stable safe error categories and correlation metadata | Standard library/domain types | Raw backend-specific responses |
 | `core/logging.py` | stderr logging and redaction | Standard library | MCP stdout writing |
-| `core/server.py` | FastMCP stdio lifecycle and boundary error conversion | MCP SDK, plugin contract | Concrete backend adapters |
-| `contracts/plugin.py` | Minimal plugin construction, registration, and cleanup protocol | Shared types only | Hive, Zeppelin, or DolphinScheduler details |
+| `core/server.py` | FastMCP stdio lifecycle, raw declared-argument validation and safe errors | MCP SDK, Pydantic, plugin contract | Concrete backend adapters |
+| `contracts/plugin.py` | Minimal plugin construction, registration, and cleanup protocol | Shared types only | Concrete backend details |
 
 ## Plugin Module Pattern
 
@@ -267,15 +280,26 @@ The interpreter is parsed from the paragraph body's leading `%<interpreter>` she
 
 ## DolphinScheduler Module Responsibilities
 
-> **Deferred.** The DolphinScheduler plugin is not delivered by the Hive slice. The responsibilities below describe the planned shape for a follow-up change.
+The delivered slice owns status inspection and constrained scheduling.
 
 - `config.py` models base URL, fixed status path, authentication references, and timeout.
-- `service.py` implements only server-status inspection.
-- `gateway.py` exposes one status operation and no generic HTTP method.
+- `service.py` implements status, bounded enumeration/search/inspection/logs/link extraction and constrained workflow start.
+- `gateway.py` exposes fixed scheduling operations and no caller-selected generic HTTP method.
 - `http_client.py` calls the configured status endpoint and normalizes bounded safe fields.
-- `tools.py` registers only `get_server_status`.
+- `tools.py` registers get_server_status, list_objects, get_object, search_objects, start_workflow, get_task_log and extract_log_links.
 
 The configured status path is deployment input, not MCP caller input.
+
+## Spark Module Responsibilities
+
+- config.py owns five settings and the optional environment Cookie reference.
+- models.py owns strict FetchRequest and immutable file/fetch results; gateway.py owns lookup/download/close and safe errors.
+- service.py validates requests and decides reuse versus refresh under one deadline.
+- http_client.py performs one lazy, bounded verified HTTPS GET; files.py validates ZIP/JSONL identities, redacts records and computes digests.
+- cache.py implements the gateway, owns the private root lock and acquisition workers, and publishes one directory/manifest per download. It verifies exact-source/scope manifests and file hashes for reuse.
+- tools.py exposes only fetch_spark_event_log; plugin.py composes dependencies and closes owned resources.
+
+No object store, snapshot layer, index, TTL, GC or generic storage interface is introduced. Files/cache adapters are infrastructure and cannot be imported by the Spark service. All plugin imports remain within the slice; only registry imports its concrete composition root from shared code.
 
 ## Cross-Cutting Policies
 

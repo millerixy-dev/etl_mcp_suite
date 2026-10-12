@@ -118,3 +118,16 @@ def test_unknown_setting_is_rejected(tmp_path: Path) -> None:
     )
     with pytest.raises(ConfigError):
         _load(path, {})
+
+
+@pytest.mark.parametrize("suffix", ["yaml", "json"])
+def test_documented_example_loads_without_network(tmp_path: Path, suffix: str) -> None:
+    path = Path(__file__).parents[4] / "docs" / "examples" / f"spark.{suffix}"
+    loaded = _load(
+        path,
+        {"SPARK_CACHE_DIR": str(tmp_path), "SPARK_GATEWAY_COOKIE": "session=synthetic-example"},
+    )
+    assert loaded.settings.history_server_url.startswith("https://history.example.invalid")
+    assert loaded.settings.request_timeout_seconds == 300
+    assert loaded.settings.max_bytes == 268435456
+    assert "synthetic-example" not in repr(loaded)
