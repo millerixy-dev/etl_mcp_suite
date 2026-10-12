@@ -84,6 +84,10 @@ def test_source_tree_respects_architecture_import_boundaries() -> None:
     "source, imported",
     [
         ("import websockets\n", "websockets"),
+        (
+            "from mcp_stdio.plugins.zeppelin import websocket_client\n",
+            "mcp_stdio.plugins.zeppelin.websocket_client",
+        ),
         ("from websockets.asyncio.client import connect\n", "websockets.asyncio.client"),
         (
             "from .websocket_client import query_bindings\n",

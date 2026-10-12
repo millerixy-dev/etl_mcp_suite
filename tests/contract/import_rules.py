@@ -42,9 +42,16 @@ def _imports(tree: ast.AST, package: str) -> list[tuple[str, int]]:
         if isinstance(node, ast.Import):
             imports.extend((alias.name, node.lineno) for alias in node.names)
         elif isinstance(node, ast.ImportFrom):
-            imports.extend(
-                (imported, node.lineno) for imported in _resolve_from_import(node, package)
-            )
+            resolved = _resolve_from_import(node, package)
+            imports.extend((imported, node.lineno) for imported in resolved)
+            if node.module:
+                # A package import may name the adapter in the imported aliases.
+                imports.extend(
+                    (f"{imported}.{alias.name}", node.lineno)
+                    for imported in resolved
+                    for alias in node.names
+                    if alias.name == "websocket_client"
+                )
     return imports
 
 
