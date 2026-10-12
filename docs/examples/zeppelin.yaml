@@ -1,0 +1,13 @@
+version: 1
+plugin: zeppelin
+settings:
+  # REST base; preserve this proxy prefix when deriving /zeppelin/ws.
+  base_url: https://zeppelin.example.invalid/zeppelin/api
+  request_timeout_seconds: 30
+  # Independent execution prefixes and exact upstream setting IDs.
+  allowed_interpreters: [spark_prod.sql]
+  restartable_interpreter_settings: [spark_prod]
+secrets:
+  # Environment variable names, never credential values.
+  username: ZEPPELIN_USERNAME
+  password: ZEPPELIN_PASSWORD

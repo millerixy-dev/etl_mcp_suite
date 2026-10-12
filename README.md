@@ -329,6 +329,112 @@ DDL from `SHOW CREATE TABLE`.
 
 Unsafe identifiers return `INVALID_INPUT` without opening a Hive connection.
 
+## Zeppelin tool contracts
+
+The Zeppelin process exposes exactly nine tools. IDs are opaque, case-sensitive strings; callers
+must preserve them exactly and must not infer a setting ID from an interpreter name, setting name,
+or paragraph body.
+
+| Tool | Arguments | Exact result fields |
+| --- | --- | --- |
+| `list_notebooks` | none | `nodes: NotebookTreeNode[]` |
+| `create_notebook` | `name: string` | `notebook_id`, `name` |
+| `add_paragraph` | `notebook_id: string`, `title: string`, `body: string` | `notebook_id`, `paragraph_id`, `title`, `interpreter` |
+| `run_paragraph` | `notebook_id: string`, `paragraph_id: string` | `notebook_id`, `paragraph_id`, `status` |
+| `get_paragraph_status` | `notebook_id: string`, `paragraph_id: string` | `notebook_id`, `paragraph_id`, `status` |
+| `get_paragraph_result` | `notebook_id: string`, `paragraph_id: string` | `notebook_id`, `paragraph_id`, `status`, `outputs`, `truncated`, `error` |
+| `get_interpreter_bindings` | `notebook_id: string` | `notebook_id`, `bindings` |
+| `restart_interpreter` | `setting_id: string`, optional `notebook_id: string \| null = null` | `setting_id`, `name`, `group`, `status` |
+| `cancel_paragraph` | `notebook_id: string`, `paragraph_id: string` | `notebook_id`, `paragraph_id` |
+
+Nested result contracts:
+
+- `NotebookTreeNode` contains `notebook_id: string | null`, `name: string`, `path: string`, and
+  recursive `children: NotebookTreeNode[]`.
+- Paragraph `status` is one of `PENDING`, `RUNNING`, `FINISHED`, `ERROR`, `CANCELLED`, or
+  `UNKNOWN`.
+- Each paragraph output contains `kind` and `text`; `kind` is one of `TEXT`, `TABLE`, `HTML`,
+  `ANGULAR`, or `IMG`. `error` is either null or `{ "message": string }`. `truncated=true`
+  means the configured output limit was reached.
+- Each interpreter binding contains exactly `setting_id`, `name`, `interpreters: string[]`,
+  `selected: boolean`, and `restart_allowed: boolean`. `restart_allowed` reports the local
+  allowlist decision; it does not assert upstream authorization or interpreter health.
+
+### Interpreter discovery and restart
+
+Do not treat interpreter restart as a general retry. Use notebook-scoped restart as an explicit three-step workflow:
+
+1. Call `get_interpreter_bindings` with the readable notebook ID.
+2. Select an exact binding whose `selected` and `restart_allowed` fields are both true.
+3. Call `restart_interpreter` with that `setting_id` and the same `notebook_id`.
+
+Example discovery result:
+
+```json
+{
+  "notebook_id": "note-1",
+  "bindings": [
+    {
+      "setting_id": "spark_prod",
+      "name": "Spark Production",
+      "interpreters": ["spark", "sql", "pyspark"],
+      "selected": true,
+      "restart_allowed": true
+    }
+  ]
+}
+```
+
+Example notebook-scoped restart call and result:
+
+```json
+{
+  "arguments": {
+    "setting_id": "spark_prod",
+    "notebook_id": "note-1"
+  },
+  "result": {
+    "setting_id": "spark_prod",
+    "name": "Spark Production",
+    "group": "spark",
+    "status": "READY"
+  }
+}
+```
+
+`ZEPPELIN_RESTARTABLE_INTERPRETER_SETTINGS` is a JSON array of exact setting IDs and defaults to
+deny. The allowlist is checked before any login, HTTP, ticket, or WebSocket request. Discovery does
+not require restart permission and includes locally denied bindings with `restart_allowed=false`.
+
+Omitting `notebook_id`, or passing null, preserves the legacy setting-wide restart. A notebook-mode
+failure never drops the notebook context or falls back to setting-wide restart. Neither mode retries
+the restart automatically or re-executes paragraphs. Zeppelin may share one interpreter process
+across notebooks, so notebook context does not guarantee isolated impact.
+
+The MCP host connection remains local JSON-RPC over stdio. Notebook and paragraph operations use
+outgoing Zeppelin HTTP; binding discovery additionally uses an authenticated, bounded outgoing
+WebSocket query in the same user session. No MCP HTTP, SSE, or WebSocket listener is opened.
+
+### Zeppelin configuration examples
+
+Equivalent [YAML](docs/examples/zeppelin.yaml) and [JSON](docs/examples/zeppelin.json) examples contain environment variable names under `secrets`, never credentials. Supply paired credentials externally, then launch:
+
+```bash
+uv run --locked mcp-stdio --plugin zeppelin --config docs/examples/zeppelin.yaml
+```
+
+Environment-only equivalent (credentials remain externally supplied):
+
+```bash
+export ZEPPELIN_BASE_URL='https://zeppelin.example.invalid/zeppelin/api'
+export ZEPPELIN_REQUEST_TIMEOUT_SECONDS='30'
+export ZEPPELIN_ALLOWED_INTERPRETERS='["spark_prod.sql"]'
+export ZEPPELIN_RESTARTABLE_INTERPRETER_SETTINGS='["spark_prod"]'
+uv run --locked mcp-stdio --plugin zeppelin
+```
+
+Execution prefixes and exact restart setting IDs use independent allowlists; both default to deny. All collection overrides (`ALLOWED_INTERPRETERS`, `RESTARTABLE_INTERPRETER_SETTINGS`, `SQL_WRITE_ALLOWED_DATABASES`, `SQL_FORBIDDEN_KEYWORDS`, `SH_ALLOWED_COMMANDS`) use JSON arrays under the `ZEPPELIN_` prefix. Plugin-prefixed overrides take precedence over `MCP_STDIO__SETTINGS__<FIELD>` and file/default values. Startup and tool listing make no network request. Discovery requires a REST base ending in `/api`: only that final component becomes `/ws` (HTTP→WS, HTTPS→WSS), preserving origin and proxy prefix; ambiguous mounts fail before network access.
+
 ## DolphinScheduler configuration and tools
 
 The DolphinScheduler plugin supports a versioned YAML or JSON file, or an

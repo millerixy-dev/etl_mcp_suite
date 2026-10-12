@@ -146,7 +146,14 @@ class ZeppelinToolAdapter:
     async def get_interpreter_bindings(
         self, notebook_id: ZeppelinToolString,
     ) -> InterpreterBindingsResult:
-        """List one notebook's visible settings for explicit restart selection."""
+        """Discover exact setting IDs for a readable notebook without execution/restart.
+
+        Explicitly select a binding with selected=true and restart_allowed=true,
+        then restart with that exact ID and the same notebook_id; never guess IDs
+        from names or paragraph prefixes. restart_allowed is local policy, not
+        upstream authorization or health. Execution and restart allowlists are
+        independent; discovery requires neither permission.
+        """
 
         try:
             return await self._service.get_interpreter_bindings(notebook_id)
@@ -165,7 +172,16 @@ class ZeppelinToolAdapter:
         setting_id: ZeppelinToolString,
         notebook_id: ZeppelinToolNullableString = None,
     ) -> RestartInterpreterResult:
-        """Restart an allowlisted setting, optionally within one notebook's scope."""
+        """Restart an exact allowlisted setting after explicit binding selection.
+
+        Use get_interpreter_bindings first and pass the same notebook_id with a
+        selected, restart_allowed setting_id. Execution and restart permissions
+        are independent. Omitted/null notebook_id preserves legacy setting-wide
+        scope. Notebook context does not isolate shared interpreter processes.
+        Never guess IDs, drop context as fallback, retry a restart automatically,
+        treat restart as a general retry, or automatically re-execute a paragraph.
+        The four-field result acknowledges reported state, not verified health.
+        """
 
         try:
             return await self._service.restart_interpreter(setting_id, notebook_id)

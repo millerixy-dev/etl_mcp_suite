@@ -420,3 +420,19 @@ def test_plugin_restart_allowlist_override_rejects_scalar_value(tmp_path: Path) 
 
     assert "settings.restartable_interpreter_settings" in str(exc_info.value)
     assert "spark_prod" not in str(exc_info.value)
+
+
+def test_documented_zeppelin_examples_load_equivalently_without_network() -> None:
+    root = Path(__file__).parents[4]
+    environment = {
+        "ZEPPELIN_USERNAME": "fake-example-user",
+        "ZEPPELIN_PASSWORD": "fake-example-password",
+    }
+    yaml_config = _load(root / "docs/examples/zeppelin.yaml", environment)
+    json_config = _load(root / "docs/examples/zeppelin.json", environment)
+    assert yaml_config.settings == json_config.settings
+    assert yaml_config.settings.base_url == "https://zeppelin.example.invalid/zeppelin/api"
+    assert yaml_config.settings.allowed_interpreters == ("spark_prod.sql",)
+    assert yaml_config.settings.restartable_interpreter_settings == ("spark_prod",)
+    assert yaml_config.secrets.username is not None
+    assert yaml_config.secrets.password is not None

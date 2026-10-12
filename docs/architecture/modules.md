@@ -32,8 +32,8 @@ The runtime is Clean Architecture concentric circles: dependencies point inward;
 
 | Circle (outer → inner) | Modules |
 | --- | --- |
-| Frameworks & Drivers | `httpx`, `mcp`/`FastMCP`, `pydantic`, `pyhive`, argparse, asyncio, stdio transport, MCP host process, Hive/Zeppelin upstream servers |
-| Interface Adapters | Inbound: `core/server.py`, `tools.py` · Outbound: `http_client.py`, `plugins/hive/pyhive.py` · Config: `core/config.py`, `plugins/*/config.py` · Ports: `gateway.py`, `contracts/plugin.py` |
+| Frameworks & Drivers | `httpx`, `websockets`, `mcp`/`FastMCP`, `pydantic`, `pyhive`, argparse, asyncio, stdio transport, MCP host process, Hive/Zeppelin upstream servers |
+| Interface Adapters | Inbound: `core/server.py`, `tools.py` · Outbound: `http_client.py`, `websocket_client.py`, `plugins/hive/pyhive.py` · Config: `core/config.py`, `plugins/*/config.py` · Ports: `gateway.py`, `contracts/plugin.py` |
 | Use Cases / Application | `service.py` |
 | Entities / Domain | `models.py`, `core/errors.py` |
 
@@ -88,7 +88,7 @@ bootstrap.py (parse_args) → registry.py (select zeppelin) → plugin.py (_crea
 The inward dependency rule is enforced by `tests/contract/test_architecture.py` via `tests/contract/import_rules.py`, which defines four rules:
 
 - **core-to-plugin**: `core.*` must not import any `plugins.*`.
-- **service-to-infrastructure**: a `*.service` module must not import `httpx`, `mcp`, `pyhive`, or sibling modules `http_client`, `plugin`, `pyhive`, `tools`.
+- **service-to-infrastructure**: a `*.service` module must not import `httpx`, `mcp`, `pyhive`, `websockets`, or sibling modules `http_client`, `plugin`, `pyhive`, `tools`, `websocket_client`.
 - **shared-to-plugin**: only `registry.py` may import a concrete plugin from shared code.
 - **plugin-to-plugin**: one plugin must not import another.
 
@@ -142,6 +142,7 @@ src/mcp_stdio/
     │   ├── service.py
     │   ├── gateway.py
     │   ├── http_client.py
+    │   ├── websocket_client.py
     │   └── tools.py
     └── dolphinscheduler/
         ├── plugin.py
@@ -255,7 +256,12 @@ The cache is plugin-local. It may use shared generic utilities only if those uti
 - `service.py` enforces use-case sequencing and the write-safety gate (interpreter allowlist, SQL write-target database check, sh command allowlist) before the external adapter receives paragraph content.
 - `gateway.py` describes notebook tree listing, notebook creation, paragraph creation, execution, status, and result retrieval.
 - `http_client.py` owns authentication/session state, URL encoding, REST translation, response bounds, `trust_env=False`, and cleanup.
-- `tools.py` exposes exactly the six approved notebook lifecycle tools: `list_notebooks`, `create_notebook`, `add_paragraph`, `run_paragraph`, `get_paragraph_status`, `get_paragraph_result`.
+- `tools.py` exposes exactly nine tools: `list_notebooks`, `create_notebook`, `add_paragraph`, `run_paragraph`, `get_paragraph_status`, `get_paragraph_result`, `cancel_paragraph`, `get_interpreter_bindings`, `restart_interpreter`.
+- `models.py` also owns immutable interpreter-binding records and the four-field restart result; `gateway.py` includes discovery and optional notebook-context restart.
+- `service.py` checks exact opaque setting IDs against the independent restart allowlist before network work, decorates `restart_allowed` locally, and requires selected current membership for contextual restart.
+- `http_client.py` owns notebook readability checks, fresh private session tickets, one overall deadline and HTTP/WebSocket composition. `websocket_client.py` owns isolated serialized binding queries, strict frame/byte/message bounds, secret-safe parsing and bounded cancellation/shutdown cleanup; no receive task survives built-in transport cleanup.
+
+The MCP host connection is local JSON-RPC over stdio. Zeppelin HTTP and authenticated WebSocket connections are outgoing upstream adapters, not an MCP listener. Only a terminal `/api` is mapped to `/ws`, preserving the origin/proxy prefix. Omitted/null notebook context preserves legacy setting-wide restart; contextual failure cannot fall back or repeat the PUT. Notebook context does not isolate a shared interpreter process, and restart never automatically executes paragraphs.
 
 The interpreter is parsed from the paragraph body's leading `%<interpreter>` shebang and matched against the configured allowlist; the tool never injects or modifies the shebang. Write-safety rules are enforced at `add_paragraph` time, before the body is sent upstream.
 

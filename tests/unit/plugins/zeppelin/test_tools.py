@@ -495,3 +495,15 @@ async def test_fastmcp_restart_omission_null_and_value_preserve_scope() -> None:
         ("restart_interpreter", "spark-prod", None),
         ("restart_interpreter", "spark-prod", "note-1"),
     ]
+
+
+def test_recovery_tool_descriptions_explain_exact_selection_and_scope() -> None:
+    discovery = ZeppelinToolAdapter.get_interpreter_bindings.__doc__ or ""
+    restart = ZeppelinToolAdapter.restart_interpreter.__doc__ or ""
+    for marker in ("exact", "selected", "restart_allowed", "independent"):
+        assert marker in discovery
+    for marker in (
+        "get_interpreter_bindings", "notebook_id", "null", "setting-wide",
+        "shared", "fallback", "retry", "paragraph",
+    ):
+        assert marker in restart

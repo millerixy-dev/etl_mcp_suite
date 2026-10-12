@@ -400,3 +400,31 @@ assert [(v.rule, v.imported) for v in find_import_violations(root)] == [
 - [ ] Run GREEN/refactor: `chflags nohidden .venv/lib/python3.12/site-packages/_editable_impl_hive_cli_mcp_stdio.pth && uv run --locked --no-sync pytest tests/contract tests/unit/plugins/zeppelin -q`; also attempt required locked command without `--no-sync`. Record exact results and stage only task files.
 
 **Self-review:** matches design architecture paragraph and stdio/cleanup requirements; fake transports exercise the real gateway/service/tool/server path, never a live backend. Registry exemption remains explicit. No separate implementation checklist or task checkbox mutation.
+
+### Task 12: OpenSpec 6.1 — Zeppelin documentation contracts
+
+**Files:** `tests/unit/test_agent_skills.py`, `tests/unit/plugins/zeppelin/test_config.py`, `tests/unit/plugins/zeppelin/test_tools.py`, `src/mcp_stdio/plugins/zeppelin/tools.py`, `skills/zeppelin/SKILL.md`, `docs/examples/zeppelin.{yaml,json}`, `README.md`, `README.zh-CN.md`, `docs/architecture/{runtime-flow,modules}.md`.
+**Interfaces:** consume nine registered tools, `load_config` and `ZeppelinSettings`; produce portable recovery guidance and equivalent locally validated examples. Preserve unrelated README isolation sections exactly.
+
+- [ ] RED: require `get_interpreter_bindings` and exact-ID/notebook/legacy/shared-effect guidance in canonical skill; load both missing example files with fake environment credentials; assert tool descriptions contain discovery, scope, policy and retry guidance.
+```python
+assert "get_interpreter_bindings" in body
+assert loaded.settings.restartable_interpreter_settings == ("spark_prod",)
+assert "setting-wide" in ZeppelinToolAdapter.restart_interpreter.__doc__
+```
+- [ ] Run `chflags nohidden .venv/lib/python3.12/site-packages/_editable_impl_hive_cli_mcp_stdio.pth && uv run --locked pytest tests/unit/test_agent_skills.py tests/unit/plugins/zeppelin/test_config.py tests/unit/plugins/zeppelin/test_tools.py -q`; expect missing guidance/examples/descriptions failures.
+- [ ] GREEN: add discovery table row and explicit selected/local-policy decision followed by contextual restart; document omission/null legacy scope, independent allowlists, no context-dropping fallback/retry/reexecution and shared-process effects. Create equivalent examples:
+```yaml
+version: 1
+plugin: zeppelin
+settings:
+  base_url: https://zeppelin.example.invalid/zeppelin/api
+  request_timeout_seconds: 30
+  allowed_interpreters: [spark_prod.sql]
+  restartable_interpreter_settings: [spark_prod]
+secrets:
+  username: ZEPPELIN_USERNAME
+  password: ZEPPELIN_PASSWORD
+```
+- [ ] Synchronize README configuration launch snippets (`uv run --locked mcp-stdio --plugin zeppelin --config docs/examples/zeppelin.yaml`) and JSON-array environment overrides; architecture adapter ownership, one overall deadline, cleanup and outgoing HTTP/WebSocket versus local stdio. Minimally expand tool docstrings to the same safety contract.
+- [ ] Verify same test command freshly, then `chflags nohidden .venv/lib/python3.12/site-packages/_editable_impl_hive_cli_mcp_stdio.pth && uv run --locked ruff check tests/unit/test_agent_skills.py tests/unit/plugins/zeppelin/test_config.py tests/unit/plugins/zeppelin/test_tools.py src/mcp_stdio/plugins/zeppelin/tools.py`. Compare tables and examples to active spec/design. Record evidence in `.superpowers/sdd/task-12-implementer.md`. Commit only task hunks, leaving unrelated isolation changes unstaged; do not mark OpenSpec checkbox.
