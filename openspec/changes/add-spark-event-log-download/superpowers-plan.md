@@ -106,3 +106,24 @@ Lookup reads bounded manifests under exact app/selector, validates source before
 3. VERIFY: same test command; `uv run --locked ruff check src/mcp_stdio/plugins/spark tests/unit/plugins/spark` and focused pyright.
 4. COMMIT: `git add src/mcp_stdio/plugins/spark/cache.py tests/unit/plugins/spark/test_cache.py openspec/changes/add-spark-event-log-download`; `git commit -m "feat(spark): persist and reuse private event log directories"`.
 Self-review 2.4: publication is one directory rename; source/request scope and file digests gate reuse.
+
+## Task 3.1 — Application service
+
+Files: src/mcp_stdio/plugins/spark/service.py; tests/unit/plugins/spark/test_service.py.
+Consumes gateway lookup/download and FetchRequest. Produces SparkEventLogService.fetch(application_id, attempt_id=None, refresh=False) -> SparkEventLogFetchResult.
+1. RED: fake gateway tests input rejection, hit/miss, refresh bypass, unchanged download time and deadline/error propagation. Run `uv run --locked pytest tests/unit/plugins/spark/test_service.py --tb=short -q`; expected missing service.
+2. GREEN:
+```python
+async def _fetch(self, request: FetchRequest, deadline: float) -> SparkEventLogFetchResult:
+    if not request.refresh:
+        hit = await self._gateway.lookup(request.application_id, request.attempt_id,
+                                         deadline=deadline)
+        if hit is not None:
+            return hit
+    return await self._gateway.download(request.application_id, request.attempt_id,
+                                        deadline=deadline)
+```
+Public fetch strictly validates first and wraps _fetch in asyncio.wait_for with the same total deadline; timeout and invalid inputs use safe domain errors.
+3. VERIFY: repeat test command; focused ruff/pyright. Service imports no HTTP, filesystem adapter or MCP.
+4. COMMIT: `git add src/mcp_stdio/plugins/spark/service.py tests/unit/plugins/spark/test_service.py openspec/changes/add-spark-event-log-download`; `git commit -m "feat(spark): coordinate cached and refreshed log acquisition"`.
+Self-review 3.1: request orchestration uses the fixed port without backend imports.
