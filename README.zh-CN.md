@@ -44,6 +44,111 @@ uv sync --frozen
 
 该命令使用已提交的 `uv.lock` 在隔离环境中安装包和命令行入口 `mcp-stdio`。
 
+## 本地开发环境与生产环境隔离
+
+以下是部署指引；只有安装 release 并显式切换 MCP 注册入口后，现有服务才完成迁移。
+
+源码检出目录和 Codex MCP 运行目录必须分离：
+
+```text
+开发检出目录：/absolute/path/to/hive_cli_mcp_stdio
+生产根目录：  /absolute/path/to/hive-cli-mcp-stdio-prod
+```
+
+开发目录用于源码、worktree、`.venv`、测试和 editable 安装。Codex 的生产 MCP 注册只能指向
+生产根目录中的不可变 wheel release，不能指向源码目录、开发 `.venv`、editable uv tool，也不能
+通过 `PYTHONPATH` 引用源码目录。因此，`./scripts/install-skills-codex.sh --with-mcp` 属于开发
+工作流，不能把它生成的 editable MCP 注册作为本地生产运行环境。
+
+从已提交且已跟踪文件无修改的版本创建 release，并按 `uv.lock` 安装生产依赖：
+
+```bash
+set -e
+PROJECT_DIR=/absolute/path/to/hive_cli_mcp_stdio
+PROD_ROOT=/absolute/path/to/hive-cli-mcp-stdio-prod
+RELEASE_ID="$(date +%Y%m%d%H%M%S)-$(git -C "$PROJECT_DIR" rev-parse --short=12 HEAD)"
+RELEASE_DIR="$PROD_ROOT/releases/$RELEASE_ID"
+
+test -z "$(git -C "$PROJECT_DIR" status --porcelain --untracked-files=no)"
+mkdir -p "$RELEASE_DIR/dist"
+
+uv build --project "$PROJECT_DIR" --wheel --out-dir "$RELEASE_DIR/dist"
+uv export \
+  --project "$PROJECT_DIR" \
+  --locked \
+  --no-dev \
+  --no-emit-project \
+  --format requirements.txt \
+  --output-file "$RELEASE_DIR/runtime-requirements.txt"
+
+uv venv --python 3.12 "$RELEASE_DIR/venv"
+uv pip install \
+  --python "$RELEASE_DIR/venv/bin/python" \
+  --requirement "$RELEASE_DIR/runtime-requirements.txt"
+
+WHEEL_PATH="$(find "$RELEASE_DIR/dist" -maxdepth 1 -name '*.whl' -print -quit)"
+uv pip install \
+  --python "$RELEASE_DIR/venv/bin/python" \
+  --no-deps \
+  "$WHEEL_PATH"
+
+"$RELEASE_DIR/venv/bin/mcp-stdio" --help
+ln -sfn "$RELEASE_DIR" "$PROD_ROOT/current"
+```
+
+以下示例使用 Codex 中显式的环境变量配置，并且不传 `--config`。项目级
+`.codex/config.toml` 会保存明文凭据，因此已被 Git 忽略，并且必须使用 `chmod 600` 限制为
+当前用户可读写。三个项目 MCP 注册统一使用同一个生产入口：
+
+```toml
+[mcp_servers.hive]
+command = "/absolute/path/to/hive-cli-mcp-stdio-prod/current/venv/bin/mcp-stdio"
+args = ["--plugin", "hive"]
+
+[mcp_servers.hive.env]
+HIVE_HOST = "<hive-host>"
+HIVE_USERNAME = "<hive-user>"
+HIVE_PASSWORD = "<hive-password>"
+
+[mcp_servers.zeppelin]
+command = "/absolute/path/to/hive-cli-mcp-stdio-prod/current/venv/bin/mcp-stdio"
+args = ["--plugin", "zeppelin"]
+
+[mcp_servers.zeppelin.env]
+ZEPPELIN_BASE_URL = "<zeppelin-base-url>"
+ZEPPELIN_USERNAME = "<zeppelin-user>"
+ZEPPELIN_PASSWORD = "<zeppelin-password>"
+ZEPPELIN_ALLOWED_INTERPRETERS = "[\"spark.sql\", \"spark.pyspark\"]"
+ZEPPELIN_RESTARTABLE_INTERPRETER_SETTINGS = "[\"<actual-setting-id>\"]"
+
+[mcp_servers.dolphinscheduler]
+command = "/absolute/path/to/hive-cli-mcp-stdio-prod/current/venv/bin/mcp-stdio"
+args = ["--plugin", "dolphinscheduler"]
+
+[mcp_servers.dolphinscheduler.env]
+DOLPHINSCHEDULER_BASE_URL = "<dolphinscheduler-base-url>"
+DOLPHINSCHEDULER_TOKEN = "<dolphinscheduler-token>"
+```
+
+```bash
+chmod 600 "$PROJECT_DIR/.codex/config.toml"
+```
+
+确认模块从生产 release 加载，然后重启 MCP 子进程，使 Codex 读取新的 `current` 指向：
+
+```bash
+"$PROD_ROOT/current/venv/bin/python" -c \
+  'import pathlib, mcp_stdio; print(pathlib.Path(mcp_stdio.__file__).resolve())'
+codex mcp list --json
+```
+
+保留历史 release 以便回滚。把 `current` 重新指向上一版，再重启 MCP 子进程即可，不需要源码
+检出目录或重新安装依赖：
+
+```bash
+ln -sfn "$PROD_ROOT/releases/<previous-release>" "$PROD_ROOT/current"
+```
+
 ## Agent Skills
 
 客户端无关的 Hive、Zeppelin 和自然语言查询 Skill 统一维护在 `skills/hive`、`skills/zeppelin` 与 `skills/nl2sql`。根据正在使用的 MCP 客户端，将相同的规范文件安装到当前项目：

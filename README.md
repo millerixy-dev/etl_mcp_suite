@@ -53,6 +53,115 @@ uv sync --frozen
 This installs the package and its console entry point, `mcp-stdio`, in an
 isolated virtual environment using the committed `uv.lock`.
 
+## Local development and production isolation
+
+The following is a deployment guide. Existing MCP registrations are not migrated
+until the release is installed and their entry points are switched explicitly.
+
+Keep the source checkout and the Codex MCP runtime in separate directories:
+
+```text
+Development checkout: /absolute/path/to/hive_cli_mcp_stdio
+Production root:      /absolute/path/to/hive-cli-mcp-stdio-prod
+```
+
+The development checkout owns source files, worktrees, `.venv`, tests, and editable installs.
+Codex production registrations must point only to an immutable wheel release under the production
+root. They must not point to the checkout, its `.venv`, an editable uv tool, or a `PYTHONPATH`
+containing the checkout. `./scripts/install-skills-codex.sh --with-mcp` is therefore a development
+workflow; do not use its editable MCP registration as the local production runtime.
+
+Create a release from a tracked, clean commit with locked runtime dependencies:
+
+```bash
+set -e
+PROJECT_DIR=/absolute/path/to/hive_cli_mcp_stdio
+PROD_ROOT=/absolute/path/to/hive-cli-mcp-stdio-prod
+RELEASE_ID="$(date +%Y%m%d%H%M%S)-$(git -C "$PROJECT_DIR" rev-parse --short=12 HEAD)"
+RELEASE_DIR="$PROD_ROOT/releases/$RELEASE_ID"
+
+test -z "$(git -C "$PROJECT_DIR" status --porcelain --untracked-files=no)"
+mkdir -p "$RELEASE_DIR/dist"
+
+uv build --project "$PROJECT_DIR" --wheel --out-dir "$RELEASE_DIR/dist"
+uv export \
+  --project "$PROJECT_DIR" \
+  --locked \
+  --no-dev \
+  --no-emit-project \
+  --format requirements.txt \
+  --output-file "$RELEASE_DIR/runtime-requirements.txt"
+
+uv venv --python 3.12 "$RELEASE_DIR/venv"
+uv pip install \
+  --python "$RELEASE_DIR/venv/bin/python" \
+  --requirement "$RELEASE_DIR/runtime-requirements.txt"
+
+WHEEL_PATH="$(find "$RELEASE_DIR/dist" -maxdepth 1 -name '*.whl' -print -quit)"
+uv pip install \
+  --python "$RELEASE_DIR/venv/bin/python" \
+  --no-deps \
+  "$WHEEL_PATH"
+
+"$RELEASE_DIR/venv/bin/mcp-stdio" --help
+ln -sfn "$RELEASE_DIR" "$PROD_ROOT/current"
+```
+
+The following example keeps plugin settings and credentials as explicit Codex
+environment entries and omits `--config`. The project-local `.codex/config.toml` is ignored by Git
+because it contains plain-text credentials; restrict it to the current user with `chmod 600`.
+All three project registrations should use the same production entry point:
+
+```toml
+[mcp_servers.hive]
+command = "/absolute/path/to/hive-cli-mcp-stdio-prod/current/venv/bin/mcp-stdio"
+args = ["--plugin", "hive"]
+
+[mcp_servers.hive.env]
+HIVE_HOST = "<hive-host>"
+HIVE_USERNAME = "<hive-user>"
+HIVE_PASSWORD = "<hive-password>"
+
+[mcp_servers.zeppelin]
+command = "/absolute/path/to/hive-cli-mcp-stdio-prod/current/venv/bin/mcp-stdio"
+args = ["--plugin", "zeppelin"]
+
+[mcp_servers.zeppelin.env]
+ZEPPELIN_BASE_URL = "<zeppelin-base-url>"
+ZEPPELIN_USERNAME = "<zeppelin-user>"
+ZEPPELIN_PASSWORD = "<zeppelin-password>"
+ZEPPELIN_ALLOWED_INTERPRETERS = "[\"spark.sql\", \"spark.pyspark\"]"
+ZEPPELIN_RESTARTABLE_INTERPRETER_SETTINGS = "[\"<actual-setting-id>\"]"
+
+[mcp_servers.dolphinscheduler]
+command = "/absolute/path/to/hive-cli-mcp-stdio-prod/current/venv/bin/mcp-stdio"
+args = ["--plugin", "dolphinscheduler"]
+
+[mcp_servers.dolphinscheduler.env]
+DOLPHINSCHEDULER_BASE_URL = "<dolphinscheduler-base-url>"
+DOLPHINSCHEDULER_TOKEN = "<dolphinscheduler-token>"
+```
+
+```bash
+chmod 600 "$PROJECT_DIR/.codex/config.toml"
+```
+
+Confirm that the installed module resolves inside the production release, then restart the MCP
+children so Codex reads the new `current` target:
+
+```bash
+"$PROD_ROOT/current/venv/bin/python" -c \
+  'import pathlib, mcp_stdio; print(pathlib.Path(mcp_stdio.__file__).resolve())'
+codex mcp list --json
+```
+
+Keep previous release directories for rollback. Point `current` at the previous release and restart
+the MCP children; no source checkout or dependency reinstall is needed:
+
+```bash
+ln -sfn "$PROD_ROOT/releases/<previous-release>" "$PROD_ROOT/current"
+```
+
 ## Agent Skills
 
 The client-neutral Hive, Zeppelin, and natural-language query skills are maintained once at
