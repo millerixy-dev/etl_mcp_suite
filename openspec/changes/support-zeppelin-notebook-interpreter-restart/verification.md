@@ -13,7 +13,8 @@ the reviewer inspected the repair diff and regression evidence independently.
 The whole-change review identified restart result strings containing session or
 query secrets, raw HTTP transport logging during normal FastMCP startup, and
 error-identifier filtering gaps. Regression tests use synthetic sentinels,
-MockTransport and fake WebSocket connections; no live backend was contacted.
+MockTransport and fake WebSocket connections; no live backend was contacted during
+that automated verification. A subsequent authorized live check is recorded below.
 Repairs reject tainted public result fields, silence raw HTTP transport logs,
 filter error identifiers with available session and per-call secrets, and cover
 cookie rotation, partial ticket validation, timeout and cancellation. Legacy error
@@ -56,7 +57,29 @@ dependencies: predecessor Zeppelin capability changes must be consolidated befor
 archiving this MODIFIED delta. Main-spec validation also reports an informational
 long-requirement suggestion. This change has not been archived.
 
-Live discovery and interpreter restart remain unverified by this run. A real
-restart requires explicit authorization for a dedicated disposable target plus
-the documented independent opt-in controls. Mock success does not establish live
-deployment compatibility or permission behavior.
+The automated run above skipped the live suite. Running that suite requires the
+documented independent opt-in controls and explicit authorization for a dedicated
+disposable target. Mock success alone does not establish live deployment
+compatibility or permission behavior.
+
+## Authorized live recovery check — 2026-10-12
+
+After automated verification, the user explicitly requested recovery of notebook
+`2N48NMDU7`, paragraph `paragraph_1791783836298_324182113`, and selected the
+`spark_qysjrh` setting when discovery returned two eligible bindings. This was a
+manual MCP recovery check on the user-selected target, not the opt-in pytest suite.
+
+| MCP operation | Observed result |
+| --- | --- |
+| `get_paragraph_result` | `ERROR`: `SparkContext was shut down` |
+| `get_interpreter_bindings` | `spark` and `spark_qysjrh` both selected and locally restart-allowed |
+| `restart_interpreter(setting_id="spark_qysjrh", notebook_id="2N48NMDU7")` | One call returned `name="spark_qysjrh"`, `group="spark"`, `status="READY"` |
+| `run_paragraph` on the original paragraph | Submitted once; returned `PENDING` |
+| `get_paragraph_status` polling | Progressed through `RUNNING` to `FINISHED` |
+| `get_paragraph_result` after completion | Table with 11 data rows, `error=null`, `truncated=false` |
+
+This confirms binding discovery, notebook-context restart and successful execution
+recovery for this target using the registered MCP tools. No global restart fallback
+or repeat restart was performed. The check does not establish the account's admin
+role, behavior of other settings, or completion of local production isolation.
+Credentials, connection details, raw stack traces and query data are omitted.
