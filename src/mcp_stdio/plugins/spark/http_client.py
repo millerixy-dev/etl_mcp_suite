@@ -37,7 +37,9 @@ class SparkHttpClient:
         if self._client is None:
             suppress_http_transport_logging()
             ca_path = self._settings.ca_bundle_path
-            context = ssl.create_default_context(cafile=ca_path) if ca_path else True
+            context: ssl.SSLContext | bool = self._settings.verify_tls
+            if context and ca_path:
+                context = ssl.create_default_context(cafile=ca_path)
             self._client = httpx.AsyncClient(
                 verify=context,
                 trust_env=False,

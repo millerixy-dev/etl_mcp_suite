@@ -104,3 +104,42 @@ Supply a trusted CA where needed, inject the existing Cookie safely into SPARK_G
 and explicitly enable the documented live test for the actual gateway. Automatic login,
 insecure TLS and browser credential extraction are unsupported. Existing manually downloaded
 ZIP files are not imported. Persistent directories are user-managed and retained until cleanup.
+
+
+## TLS opt-out follow-up (task 5.1)
+
+User explicitly requested skipping certificate verification. Added deployment-only
+`verify_tls` / `SPARK_VERIFY_TLS`, default true; false passes HTTPX verify=False.
+No dependency, MCP argument, default TLS policy, redirect policy or credential handling change.
+
+TDD: config/HTTP tests first failed (21 failures / 17 passes) because the field was
+missing; after the minimal config/client change, all 38 passed.
+Fresh verification:
+
+| Command | Result |
+| --- | --- |
+| `uv sync --locked` | exit 0, 57 resolved / 51 checked |
+| `PYTHONPATH=src uv run --locked pytest -q` | 1586 passed, 6 skipped, 6 deselected |
+| `uv run --locked ruff check .` | all checks passed |
+| `uv run --locked pyright` | 0 errors, 0 warnings |
+| `uv build` | sdist and wheel built |
+| `PYTHONPATH=src uv run --locked mcp-stdio --help` | exit 0 |
+| Spark console EOF smoke with verify_tls=false and unreachable localhost source | exit 0, no stdout, root lock created, no staging |
+| `openspec validate add-spark-event-log-download --strict` | valid |
+| `openspec validate --changes --strict` | 14 passed, 0 failed |
+| `openspec validate --specs --strict` | 2 passed, 0 failed |
+| `git diff --check` | exit 0 |
+
+Reviewed scoped diff against default-on TLS, strict file/env validation, existing CA
+handling and fixed-origin/no-redirect behavior. No unrelated production modules changed.
+The PYTHONPATH workaround for this host's editable installation remains as documented above.
+
+Live check: launched actual mcp-stdio Spark subprocess through the MCP client SDK;
+called fetch_spark_event_log with the user's requested application, attempt 1,
+refresh=true, SPARK_VERIFY_TLS=false, the previously supplied History Server and
+local L3 cache. TLS no longer blocked the request. The gateway returned safe
+AUTHENTICATION_FAILED; SPARK_GATEWAY_COOKIE was absent from the process environment.
+No application manifest or staging directory remained. Authenticated download is
+still unverified and requires the user to inject an existing login Cookie; no
+credentials or response bodies were recorded. The TLS switch was set only for this
+subprocess, not persistently in personal MCP configuration.

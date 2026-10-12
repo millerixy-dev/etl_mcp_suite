@@ -5,6 +5,7 @@ settings:
   history_server_url: https://history.example.invalid:8443/gateway/analytics/sparkhistory
   # Dedicated local L3; each active instance needs its own directory.
   cache_dir: /var/tmp/mcp-spark-l3
+  verify_tls: true  # Explicit false skips certificate and hostname verification.
   # For a private CA, uncomment with a trusted readable PEM:
   # ca_bundle_path: /etc/mcp/spark-ca.pem
   request_timeout_seconds: 300.0

@@ -32,7 +32,13 @@ class Stream(httpx.AsyncByteStream):
         self.closed = True
 
 
-def _client(tmp_path: Path, transport: httpx.AsyncBaseTransport, max_bytes: int = 10000):
+def _client(
+    tmp_path: Path,
+    transport: httpx.AsyncBaseTransport,
+    max_bytes: int = 10000,
+    *,
+    verify_tls: bool = True,
+):
     from mcp_stdio.plugins.spark.http_client import SparkHttpClient
 
     return SparkHttpClient(
@@ -40,6 +46,7 @@ def _client(tmp_path: Path, transport: httpx.AsyncBaseTransport, max_bytes: int 
             history_server_url="https://history.example/gateway/sparkhistory",
             cache_dir=str(tmp_path),
             max_bytes=max_bytes,
+            verify_tls=verify_tls,
         ),
         secrets=SparkSecrets(gateway_cookie=SecretStr("session=synthetic-cookie")),
         transport=transport,
@@ -47,8 +54,9 @@ def _client(tmp_path: Path, transport: httpx.AsyncBaseTransport, max_bytes: int 
 
 
 @pytest.mark.parametrize("attempt", [None, "1"])
+@pytest.mark.parametrize("verify_tls", [True, False])
 async def test_path_cookie_lazy_and_safe_tls(
-    tmp_path: Path, attempt: str | None, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, attempt: str | None, verify_tls: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     requests: list[httpx.Request] = []
     options: list[dict[str, object]] = []
@@ -64,7 +72,7 @@ async def test_path_cookie_lazy_and_safe_tls(
         requests.append(request)
         return httpx.Response(200, stream=Stream([b"PK\x03\x04synthetic-zip"]))
 
-    client = _client(tmp_path, httpx.MockTransport(handler))
+    client = _client(tmp_path, httpx.MockTransport(handler), verify_tls=verify_tls)
     assert not options
     try:
         await client.receive(
@@ -78,7 +86,7 @@ async def test_path_cookie_lazy_and_safe_tls(
         assert requests[0].headers["Cookie"] == "session=synthetic-cookie"
         assert options[0]["trust_env"] is False
         assert options[0]["follow_redirects"] is False
-        assert options[0]["verify"] is True
+        assert options[0]["verify"] is verify_tls
         assert (tmp_path / "archive.part").stat().st_mode & 0o777 == 0o600
     finally:
         await client.close()

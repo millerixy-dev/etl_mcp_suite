@@ -544,19 +544,23 @@ Spark 只暴露 `fetch_spark_event_log(application_id, attempt_id=None, refresh=
 | refresh | false | 默认复用；true 重新下载到新目录 |
 
 未知参数和非法原始类型会被拒绝，错误不回显参数值。调用者不能指定 URL、输出目录、
-凭据或关闭 TLS 校验。
+凭据或 TLS 设置。
 
 | 设置 | 默认值 | 含义 |
 | --- | --- | --- |
 | history_server_url | 必填 | HTTPS 根地址，保留网关路径，不带 `/api/v1`、凭据或 query |
 | cache_dir | 必填 | 绝对专用本地目录；支持 POSIX macOS/Linux |
+| verify_tls | true | 显式设为 false 时跳过证书和主机名校验 |
 | ca_bundle_path | null | 私有证书所需的可信可读 PEM CA |
 | request_timeout_seconds | 300 | 整个调用含查缓存、排队和处理的时间预算，最多 900 秒 |
 | max_bytes | 268435456 | 分别限制 ZIP、展开源文件总量和输出 JSONL 总量 |
 
 使用 [spark.yaml](docs/examples/spark.yaml) 或 [spark.json](docs/examples/spark.json)。
 通过安全环境注入已有登录 Cookie 到 `SPARK_GATEWAY_COOKIE`，配置文件只写变量名。
-匿名部署可以省略 secret 引用。私有证书需提供可信 CA；工具不会自动登录或绕过证书校验。
+匿名部署可以省略 secret 引用。默认校验证书；如明确需要跳过，可设置
+`export SPARK_VERIFY_TLS=false`（或 YAML `verify_tls: false`），然后重启 MCP 进程。
+此时 HTTPS 仍加密，但不验证服务器身份；已配置的 CA 仍须通过本地校验，连接时不使用。
+工具不会自动登录。
 
 ```sh
 uv run --locked mcp-stdio --plugin spark --config docs/examples/spark.yaml

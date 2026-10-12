@@ -33,6 +33,7 @@ def test_file_env_precedence_and_cookie_privacy(tmp_path: Path) -> None:
                 "settings": {
                     "history_server_url": "https://history.example/gateway/",
                     "cache_dir": str(tmp_path / "l3"),
+                    "verify_tls": False,
                 },
                 "secrets": {"gateway_cookie": "COOKIE"},
             }
@@ -44,10 +45,13 @@ def test_file_env_precedence_and_cookie_privacy(tmp_path: Path) -> None:
             "COOKIE": "session=synthetic-cookie",
             "MCP_STDIO__SETTINGS__MAX_BYTES": "2000",
             "SPARK_MAX_BYTES": "3000",
+            "SPARK_VERIFY_TLS": "true",
         },
     )
     assert loaded.settings.history_server_url == "https://history.example/gateway"
     assert loaded.settings.max_bytes == 3000
+    assert loaded.settings.verify_tls is True
+    assert _load(path, {"COOKIE": "session=synthetic-cookie"}).settings.verify_tls is False
     assert loaded.secrets.gateway_cookie is not None
     assert "synthetic-cookie" not in repr(loaded)
 
@@ -57,6 +61,7 @@ def test_env_only_defaults(tmp_path: Path) -> None:
         None,
         {"SPARK_HISTORY_SERVER_URL": "https://history.example", "SPARK_CACHE_DIR": str(tmp_path)},
     )
+    assert loaded.settings.verify_tls is True
     assert loaded.settings.max_bytes == 268435456
     assert loaded.settings.request_timeout_seconds == 300
     assert loaded.secrets.gateway_cookie is None
@@ -75,6 +80,9 @@ def test_env_only_defaults(tmp_path: Path) -> None:
         ("REQUEST_TIMEOUT_SECONDS", "0"),
         ("REQUEST_TIMEOUT_SECONDS", "901"),
         ("MAX_BYTES", "0"),
+        ("VERIFY_TLS", "0"),
+        ("VERIFY_TLS", "null"),
+        ("VERIFY_TLS", "invalid"),
         ("GATEWAY_COOKIE", "session=synthetic\nsecret"),
         ("CA_BUNDLE_PATH", "/does-not-exist/spark-ca.pem"),
     ],
@@ -131,3 +139,15 @@ def test_documented_example_loads_without_network(tmp_path: Path, suffix: str) -
     assert loaded.settings.request_timeout_seconds == 300
     assert loaded.settings.max_bytes == 268435456
     assert "synthetic-example" not in repr(loaded)
+
+
+def test_explicit_env_disables_tls_verification(tmp_path: Path) -> None:
+    loaded = _load(
+        None,
+        {
+            "SPARK_HISTORY_SERVER_URL": "https://history.example",
+            "SPARK_CACHE_DIR": str(tmp_path),
+            "SPARK_VERIFY_TLS": "false",
+        },
+    )
+    assert loaded.settings.verify_tls is False

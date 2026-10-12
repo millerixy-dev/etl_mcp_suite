@@ -28,7 +28,7 @@ service 校验输入并通过 gateway 决定复用或下载，不依赖 HTTP、�
 
 不实现私有网关登录 endpoint。只调用上述 GET，不额外查询 application listing 或猜测 latest attempt。
 
-### 3. 六项配置与环境秘密
+### 3. 配置与环境秘密
 
 | Field | Type | Default | Range | Required |
 | --- | --- | --- | --- | --- |
@@ -36,12 +36,13 @@ service 校验输入并通过 gateway 决定复用或下载，不依赖 HTTP、�
 | plugin | string | — | 固定 spark | 文件模式是 |
 | settings.history_server_url | string | — | HTTPS 绝对 URL，最多 2048 字符，无 userinfo/query/fragment；保留网关 mount | 是 |
 | settings.cache_dir | string | — | 最多 4096 字符的绝对专用本地目录，无控制字符，拒绝 symlink 根 | 是 |
+| settings.verify_tls | bool | true | false 显式跳过证书及主机名校验，仅部署配置 | 否 |
 | settings.ca_bundle_path | string or null | null | 绝对可读可信 PEM CA 文件 | 否 |
 | settings.request_timeout_seconds | float | 300.0 | 大于 0 且至多 900 | 否 |
 | settings.max_bytes | int | 268435456 | 1–1073741824；分别限制 ZIP、展开源总量、输出 JSONL 总量 | 否 |
 | secrets.gateway_cookie | env reference / SecretStr or null | null | 文件只填环境变量名；解析出的 Cookie 非空且不含 CR/LF/NUL | 否 |
 
-这里的六项指五项 settings 加一项可选 secret，version/plugin 沿用运行器。无 instance_id、独立连接超时、TTL、总缓存容量或可调 ZIP 元数据参数。沿用未知字段拒绝和文件/env 验证；配置检查不访问网络。无 Cookie 时允许匿名部署，有网关认证的部署需注入 Cookie。
+这里包含六项 settings 加一项可选 secret，version/plugin 沿用运行器。无 instance_id、独立连接超时、TTL、总缓存容量或可调 ZIP 元数据参数。沿用未知字段拒绝和文件/env 验证；配置检查不访问网络。无 Cookie 时允许匿名部署，有网关认证的部署需注入 Cookie。
 
 文件示例：
 
@@ -55,6 +56,7 @@ settings:
   cache_dir: /var/tmp/mcp-spark-l3
   # 私有 CA 使用可信 PEM；公共受信证书可省略。
   ca_bundle_path: /etc/mcp/spark-ca.pem
+  verify_tls: true  # 仅明确需要跳过证书校验时设为 false
   # 超时和大小上限可省略，使用表中的默认值。
 secrets:
   gateway_cookie: SPARK_GATEWAY_COOKIE
@@ -71,7 +73,9 @@ uv run --locked mcp-stdio --plugin spark --config docs/examples/spark.yaml
 | --- | --- |
 | SPARK_HISTORY_SERVER_URL | settings.history_server_url |
 | SPARK_CACHE_DIR | settings.cache_dir |
-| SPARK_CA_BUNDLE_PATH | settings.ca_bundle_path |
+| SPARK_VERIFY_TLS | settings.verify_tls |
+| SPARK_CA_BUNDLE_PATH | settings.verify_tls | bool | true | false 显式跳过证书及主机名校验，仅部署配置 | 否 |
+| settings.ca_bundle_path |
 | SPARK_REQUEST_TIMEOUT_SECONDS | settings.request_timeout_seconds |
 | SPARK_MAX_BYTES | settings.max_bytes |
 | SPARK_GATEWAY_COOKIE | secrets.gateway_cookie 的秘密值 |
@@ -80,11 +84,12 @@ uv run --locked mcp-stdio --plugin spark --config docs/examples/spark.yaml
 export SPARK_HISTORY_SERVER_URL='https://history.example.invalid:8443/gateway/analytics/sparkhistory'
 export SPARK_CACHE_DIR='/var/tmp/mcp-spark-l3'
 export SPARK_CA_BUNDLE_PATH='/etc/mcp/spark-ca.pem'
+# 如明确需要跳过证书校验：export SPARK_VERIFY_TLS=false
 # SPARK_GATEWAY_COOKIE 预先安全注入，其余使用默认值。
 uv run --locked mcp-stdio --plugin spark
 ```
 
-沿用 core 的优先级：文件值 → 通用 MCP_STDIO 覆盖 → SPARK 前缀覆盖；secret 始终保持私有。TLS 默认验证，私有 CA 用显式 SSLContext；固定 trust_env=False、follow_redirects=False，不消费环境代理或隐式 CA override。无 verify=false、调用者 headers、URL 或 output-path 控制。
+沿用 core 的优先级：文件值 → 通用 MCP_STDIO 覆盖 → SPARK 前缀覆盖；secret 始终保持私有。TLS 默认验证，私有 CA 用显式 SSLContext；固定 trust_env=False、follow_redirects=False，不消费环境代理或隐式 CA override。部署可通过 verify_tls=false / SPARK_VERIFY_TLS=false 显式关闭证书与主机名校验；此时 HTTPX verify=False，ca_bundle_path 不参与连接（如配置仍须通过本地 PEM 验证）。HTTPS、固定 origin、无跳转保持不变。无调用者 headers、URL、TLS 或 output-path 控制。
 
 ### 4. 一个工具，直接返回文件位置
 
@@ -209,7 +214,7 @@ refresh=true 新建一个下载目录，即使内容相同也不去重。保留�
 
 ## Risks / Trade-offs
 
-- [已有 Cookie 过期、私有 CA 未配置] → 明确认证/连接错误，部署维护登录会话与信任链；一次人工 TLS 例外不成为产品配置。
+- [已有 Cookie 过期、私有 CA 未配置] → 明确认证/连接错误，部署维护登录会话与信任链；用户可显式关闭校验，但连接不再验证服务器身份。
 - [源日志尾行损坏] → 首版报错，修复策略留给后续需求。
 - [标准 ZipFile 构建元数据时的内存放大] → 仅固定受信 History Server，限制完整 ZIP 大小和处理成员数；独立 metadata 预检后置。
 - [多次 refresh 增加磁盘占用] → 用户管理专用目录；不为首版引入 GC。强杀残留也手工清理。

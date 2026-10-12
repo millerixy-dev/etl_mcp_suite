@@ -610,12 +610,13 @@ The first format target is the verified Spark 2.4.7 single-file JSONL layout.
 | refresh | false | Reuse matching saved files; true downloads to a new directory |
 
 Unknown arguments and invalid raw types are rejected without echoing argument values.
-No caller URL, output path, credentials or TLS bypass is supported.
+Tool arguments cannot specify URLs, output paths, credentials or TLS settings.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | history_server_url | required | HTTPS root including the gateway mount, without `/api/v1`, credentials or query |
 | cache_dir | required | Absolute dedicated local directory; POSIX macOS/Linux |
+| verify_tls | true | Set false explicitly to skip certificate and hostname verification |
 | ca_bundle_path | null | Optional readable trusted PEM CA for private certificates |
 | request_timeout_seconds | 300 | Whole-call budget, including lookup, queueing and processing (maximum 900) |
 | max_bytes | 268435456 | Independently bounds ZIP bytes, expanded input and output JSONL totals |
@@ -623,7 +624,10 @@ No caller URL, output path, credentials or TLS bypass is supported.
 Use [spark.yaml](docs/examples/spark.yaml) or [spark.json](docs/examples/spark.json).
 Safely inject an existing login Cookie into `SPARK_GATEWAY_COOKIE`; configuration contains
 only its environment-variable name. Anonymous deployments may omit the secret reference.
-Private certificates require a trusted CA; the tool never disables verification or logs in.
+Verification is enabled by default. For an explicitly trusted self-signed deployment, set
+`SPARK_VERIFY_TLS=false` (or YAML `verify_tls: false`) and restart the MCP process.
+This disables server identity verification; HTTPS encryption remains. A configured CA is
+still validated locally but is not used when verification is disabled. The tool does not log in.
 
 ```sh
 uv run --locked mcp-stdio --plugin spark --config docs/examples/spark.yaml

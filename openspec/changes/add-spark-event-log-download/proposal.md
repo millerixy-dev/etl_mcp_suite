@@ -5,7 +5,7 @@ Spark SQL 故障诊断需要先取得可供后续工具读取的 event log。已
 ## What Changes
 
 - 新增固定内置 `spark` 插件，暴露一个工具：`fetch_spark_event_log(application_id, attempt_id=None, refresh=False)`。
-- 使用配置的 History Server 地址和环境注入的已有 Cookie 下载 ZIP；保留 HTTPS 证书验证，支持可信私有 CA。
+- 使用配置的 History Server 地址和环境注入的已有 Cookie 下载 ZIP；默认启用 HTTPS 证书验证，支持可信私有 CA；允许部署显式设置 verify_tls=false 跳过校验。
 - 使用标准库校验 ZIP、JSONL 和 application/attempt 身份，脱敏后保存 JSONL 与一份 `manifest.json`，返回本地路径。
 - 默认复用同来源、同请求的已保存文件；`refresh=true` 重新下载。一次下载一个目录，不引入内容寻址、去重、快照引用或自动缓存清理。
 - 保留实际字节上限、超时、失败清理、私有目录和简单进程锁；补齐插件契约、测试和使用文档。

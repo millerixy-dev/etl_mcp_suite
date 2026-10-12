@@ -17,6 +17,7 @@ class SparkSettings(StrictConfigModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     history_server_url: str
     cache_dir: str
+    verify_tls: bool = True
     ca_bundle_path: str | None = None
     request_timeout_seconds: Annotated[float, Field(gt=0, le=900)] = 300.0
     max_bytes: Annotated[int, Field(ge=1, le=1_073_741_824)] = 268_435_456

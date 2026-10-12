@@ -23,7 +23,7 @@ The Spark plugin SHALL expose exactly `fetch_spark_event_log(application_id: str
 - **THEN** it rejects the request before network/file mutation, using shared ToolError category INVALID_INPUT for application-level failures
 
 ### Requirement: Download only from the configured trusted HTTPS endpoint
-The tool SHALL use only the documented Spark History Server GET paths in design.md, preserving the configured mount. Existing optional gateway Cookie credentials SHALL come from environment variables. TLS verification MUST remain enabled with default trust or a configured trusted CA. The client MUST NOT follow redirects, inherit ambient proxy/CA overrides, extract browser credentials, log in, refresh cookies or automatically retry. HTTP 200 HTML login responses, 401 and redirects SHALL map to AUTHENTICATION_FAILED without exposing bodies or headers.
+The tool SHALL use only the documented Spark History Server GET paths in design.md, preserving the configured mount. Existing optional gateway Cookie credentials SHALL come from environment variables. TLS verification SHALL default to enabled with default trust or a configured trusted CA. Deployment settings MAY explicitly set strict boolean verify_tls=false (SPARK_VERIFY_TLS=false) to disable certificate and hostname verification; this MUST NOT be a tool argument. A configured CA file SHALL still be locally validated but SHALL NOT be used for connections when verification is disabled. The client MUST NOT follow redirects, inherit ambient proxy/CA overrides, extract browser credentials, log in, refresh cookies or automatically retry. HTTP 200 HTML login responses, 401 and redirects SHALL map to AUTHENTICATION_FAILED without exposing bodies or headers.
 
 #### Scenario: Use the gateway mount and environment Cookie
 - **GIVEN** a configured HTTPS gateway prefix and an environment-provided Cookie
@@ -36,9 +36,14 @@ The tool SHALL use only the documented Spark History Server GET paths in design.
 - **THEN** shared ToolError reports AUTHENTICATION_FAILED, no redirect is followed and no evidence is published
 
 #### Scenario: Require a trusted certificate
-- **GIVEN** a private server certificate
+- **GIVEN** a private server certificate and default verify_tls=true
 - **WHEN** a valid trusted CA is supplied
 - **THEN** verification remains enabled; without trust the tool reports CONNECTION_FAILED instead of bypassing verification
+
+#### Scenario: Explicitly skip certificate verification
+- **GIVEN** deployment configuration explicitly sets verify_tls=false
+- **WHEN** the client connects to the configured HTTPS endpoint
+- **THEN** certificate and hostname checks are disabled while fixed origin, redirect rejection, Cookie handling and response validation remain enforced
 
 ### Requirement: Bound and validate ZIP and JSONL input
 The tool SHALL enforce configured max_bytes independently on actual ZIP bytes, total expanded source bytes and total saved JSONL bytes, and one overall deadline covering queueing, lookup and download/processing. It SHALL use public standard-library ZipFile APIs and fixed limits of 16 members and 8 MiB per input/output record. It MUST validate CRC and reject encrypted/unsupported ZIP methods, non-regular members, symlinks, nested/absolute/traversal paths and duplicate names/attempts. Member contents SHALL be uncompressed UTF-8 JSONL objects with valid Event discriminators, consistent LogStart and ApplicationStart records, and application/attempt/filename identities matching the request. The observed Spark Version SHALL be recorded without a patch-version allowlist. No compressed or rolling event-log format SHALL be supported in version one.

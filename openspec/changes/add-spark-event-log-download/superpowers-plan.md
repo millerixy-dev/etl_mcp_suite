@@ -196,3 +196,18 @@ Use actual installed SDK metadata APIs; preserve existing tool output conversion
 3. VERIFY: `uv sync --locked`; `PYTHONPATH=src uv run --locked pytest`; `uv run --locked ruff check .`; `uv run --locked pyright`; `uv build`; console help and actual Spark EOF smoke with a fresh temporary root; strict change/all-changes/all-specs validation. `PYTHONPATH=src uv run --locked pytest -m integration tests/integration/test_spark_server.py` reports skipped if deployment gate missing. Exact results are recorded in verification.md. PYTHONPATH is a development-test workaround for this host's reappearing hidden .pth flags, never a production launch instruction.
 4. COMMIT: `git add src/mcp_stdio/core/server.py src/mcp_stdio/plugins/spark tests/unit/plugins/spark openspec/changes/add-spark-event-log-download`; `git commit -m "fix(spark): preserve exact scope and isolate credential boundaries"`, then commit final verification evidence and gated task completion.
 Self-review 4.2: fixes address reproduced scope/security defects without adding product capabilities.
+
+
+## Task 5.1 — Explicit deployment TLS verification switch
+
+Mode: inline executing-plans, one coupled config/transport task. The only completion checkbox is tasks.md.
+Files: src/mcp_stdio/plugins/spark/{config,http_client}.py; tests/unit/plugins/spark/{test_config,test_http_client}.py; README.md, README.zh-CN.md, docs/examples/spark.{yaml,json}, docs/architecture/{modules,runtime-flow}.md.
+Consumes: existing SparkSettings, load_config, SparkHttpClient._ensure_client.
+Produces: strict boolean `verify_tls: bool = True`, env SPARK_VERIFY_TLS; no tool-schema changes.
+
+1. RED: add config default, file false/env true override, env false, invalid values tests. Parametrize the existing lazy client capture test with verify_tls True/False and assert `options[0]["verify"] is verify_tls`. Run `PYTHONPATH=src uv run --locked pytest tests/unit/plugins/spark/test_config.py tests/unit/plugins/spark/test_http_client.py`; expect missing field/unknown setting failures.
+2. GREEN: add `verify_tls: bool = True` to SparkSettings. In _ensure_client use `context: ssl.SSLContext | bool = self._settings.verify_tls`; `if context and ca_path: context = ssl.create_default_context(cafile=ca_path)`. Run the same command; expect PASS. Existing CA validation and no-redirect controls remain.
+3. Document default true and `export SPARK_VERIFY_TLS=false`, with explicit absence of server identity verification; update example defaults and architecture ownership. Review diff against spec; no dependencies or other plugins changed.
+4. Fresh verification: `uv sync --locked`; `PYTHONPATH=src uv run --locked pytest`; `uv run --locked ruff check .`; `uv run --locked pyright`; `uv build`; `PYTHONPATH=src uv run --locked mcp-stdio --help`; strict OpenSpec change/changes/specs validation. Real MCP stdio call with deployment env SPARK_VERIFY_TLS=false, refresh=true; report authentication result without exposing raw response or credentials.
+5. Gate task only after required checks and docs pass; record real download outcome separately in verification.md. Commit scoped files with `git commit -m "feat(spark): allow explicit TLS verification opt-out"`.
+Self-review: default verification, opt-out, file/env validation, unchanged MCP input and redirection covered. No unresolved design gaps.
