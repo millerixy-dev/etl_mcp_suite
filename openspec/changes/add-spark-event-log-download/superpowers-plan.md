@@ -66,3 +66,19 @@ Use generated output basenames, bound actual source/output totals and line size,
 3. VERIFY: same selected test command and `uv run --locked ruff check src/mcp_stdio/plugins/spark/files.py tests/unit/plugins/spark/test_files.py tests/unit/plugins/spark/fixtures.py`.
 4. COMMIT: `git add src/mcp_stdio/plugins/spark/files.py tests/unit/plugins/spark/test_files.py tests/unit/plugins/spark/fixtures.py openspec/changes/add-spark-event-log-download`; `git commit -m "feat(spark): validate history archives and event identities"`.
 Self-review 2.2: malformed tails fail; no root-cause or application-state inference.
+
+## Task 2.3 — Fixed credential redaction
+
+Files: src/mcp_stdio/plugins/spark/files.py and tests/unit/plugins/spark/test_files.py.
+Consumes validated event dictionaries; produces sanitized JSONL and separate source/output digests.
+1. RED: add synthetic nested passwords/tokens/Cookie values, credential URLs and EnvironmentUpdate properties; `uv run --locked pytest tests/unit/plugins/spark/test_files.py -k 'redact or digest' --tb=short -q` must fail on surviving secret text.
+2. GREEN: a fixed recursive transformation, before output encoding:
+```python
+safe_event = redact_event(event, secret_values)
+encoded = (json.dumps(safe_event, ensure_ascii=False, allow_nan=False,
+                      separators=(",", ":")) + "\\n").encode("utf-8")
+```
+Recognize credential field/assignment and URL userinfo forms, replace known secrets (full Cookie and individual morsels), and retain only the design's static Spark Properties allowlist. Inspect output metadata/serialized records for known values; no migration or rule framework.
+3. VERIFY: `uv run --locked pytest tests/unit/plugins/spark/test_files.py` and `uv run --locked ruff check src/mcp_stdio/plugins/spark/files.py tests/unit/plugins/spark/test_files.py`; all pass and digests track actual bytes.
+4. COMMIT: `git add src/mcp_stdio/plugins/spark/files.py tests/unit/plugins/spark/test_files.py openspec/changes/add-spark-event-log-download`; `git commit -m "feat(spark): redact credentials from staged event logs"`.
+Self-review 2.3: source bytes remain only transient; event structure, order and safe numeric metrics stay intact.

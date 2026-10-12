@@ -25,6 +25,86 @@ from mcp_stdio.plugins.spark.models import (
 MAX_MEMBERS = 16
 MAX_LINE_BYTES = 8 * 1024 * 1024
 
+_SENSITIVE_KEY = re.compile(
+    r"password|passwd|secret|token|cookie|authorization|credential|"
+    r"access[._ -]?key|private[._ -]?key",
+    re.IGNORECASE,
+)
+_ASSIGNMENT = re.compile(
+    r"(?i)((?:password|passwd|secret|token|cookie|authorization|credential|"
+    r"access[._-]?key|private[._-]?key)[A-Za-z0-9._-]*\s*[:=]\s*)"
+    r"(?:\"[^\"]*\"|'[^']*'|(?:Bearer|Basic)\s+[^\s;,&]+|[^\s;,&]+)"
+)
+_USERINFO = re.compile(r"(?i)([a-z][a-z0-9+.-]*://)[^/\s@]*@")
+_SAFE_SPARK_PROPERTIES = frozenset(
+    {
+        "spark.app.id",
+        "spark.master",
+        "spark.submit.deployMode",
+        "spark.executor.memory",
+        "spark.executor.cores",
+        "spark.executor.instances",
+        "spark.driver.memory",
+        "spark.driver.cores",
+        "spark.default.parallelism",
+        "spark.sql.shuffle.partitions",
+        "spark.dynamicAllocation.enabled",
+        "spark.dynamicAllocation.minExecutors",
+        "spark.dynamicAllocation.maxExecutors",
+        "spark.yarn.executor.memoryOverhead",
+    }
+)
+
+
+def credential_values(values: tuple[str, ...]) -> tuple[str, ...]:
+    expanded = set(value for value in values if value)
+    for value in values:
+        for pair in value.split(";"):
+            _, separator, item = pair.partition("=")
+            if separator and item.strip().strip('"'):
+                expanded.add(item.strip().strip('"'))
+    return tuple(sorted(expanded, key=len, reverse=True))
+
+
+def _redact_text(value: str, secrets: tuple[str, ...]) -> str:
+    for secret in secrets:
+        value = value.replace(secret, "[REDACTED]")
+    value = _USERINFO.sub(r"\1[REDACTED]@", value)
+    return _ASSIGNMENT.sub(lambda match: match[1] + "[REDACTED]", value)
+
+
+def _redact_value(value: object, secrets: tuple[str, ...]) -> object:
+    if isinstance(value, str):
+        return _redact_text(value, secrets)
+    if isinstance(value, dict):
+        return {
+            _redact_text(key, secrets): (
+                "[REDACTED]" if _SENSITIVE_KEY.search(key) else _redact_value(item, secrets)
+            )
+            for key, item in cast(dict[str, object], value).items()
+        }
+    if isinstance(value, list):
+        return [_redact_value(item, secrets) for item in cast(list[object], value)]
+    return value
+
+
+def redact_event(event: dict[str, object], secrets: tuple[str, ...]) -> object:
+    if event.get("Event") == "SparkListenerEnvironmentUpdate":
+        event = dict(event)
+        for group, properties in event.items():
+            if group == "Event":
+                continue
+            if isinstance(properties, dict):
+                event[group] = {
+                    key: item
+                    if group == "Spark Properties" and key in _SAFE_SPARK_PROPERTIES
+                    else "[REDACTED]"
+                    for key, item in cast(dict[str, object], properties).items()
+                }
+            else:
+                event[group] = "[REDACTED]"
+    return _redact_value(event, secrets)
+
 
 async def checkpoint(deadline: float) -> None:
     if time.monotonic() >= deadline:
@@ -67,6 +147,7 @@ async def process_archive(
     secret_values: tuple[str, ...] = (),
 ) -> tuple[SparkEventLogFile, ...]:
     FetchRequest(application_id=application_id, attempt_id=attempt_id)
+    secrets = credential_values(secret_values)
     files: list[SparkEventLogFile] = []
     total_source = 0
     total_output = 0
@@ -149,10 +230,15 @@ async def process_archive(
                         end_seen |= name == "SparkListenerApplicationEnd"
                         encoded = (
                             json.dumps(
-                                event, ensure_ascii=False, allow_nan=False, separators=(",", ":")
+                                redact_event(event, secrets),
+                                ensure_ascii=False,
+                                allow_nan=False,
+                                separators=(",", ":"),
                             )
                             + "\n"
                         ).encode("utf-8")
+                        if any(secret in encoded.decode("utf-8") for secret in secrets):
+                            _reject()
                         total_output += len(encoded)
                         if total_output > max_bytes or len(encoded) > MAX_LINE_BYTES:
                             raise spark_error(ErrorCategory.UPSTREAM_ERROR)
@@ -179,6 +265,8 @@ async def process_archive(
                     )
                 )
         if attempt_id is not None and len(files) != 1:
+            _reject()
+        if any(secret in file.model_dump_json() for file in files for secret in secrets):
             _reject()
         return tuple(
             sorted(files, key=lambda item: (item.attempt_id is not None, item.attempt_id or ""))

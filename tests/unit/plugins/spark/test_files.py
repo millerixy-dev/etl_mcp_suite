@@ -1,4 +1,5 @@
 """ZIP/event validation uses synthetic JSONL and archives."""
+# ruff: noqa: ASYNC240 -- synchronous reads of tiny synthetic test files
 
 from __future__ import annotations
 
@@ -139,3 +140,74 @@ async def test_archive_crc_corruption(tmp_path: Path) -> None:
             deadline=time.monotonic() + 5,
         )
     assert error.value.tool_error.category.value == "UNEXPECTED_RESPONSE"
+
+
+@pytest.mark.parametrize(
+    "secret_shape",
+    [
+        {"password": "sensitive-sentinel"},
+        {"nested": {"access_key": "sensitive-sentinel"}},
+        {"detail": "https://user:sensitive-sentinel@service.example/?token=second-sentinel"},
+        {"detail": "authorization: Bearer sensitive-sentinel"},
+        {"detail": "password='sensitive-sentinel'"},
+        {"sensitive-sentinel": "value"},
+        {"detail": "ordinary text sensitive-sentinel"},
+    ],
+)
+async def test_redact_nested_strings_and_credentials(
+    tmp_path: Path, secret_shape: dict[str, object]
+) -> None:
+    import json
+
+    from mcp_stdio.plugins.spark.files import process_archive
+
+    records = events()
+    records.insert(
+        2, {"Event": "SparkListenerTaskEnd", "Metrics": {"duration": 123}, **secret_shape}
+    )
+    data = encode(records)
+    archive = tmp_path / "source.zip"
+    archive.write_bytes(archive_bytes({APP + "_1": data}))
+    result = await process_archive(
+        archive,
+        tmp_path,
+        application_id=APP,
+        attempt_id="1",
+        max_bytes=1000000,
+        deadline=time.monotonic() + 5,
+        secret_values=("session=sensitive-sentinel",),
+    )
+    saved = Path(result[0].local_path).read_bytes()
+    assert b"sensitive-sentinel" not in saved
+    assert b"second-sentinel" not in saved
+    assert result[0].source_sha256 == hashlib.sha256(data).hexdigest()
+    assert result[0].sha256 == hashlib.sha256(saved).hexdigest()
+    assert result[0].sha256 != result[0].source_sha256
+    task = json.loads(saved.splitlines()[2])
+    assert task["Metrics"]["duration"] == 123
+    assert result[0].event_count == 4
+
+
+async def test_redact_environment_allowlist_and_digest(tmp_path: Path) -> None:
+    import json
+
+    records = events()
+    records.insert(
+        2,
+        {
+            "Event": "SparkListenerEnvironmentUpdate",
+            "Spark Properties": {
+                "spark.executor.memory": "4g",
+                "spark.my.custom": "env-secret",
+                "spark.password": "env-secret",
+            },
+            "System Properties": {"java.secret": "env-secret"},
+            "Classpath Entries": {"environment-path": "env-secret"},
+        },
+    )
+    result = await _process(tmp_path, {APP + "_1": encode(records)})
+    saved = Path(result[0].local_path).read_text()
+    assert "env-secret" not in saved
+    env = json.loads(saved.splitlines()[2])
+    assert env["Spark Properties"]["spark.executor.memory"] == "4g"
+    assert env["Spark Properties"]["spark.my.custom"] == "[REDACTED]"
