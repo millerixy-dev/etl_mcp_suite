@@ -18,7 +18,7 @@
 ## 4. 文档与验收
 
 - [x] 4.1 同步 README.md、README.zh-CN.md、Spark YAML/JSON 配置及 MCP host/env-only 示例、两份 docs/architecture 文档、AGENTS.md 插件范围；说明可信 CA、环境 Cookie、host timeout、JSONL 生成时机/脱敏、缓存不保证最新性、refresh 和用户清理；以 `uv run --locked pytest tests/unit/plugins/spark/test_config.py` 检验配置示例并对照 design/specs。示例不含真实主机、日志或秘密。
-- [ ] 4.2 做任务范围与整变更审查后执行 fresh verification：`uv sync --locked`、`uv run --locked pytest`、`uv run --locked ruff check .`、`uv run --locked pyright`、`uv build`、`uv run --locked mcp-stdio --help`，以及临时缓存/不可达源的 Spark console EOF smoke（不联网）；运行 `openspec validate add-spark-event-log-download --strict`、`openspec validate --changes --strict`、`openspec validate --specs --strict`。真实测试仅在 `MCP_STDIO_SPARK_INTEGRATION=1`、`MCP_STDIO_SPARK_APPLICATION_ID`、可选 `MCP_STDIO_SPARK_ATTEMPT_ID` 和部署 SPARK 配置/秘密齐备时运行 `uv run --locked pytest -m integration tests/integration/test_spark_server.py`；否则记录 skipped。本 change 的 verification.md 保存实际命令/结果，必需检查通过才完成。
+- [x] 4.2 做任务范围与整变更审查后执行 fresh verification：`uv sync --locked`、`uv run --locked pytest`、`uv run --locked ruff check .`、`uv run --locked pyright`、`uv build`、`uv run --locked mcp-stdio --help`，以及临时缓存/不可达源的 Spark console EOF smoke（不联网）；运行 `openspec validate add-spark-event-log-download --strict`、`openspec validate --changes --strict`、`openspec validate --specs --strict`。真实测试仅在 `MCP_STDIO_SPARK_INTEGRATION=1`、`MCP_STDIO_SPARK_APPLICATION_ID`、可选 `MCP_STDIO_SPARK_ATTEMPT_ID` 和部署 SPARK 配置/秘密齐备时运行 `uv run --locked pytest -m integration tests/integration/test_spark_server.py`；否则记录 skipped。本 change 的 verification.md 保存实际命令/结果，必需检查通过才完成。
 
 以上十项为唯一实现清单。严格按任务依赖执行 TDD，不为已后置能力补建接口、配置或测试。
 
