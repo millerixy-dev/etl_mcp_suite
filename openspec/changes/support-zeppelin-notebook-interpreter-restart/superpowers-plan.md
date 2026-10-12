@@ -428,3 +428,27 @@ secrets:
 ```
 - [ ] Synchronize README configuration launch snippets (`uv run --locked mcp-stdio --plugin zeppelin --config docs/examples/zeppelin.yaml`) and JSON-array environment overrides; architecture adapter ownership, one overall deadline, cleanup and outgoing HTTP/WebSocket versus local stdio. Minimally expand tool docstrings to the same safety contract.
 - [ ] Verify same test command freshly, then `chflags nohidden .venv/lib/python3.12/site-packages/_editable_impl_hive_cli_mcp_stdio.pth && uv run --locked ruff check tests/unit/test_agent_skills.py tests/unit/plugins/zeppelin/test_config.py tests/unit/plugins/zeppelin/test_tools.py src/mcp_stdio/plugins/zeppelin/tools.py`. Compare tables and examples to active spec/design. Record evidence in `.superpowers/sdd/task-12-implementer.md`. Commit only task hunks, leaving unrelated isolation changes unstaged; do not mark OpenSpec checkbox.
+
+### Task 13: Opt-in discovery and contextual restart (OpenSpec 6.2)
+
+Files: `tests/integration/test_opt_in.py`, `tests/integration/test_zeppelin_server.py`.
+Consumes `ZeppelinHttpClient.get_interpreter_bindings(notebook_id)`,
+`restart_interpreter(setting_id, notebook_id=None)`, and `close()`.
+Produces independently gated live tests; test controls are not runtime settings.
+
+1. Write fake-gated tests first, assert missing prerequisites construct no gateway,
+   exact opaque target forwarding, and finally cleanup on success/failure.
+2. RED command: `MCP_STDIO_ZEPPELIN_INTEGRATION=0 MCP_STDIO_ZEPPELIN_RESTART_INTEGRATION=0 uv run --locked pytest tests/integration/test_opt_in.py -o addopts='' -q`.
+   Expected failure: integration entrypoints missing.
+3. Add `_require_opt_in(discovery=False, restart=False)` before adapter creation;
+   require base flag=1 plus URL/user/password, discovery notebook, and separate
+   restart flag=1 plus explicitly authorized disposable setting. Add one discovery
+   and one contextual restart test, retaining exact IDs and closing in finally.
+4. Preserve legacy lifecycle base gate and integration/asyncio module markers.
+5. GREEN: repeat gate suite; run `uv run --locked pytest tests/integration/test_zeppelin_server.py -o addopts='' -m integration -q`
+   with both flags disabled (expect three skipped). Run focused Ruff, review diff,
+   record results and commit scoped files; controller alone gates tasks.md.
+
+Chronology: initial scoped plan was recorded in `.superpowers/sdd/progress.md`
+before gate tests. This canonical micro-plan was appended after observing RED and
+before editing integration setup (an unavailable bare python command made no edit).
