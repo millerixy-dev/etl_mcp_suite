@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import re
 from collections.abc import Awaitable, Callable
 from typing import cast
 
@@ -14,6 +15,7 @@ from mcp.types import TextContent
 
 from mcp_stdio.contracts.plugin import ToolHandler
 from mcp_stdio.core.errors import ErrorCategory, ToolError, ToolOperation
+from mcp_stdio.core.logging import configure_logging
 from mcp_stdio.plugins.zeppelin.gateway import ZeppelinGateway, ZeppelinGatewayError
 from mcp_stdio.plugins.zeppelin.models import (
     InterpreterBinding,
@@ -332,13 +334,13 @@ async def test_fastmcp_calls_return_exact_public_structured_results() -> None:
         assert isinstance(raw_result, tuple)
         content, structured = cast(tuple[list[TextContent], dict[str, object]], raw_result)
         assert structured == expected
+        if name == "get_interpreter_bindings":
+            assert not {"ticket", "cookie", "roles", "transport", "group", "status"}.intersection(
+                public_keys(structured)
+            )
         assert len(content) == 1
         assert json.loads(content[0].text) == expected
 
-    discovery_keys = public_keys(expectations[0][2])
-    assert not {"ticket", "cookie", "roles", "transport", "group", "status"}.intersection(
-        discovery_keys
-    )
 
 
 @pytest.mark.parametrize(
@@ -399,13 +401,14 @@ async def test_gateway_errors_are_stable_filtered_and_non_emitting(
         ("restart_interpreter", ("spark-prod", "note-1")),
     ],
 )
-async def test_unexpected_errors_are_generic_safe_and_non_emitting(
+async def test_unexpected_errors_are_generic_safe_and_emit_only_safe_diagnostics(
     operation: str,
     arguments: tuple[object, ...],
     capsys: pytest.CaptureFixture[str],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     sentinel = "raw-exception-sentinel"
+    configure_logging(secret_values=(sentinel,))
     service = FakeZeppelinService()
     service.failures[operation] = RuntimeError(f"raw backend failure {sentinel}")
     handler = registered_handlers(
@@ -422,7 +425,19 @@ async def test_unexpected_errors_are_generic_safe_and_non_emitting(
     assert payload["identifiers"] == {}
     assert sentinel not in str(captured.value)
     assert sentinel not in caplog.text
-    assert capsys.readouterr() == ("", "")
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert re.fullmatch(
+        r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} ERROR mcp_stdio\.errors "
+        + re.escape(
+            f"unexpected exception during {operation} correlation_id={payload['correlation_id']}"
+        )
+        + r"\n",
+        output.err,
+    )
+    assert sentinel not in output.err
+    assert "raw backend failure" not in output.err
+    assert "raw backend failure" not in caplog.text
 
 
 @pytest.mark.parametrize(

@@ -7,7 +7,7 @@ import gc
 import json
 import logging
 import socket
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable, Coroutine
 from typing import Protocol, cast
 from urllib.parse import parse_qs, quote
 
@@ -18,7 +18,10 @@ from mcp_stdio.core.errors import ErrorCategory, ToolError, ToolOperation
 from mcp_stdio.plugins.zeppelin import http_client as adapter_module
 from mcp_stdio.plugins.zeppelin.config import ZeppelinSecrets, ZeppelinSettings
 from mcp_stdio.plugins.zeppelin.gateway import ZeppelinGatewayError
-from mcp_stdio.plugins.zeppelin.http_client import ZeppelinHttpClient
+from mcp_stdio.plugins.zeppelin.http_client import (
+    ZeppelinHttpClient,
+    _TicketContext,  # pyright: ignore[reportPrivateUsage] - inspect ticket lifetime
+)
 from mcp_stdio.plugins.zeppelin.http_resources import HttpResources
 from mcp_stdio.plugins.zeppelin.models import (
     CancelParagraphResult,
@@ -44,7 +47,10 @@ def _secrets() -> ZeppelinSecrets:
     )
 
 
-def _mock_transport(handler) -> httpx.MockTransport:
+def _mock_transport(
+    handler: Callable[[httpx.Request], httpx.Response]
+    | Callable[[httpx.Request], Coroutine[None, None, httpx.Response]],
+) -> httpx.MockTransport:
     return httpx.MockTransport(handler)
 
 
@@ -1729,7 +1735,7 @@ async def test_add_paragraph_encodes_opaque_notebook_id_in_path() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         raw = request.url.raw_path
-        seen_paths.append(raw.decode() if isinstance(raw, bytes) else raw)
+        seen_paths.append(raw.decode())
         return _ok("paragraph_123")
 
     adapter = _adapter(_mock_transport(handler))
@@ -1815,7 +1821,7 @@ async def test_get_paragraph_result_error_state_preserves_outputs_and_exception(
         )
 
     adapter = _adapter(_mock_transport(handler))
-    status, outputs, error, truncated = await adapter.get_paragraph_result("nb1", "p1")
+    status, outputs, error, _truncated = await adapter.get_paragraph_result("nb1", "p1")
     assert status is ParagraphStatus.ERROR
     assert len(outputs) == 1
     assert "Traceback: boom" in outputs[0].text
@@ -1838,7 +1844,7 @@ async def test_get_paragraph_result_error_ignores_empty_exception() -> None:
         )
 
     adapter = _adapter(_mock_transport(handler))
-    status, outputs, error, truncated = await adapter.get_paragraph_result("nb1", "p1")
+    status, outputs, error, _truncated = await adapter.get_paragraph_result("nb1", "p1")
     assert status is ParagraphStatus.ERROR
     assert len(outputs) == 1
     assert outputs[0].text == "ExitValue: 1"
@@ -2014,7 +2020,7 @@ async def test_restart_interpreter_encodes_setting_id_in_path() -> None:
         if request.url.path == "/api/login":
             return httpx.Response(200)
         raw = request.url.raw_path
-        seen_paths.append(raw.decode() if isinstance(raw, bytes) else raw)
+        seen_paths.append(raw.decode())
         return _ok({"id": "spark", "name": "spark", "group": "spark", "status": "READY"})
 
     adapter = _adapter(_mock_transport(handler), secrets=_secrets())
@@ -2072,7 +2078,7 @@ async def test_cancel_paragraph_encodes_opaque_ids_in_path() -> None:
         if request.url.path == "/api/login":
             return httpx.Response(200)
         raw = request.url.raw_path
-        seen_paths.append(raw.decode() if isinstance(raw, bytes) else raw)
+        seen_paths.append(raw.decode())
         return _ok(None)
 
     adapter = _adapter(_mock_transport(handler), secrets=_secrets())
@@ -2132,7 +2138,7 @@ async def test_discovery_derives_strict_same_origin_websocket_target(
         return _ok(_ticket())
 
     adapter = _adapter(_mock_transport(handler), settings=_settings(base_url=base_url))
-    context = await adapter._prepare_discovery(
+    context = await adapter._prepare_discovery(  # pyright: ignore[reportPrivateUsage] - exercise private session lifecycle seam
         "note",
         operation=ToolOperation.GET_INTERPRETER_BINDINGS,
         identifiers={"notebook_id": "note"},
@@ -2177,7 +2183,7 @@ async def test_discovery_rejects_ambiguous_websocket_mount_before_network(
 
     adapter = _adapter(_mock_transport(handler), settings=_settings(base_url=base_url))
     with pytest.raises(ZeppelinGatewayError) as error:
-        await adapter._prepare_discovery(
+        await adapter._prepare_discovery(  # pyright: ignore[reportPrivateUsage] - exercise private session lifecycle seam
             "note",
             operation=operation,
             identifiers={
@@ -2192,7 +2198,7 @@ async def test_discovery_rejects_ambiguous_websocket_mount_before_network(
     assert error.value.tool_error.identifiers == {"notebook_id": "note"}
     assert error.value.tool_error.retryable is False
     assert calls == 0
-    assert adapter._client is None
+    assert adapter._client is None  # pyright: ignore[reportPrivateUsage] - exercise private session lifecycle seam
     await adapter.close()
 
 
@@ -2229,12 +2235,12 @@ async def test_discovery_copies_only_httpx_scoped_cookie_for_http_ws_target(
         ),
         settings=_settings(base_url=base_url),
     )
-    client = await adapter._ensure_client()
+    client = await adapter._ensure_client()  # pyright: ignore[reportPrivateUsage] - exercise private session lifecycle seam
     client.cookies.set(
         "other_domain", "other-secret", domain="other.example", path="/proxy"
     )
 
-    context = await adapter._prepare_discovery(
+    context = await adapter._prepare_discovery(  # pyright: ignore[reportPrivateUsage] - exercise private session lifecycle seam
         "note",
         operation=ToolOperation.GET_INTERPRETER_BINDINGS,
         identifiers={"notebook_id": "note"},
@@ -2294,7 +2300,7 @@ async def test_discovery_rejects_redirect_without_forwarding_authentication(
         ),
     )
     with pytest.raises(ZeppelinGatewayError) as error:
-        await adapter._prepare_discovery(
+        await adapter._prepare_discovery(  # pyright: ignore[reportPrivateUsage] - exercise private session lifecycle seam
             "note",
             operation=ToolOperation.GET_INTERPRETER_BINDINGS,
             identifiers={"notebook_id": "note"},
@@ -2304,9 +2310,9 @@ async def test_discovery_rejects_redirect_without_forwarding_authentication(
     assert [request.url.host for request in requests] == ["zep.example", "zep.example"]
     assert all(request.url.query == b"" for request in requests)
     assert all(request.url.userinfo == b"" for request in requests)
-    assert adapter._client is not None
-    assert adapter._client.follow_redirects is False
-    assert adapter._client._trust_env is False
+    assert adapter._client is not None  # pyright: ignore[reportPrivateUsage] - exercise private session lifecycle seam
+    assert adapter._client.follow_redirects is False  # pyright: ignore[reportPrivateUsage] - exercise private session lifecycle seam
+    assert adapter._client._trust_env is False  # pyright: ignore[reportPrivateUsage] - exercise private session lifecycle seam
     captured = capsys.readouterr()
     for secret in (
         "username-secret",
@@ -2363,10 +2369,10 @@ async def test_discovery_prepares_fresh_tickets_with_one_lazy_authenticated_sess
     adapter = _adapter(_mock_transport(handler), secrets=ZeppelinSecrets.model_validate(
         {"username": username, "password": password},
     ))
-    assert adapter._client is None
-    contexts = []
+    assert adapter._client is None  # pyright: ignore[reportPrivateUsage] - exercise private session lifecycle seam
+    contexts: list[_TicketContext] = []
     for _ in range(2):
-        context = await adapter._prepare_discovery(
+        context = await adapter._prepare_discovery(  # pyright: ignore[reportPrivateUsage] - exercise private session lifecycle seam
             notebook_id, operation=ToolOperation.GET_INTERPRETER_BINDINGS,
             identifiers={"notebook_id": notebook_id},
         )
@@ -2643,7 +2649,7 @@ async def test_http_stream_and_client_close_failures_never_emit_sensitive_text(
 
 @pytest.mark.parametrize("body", [None, [], "note", {}, {"id": 1}, {"id": "other"}])
 async def test_discovery_rejects_notebook_body_without_exact_id(body: object) -> None:
-    paths = []
+    paths: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         paths.append(request.url.path)
@@ -2651,7 +2657,7 @@ async def test_discovery_rejects_notebook_body_without_exact_id(body: object) ->
 
     adapter = _adapter(_mock_transport(handler))
     with pytest.raises(ZeppelinGatewayError) as error:
-        await adapter._prepare_discovery(
+        await adapter._prepare_discovery(  # pyright: ignore[reportPrivateUsage] - exercise private session lifecycle seam
             "note", operation=ToolOperation.GET_INTERPRETER_BINDINGS,
             identifiers={"notebook_id": "note"},
         )
@@ -2673,7 +2679,7 @@ async def test_discovery_http_errors_keep_safe_initiating_context(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     caplog.set_level(logging.DEBUG)
-    paths = []
+    paths: list[str] = []
     failed_stream = _TrackedStream([b"private-notebook-text synthetic-ticket secret-roles"])
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -2687,7 +2693,7 @@ async def test_discovery_http_errors_keep_safe_initiating_context(
 
     adapter = _adapter(_mock_transport(handler), secrets=_secrets())
     with pytest.raises(ZeppelinGatewayError) as error:
-        await adapter._prepare_discovery(
+        await adapter._prepare_discovery(  # pyright: ignore[reportPrivateUsage] - exercise private session lifecycle seam
             "note", operation=operation,
             identifiers={"notebook_id": "note", "setting_id": "x" * 257,
                          "password": "synthetic-password"},
@@ -2716,7 +2722,7 @@ async def test_discovery_rejects_invalid_ticket_roles(roles: object) -> None:
 
     adapter = _adapter(_mock_transport(handler))
     with pytest.raises(ZeppelinGatewayError) as error:
-        await adapter._prepare_discovery("note", operation=ToolOperation.GET_INTERPRETER_BINDINGS,
+        await adapter._prepare_discovery("note", operation=ToolOperation.GET_INTERPRETER_BINDINGS,  # pyright: ignore[reportPrivateUsage] - exercise private session lifecycle seam
                                          identifiers={"notebook_id": "note"})
     assert error.value.tool_error.category == ErrorCategory.UNEXPECTED_RESPONSE
     await adapter.close()
@@ -2733,7 +2739,7 @@ async def test_discovery_rejects_missing_or_invalid_ticket_fields(body: object) 
 
     adapter = _adapter(_mock_transport(handler), settings=_settings(max_response_bytes=512))
     with pytest.raises(ZeppelinGatewayError) as error:
-        await adapter._prepare_discovery("note", operation=ToolOperation.GET_INTERPRETER_BINDINGS,
+        await adapter._prepare_discovery("note", operation=ToolOperation.GET_INTERPRETER_BINDINGS,  # pyright: ignore[reportPrivateUsage] - exercise private session lifecycle seam
                                          identifiers={"notebook_id": "note"})
     assert error.value.tool_error.category == ErrorCategory.UNEXPECTED_RESPONSE
     await adapter.close()
@@ -2741,7 +2747,7 @@ async def test_discovery_rejects_missing_or_invalid_ticket_fields(body: object) 
 
 @pytest.mark.parametrize("allow_anonymous", [True, False])
 async def test_discovery_anonymous_mode_requires_upstream_ticket(allow_anonymous: bool) -> None:
-    paths = []
+    paths: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         paths.append(request.url.path)
@@ -2752,13 +2758,13 @@ async def test_discovery_anonymous_mode_requires_upstream_ticket(allow_anonymous
 
     adapter = _adapter(_mock_transport(handler))
     if allow_anonymous:
-        context = await adapter._prepare_discovery(
+        context = await adapter._prepare_discovery(  # pyright: ignore[reportPrivateUsage] - exercise private session lifecycle seam
             "note", operation=ToolOperation.GET_INTERPRETER_BINDINGS,
             identifiers={"notebook_id": "note"})
         assert context.principal == "anonymous"
     else:
         with pytest.raises(ZeppelinGatewayError) as error:
-            await adapter._prepare_discovery(
+            await adapter._prepare_discovery(  # pyright: ignore[reportPrivateUsage] - exercise private session lifecycle seam
                 "note", operation=ToolOperation.GET_INTERPRETER_BINDINGS,
                 identifiers={"notebook_id": "note"})
         assert error.value.tool_error.category == ErrorCategory.AUTHENTICATION_FAILED
@@ -2772,7 +2778,7 @@ async def test_discovery_caps_streamed_bodies_without_trusting_content_length(
     stage: str, headers: dict[str, str],
 ) -> None:
     stream = _TrackedStream([b"x" * 80, b"y" * 80, b"must-not-read"])
-    paths = []
+    paths: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         paths.append(request.url.path)
@@ -2783,7 +2789,7 @@ async def test_discovery_caps_streamed_bodies_without_trusting_content_length(
     adapter = _adapter(_mock_transport(handler), settings=_settings(max_response_bytes=128),
                        secrets=_secrets())
     with pytest.raises(ZeppelinGatewayError) as error:
-        await adapter._prepare_discovery("note", operation=ToolOperation.RESTART_INTERPRETER,
+        await adapter._prepare_discovery("note", operation=ToolOperation.RESTART_INTERPRETER,  # pyright: ignore[reportPrivateUsage] - exercise private session lifecycle seam
                                          identifiers={"notebook_id": "note", "setting_id": "spark"})
     assert error.value.tool_error.category == ErrorCategory.UNEXPECTED_RESPONSE
     assert error.value.tool_error.operation == ToolOperation.RESTART_INTERPRETER
@@ -2796,12 +2802,13 @@ async def test_discovery_caps_streamed_bodies_without_trusting_content_length(
 @pytest.mark.parametrize("document", [[], None, {"body": {"id": "note"}},
     {"status": "OK", "body": {"id": "other"}}, {"status": "ERROR", "body": {"id": "note"}}])
 async def test_discovery_rejects_invalid_envelopes(document: object) -> None:
-    adapter = _adapter(_mock_transport(lambda request: httpx.Response(200, json=document)))
+    adapter = _adapter(_mock_transport(lambda _request: httpx.Response(200, json=document)))
     with pytest.raises(ZeppelinGatewayError) as error:
-        await adapter._prepare_discovery("note", operation=ToolOperation.GET_INTERPRETER_BINDINGS,
+        await adapter._prepare_discovery("note", operation=ToolOperation.GET_INTERPRETER_BINDINGS,  # pyright: ignore[reportPrivateUsage] - exercise private session lifecycle seam
                                          identifiers={"notebook_id": "note"})
     category = (ErrorCategory.UPSTREAM_ERROR if isinstance(document, dict)
-                and document.get("status") == "ERROR" else ErrorCategory.UNEXPECTED_RESPONSE)
+                and cast(dict[str, object], document).get("status") == "ERROR"
+                else ErrorCategory.UNEXPECTED_RESPONSE)
     assert error.value.tool_error.category == category
     await adapter.close()
 
@@ -2816,9 +2823,9 @@ async def test_discovery_stream_failures_close_and_preserve_context(
     operation: ToolOperation, failure: Exception, category: ErrorCategory,
 ) -> None:
     stream = _TrackedStream([b"{"], failure)
-    adapter = _adapter(_mock_transport(lambda request: httpx.Response(200, stream=stream)))
+    adapter = _adapter(_mock_transport(lambda _request: httpx.Response(200, stream=stream)))
     with pytest.raises(ZeppelinGatewayError) as error:
-        await adapter._prepare_discovery("n" * 300, operation=operation,
+        await adapter._prepare_discovery("n" * 300, operation=operation,  # pyright: ignore[reportPrivateUsage] - exercise private session lifecycle seam
                                          identifiers={"notebook_id": "n" * 300})
     assert stream.closed
     assert error.value.tool_error.operation == operation
@@ -2832,7 +2839,7 @@ async def test_discovery_stream_failures_close_and_preserve_context(
 @pytest.mark.parametrize("operation", [ToolOperation.LIST_NOTEBOOKS,
                                         ToolOperation.RESTART_INTERPRETER])
 async def test_legacy_login_errors_keep_the_initiating_operation(operation: ToolOperation) -> None:
-    adapter = _adapter(_mock_transport(lambda request: httpx.Response(403)), secrets=_secrets())
+    adapter = _adapter(_mock_transport(lambda _request: httpx.Response(403)), secrets=_secrets())
     with pytest.raises(ZeppelinGatewayError) as error:
         if operation == ToolOperation.LIST_NOTEBOOKS:
             await adapter.list_notebooks()

@@ -273,7 +273,7 @@ def test_notebook_tree_node_builds_from_flat_paths() -> None:
         ("nb-2", "/team/note-b"),
         ("nb-3", "/Untitled Note"),
     ]
-    tree = build_notebook_tree(entries)
+    tree = build_notebook_tree(tuple(entries))
 
     assert isinstance(tree, tuple)
     # Root should have "team" folder and "Untitled Note" leaf
@@ -540,13 +540,10 @@ def test_restart_interpreter_result_is_frozen_with_four_fields() -> None:
 
 def test_restart_interpreter_result_rejects_extra_fields() -> None:
     with pytest.raises(ValidationError):
-        RestartInterpreterResult(
-            setting_id="spark",
-            name="spark",
-            group="spark",
-            status="READY",
-            properties={"key": "value"},
-        )
+        RestartInterpreterResult.model_validate({
+            "setting_id": "spark", "name": "spark", "group": "spark",
+            "status": "READY", "properties": {"key": "value"},
+        })
 
 
 
@@ -558,7 +555,9 @@ def test_cancel_paragraph_result_is_frozen_with_two_fields() -> None:
 
 def test_cancel_paragraph_result_rejects_extra_fields() -> None:
     with pytest.raises(ValidationError):
-        CancelParagraphResult(notebook_id="nb-1", paragraph_id="p-1", status="OK")
+        CancelParagraphResult.model_validate(
+            {"notebook_id": "nb-1", "paragraph_id": "p-1", "status": "OK"}
+        )
 
 
 def test_interpreter_binding_is_strict_frozen_and_has_exact_json_shape() -> None:

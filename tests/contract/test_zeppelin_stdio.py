@@ -101,6 +101,7 @@ def test_discovery_stdio_protocol_and_shutdown_cleanup(tmp_path: Path, outcome: 
         _send(process, _TOOLS_LIST_REQUEST)
         messages.append(_read(process))
         assert messages[-1]["id"] == 2
+        assert len(messages[-1]["result"]["tools"]) == 9
         assert {tool["name"] for tool in messages[-1]["result"]["tools"]} == {
             "list_notebooks",
             "create_notebook",

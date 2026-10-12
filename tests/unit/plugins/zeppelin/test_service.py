@@ -427,7 +427,7 @@ async def test_add_paragraph_rejects_body_without_shebang_before_network() -> No
 
 
 async def test_add_paragraph_returns_result() -> None:
-    service, gateway = _service()
+    service, _gateway = _service()
     result = await service.add_paragraph("nb-1", "title", "%spark\nbody")
     assert result.notebook_id == "nb-1"
     assert result.paragraph_id == "p-1"
@@ -463,7 +463,7 @@ async def test_add_paragraph_rejects_sql_write_to_non_approved_database_before_n
 
 
 async def test_add_paragraph_allows_sql_read_against_any_database() -> None:
-    service, gateway = _service(allowed_interpreters=("spark.sql",))
+    service, _gateway = _service(allowed_interpreters=("spark.sql",))
     result = await service.add_paragraph(
         "nb-1", "title", "%spark.sql\nSELECT * FROM any_db.t"
     )
@@ -529,7 +529,7 @@ async def test_add_paragraph_rejects_forbidden_truncate_on_approved_database() -
 
 
 async def test_add_paragraph_allows_create_on_approved_database() -> None:
-    service, gateway = _service(allowed_interpreters=("spark.sql",))
+    service, _gateway = _service(allowed_interpreters=("spark.sql",))
     result = await service.add_paragraph(
         "nb-1", "title", "%spark.sql\nCREATE TABLE tmp_dc_ep.my_table (id int)"
     )
@@ -537,7 +537,7 @@ async def test_add_paragraph_allows_create_on_approved_database() -> None:
 
 
 async def test_add_paragraph_allows_alter_on_approved_database() -> None:
-    service, gateway = _service(allowed_interpreters=("spark.sql",))
+    service, _gateway = _service(allowed_interpreters=("spark.sql",))
     result = await service.add_paragraph(
         "nb-1", "title", "%spark.sql\nALTER TABLE tmp_dc_ep.my_table ADD COLUMNS (x int)"
     )
@@ -674,7 +674,7 @@ async def test_add_paragraph_rejects_spark_sql_forbidden_drop() -> None:
 
 
 async def test_add_paragraph_explains_embedded_sql_write_target_rejection() -> None:
-    service, gateway = _service()
+    service, _gateway = _service()
     body = (
         '%spark\n'
         'spark.sql("INSERT OVERWRITE TABLE dwd_dc_ep.x SELECT 1")'
@@ -760,7 +760,7 @@ async def test_restart_interpreter_allowlisted_calls_gateway() -> None:
 
 
 async def test_restart_interpreter_returns_result_from_gateway() -> None:
-    service, gateway = _service(restartable_interpreter_settings=("spark", "sh"))
+    service, _gateway = _service(restartable_interpreter_settings=("spark", "sh"))
     result = await service.restart_interpreter("sh")
     assert result.setting_id == "sh"
     assert result.group == "sh"

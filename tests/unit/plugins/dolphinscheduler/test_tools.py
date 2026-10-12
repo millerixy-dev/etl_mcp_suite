@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import json
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -18,9 +19,10 @@ from mcp_stdio.plugins.dolphinscheduler.gateway import (
 )
 from mcp_stdio.plugins.dolphinscheduler.service import DolphinSchedulerStatusService
 from mcp_stdio.plugins.dolphinscheduler.tools import DolphinSchedulerToolAdapter
+from tests.unit.plugins.dolphinscheduler.fakes import UnsupportedGateway
 
 
-class FakeGateway:
+class FakeGateway(UnsupportedGateway):
     def __init__(self, servers: tuple[RawServer, ...] = (), error: Exception | None = None) -> None:
         self._servers = servers
         self._error = error
@@ -123,11 +125,12 @@ from mcp_stdio.plugins.dolphinscheduler.service import (  # noqa: E402
     ExtractLogLinksResult,
     GetTaskLogResult,
     ListObjectsResult,
+    ProjectSummary,
     StartWorkflowResult,
 )
 
 
-def _required_params(method) -> set[str]:
+def _required_params(method: Callable[..., object]) -> set[str]:
     signature = inspect.signature(method)
     return {
         name
@@ -172,22 +175,30 @@ def test_extract_log_links_input_schema() -> None:
     }
 
 
-class StubGateway:
-    async def get_status(self):
+class StubGateway(UnsupportedGateway):
+    async def get_status(self) -> tuple[RawServer, ...]:
         return ()
 
-    async def list_projects(self):
+    async def list_projects(self) -> tuple[RawProject, ...]:
         return (RawProject(1, "p1"),)
 
     async def start_workflow(
-        self, *, project_code, process_definition_code, dry_run, start_node_list, timeout
-    ):
+        self,
+        *,
+        project_code: int,
+        process_definition_code: int,
+        dry_run: int,
+        start_node_list: str | None,
+        timeout: int | None,
+    ) -> RawStartResult:
         return RawStartResult(process_definition_code, None, dry_run)
 
-    async def get_task_log(self, *, project_code, task_instance_id, skip_line_num, limit):
+    async def get_task_log(
+        self, *, project_code: int, task_instance_id: int, skip_line_num: int, limit: int
+    ) -> RawTaskLog:
         return RawTaskLog(1000, "log-line")
 
-    async def download_task_log(self, *, project_code, task_instance_id):
+    async def download_task_log(self, *, project_code: int, task_instance_id: int) -> str:
         return "application_1690000000000_0001\nSpark UI: http://rm:8088/proxy/application_1690000000000_0001"
 
     async def close(self) -> None:
@@ -203,6 +214,7 @@ async def test_list_objects_returns_normalized_result_shape() -> None:
     result = await _stub_adapter().list_objects(object_type="project")
     assert isinstance(result, ListObjectsResult)
     assert result.object_type == "project"
+    assert isinstance(result.items[0], ProjectSummary)
     assert result.items[0].code == 1
     assert result.page_no == 1
 

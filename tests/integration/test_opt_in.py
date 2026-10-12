@@ -50,6 +50,9 @@ def _forbidden_gateway(**kwargs):
     [
         ("MCP_STDIO_ZEPPELIN_INTEGRATION", "0"),
         ("MCP_STDIO_ZEPPELIN_RESTART_INTEGRATION", "0"),
+        ("MCP_STDIO_ZEPPELIN_RESTART_INTEGRATION", None),
+        ("MCP_STDIO_ZEPPELIN_RESTART_INTEGRATION", "true"),
+        ("MCP_STDIO_ZEPPELIN_RESTART_INTEGRATION", "2"),
         ("MCP_STDIO_ZEPPELIN_RESTART_INTEGRATION", ""),
         ("MCP_STDIO_ZEPPELIN_RESTART_SETTING_ID", ""),
     ],
@@ -59,7 +62,10 @@ async def test_restart_requires_separate_explicit_gate(monkeypatch, key, value):
 
     for name, setting in _ENV.items():
         monkeypatch.setenv(name, setting)
-    monkeypatch.setenv(key, value)
+    if value is None:
+        monkeypatch.delenv(key, raising=False)
+    else:
+        monkeypatch.setenv(key, value)
     monkeypatch.setattr(live, "ZeppelinHttpClient", _forbidden_gateway, raising=False)
     entry = getattr(live, "test_zeppelin_restart", None)
     assert entry is not None, "restart entrypoint missing"

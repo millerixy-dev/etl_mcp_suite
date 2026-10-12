@@ -12,11 +12,15 @@ from mcp_stdio.plugins.dolphinscheduler.gateway import (
 )
 from mcp_stdio.plugins.dolphinscheduler.service import (
     DolphinSchedulerStatusService,
+    ProcessInstanceSummary,
     ServerStatusResult,
+    TaskInstanceSummary,
+    WorkflowSummary,
 )
+from tests.unit.plugins.dolphinscheduler.fakes import UnsupportedGateway
 
 
-class FakeGateway:
+class FakeGateway(UnsupportedGateway):
     def __init__(self, servers: tuple[RawServer, ...] = (), error: Exception | None = None) -> None:
         self._servers = servers
         self._error = error
@@ -106,7 +110,7 @@ from mcp_stdio.plugins.dolphinscheduler.gateway import (  # noqa: E402
 )
 
 
-class SchedulingGateway:
+class SchedulingGateway(UnsupportedGateway):
     """Fake gateway recording calls and returning canned scheduling values."""
 
     def __init__(self) -> None:
@@ -132,53 +136,64 @@ class SchedulingGateway:
         self.calls.append(("list_projects", {}))
         return self.projects
 
-    async def search_projects(self, *, search_val, page_no, page_size):
+    async def search_projects(
+        self, *, search_val: str, page_no: int, page_size: int
+    ) -> RawPage[RawProject]:
         self.calls.append(
             (
                 "search_projects",
                 {"search_val": search_val, "page_no": page_no, "page_size": page_size},
             )
         )
-        return self.projects and RawPage(self.projects, len(self.projects)) or RawPage((), 0)
+        return RawPage(self.projects, len(self.projects))
 
-    async def get_project(self, *, code):
+    async def get_project(self, *, code: int) -> RawProject:
         self.calls.append(("get_project", {"code": code}))
         return self.project
 
-    async def list_workflows(self, *, project_code):
+    async def list_workflows(self, *, project_code: int) -> tuple[RawWorkflow, ...]:
         self.calls.append(("list_workflows", {"project_code": project_code}))
         return self.workflows
 
-    async def search_workflows(self, *, project_code, search_val, page_no, page_size):
+    async def search_workflows(
+        self, *, project_code: int, search_val: str, page_no: int, page_size: int
+    ) -> RawPage[RawWorkflow]:
         self.calls.append(("search_workflows", {"search_val": search_val, "page_size": page_size}))
         return RawPage(self.workflows, len(self.workflows))
 
-    async def get_workflow(self, *, project_code, code):
+    async def get_workflow(self, *, project_code: int, code: int) -> RawWorkflow:
         self.calls.append(("get_workflow", {"code": code}))
         return self.workflow
 
-    async def query_nodes(self, *, project_code, search_task_name, page_no, page_size):
+    async def query_nodes(
+        self,
+        *,
+        project_code: int,
+        search_task_name: str | None,
+        page_no: int,
+        page_size: int,
+    ) -> RawPage[RawNode]:
         self.calls.append(
             ("query_nodes", {"search_task_name": search_task_name, "page_size": page_size})
         )
         return self.nodes_page
 
-    async def get_node(self, *, project_code, code):
+    async def get_node(self, *, project_code: int, code: int) -> RawNode:
         self.calls.append(("get_node", {"code": code}))
         return self.node
 
     async def query_process_instances(
         self,
         *,
-        project_code,
-        process_definition_code,
-        search_val,
-        state_type,
-        start_date,
-        end_date,
-        page_no,
-        page_size,
-    ):
+        project_code: int,
+        process_definition_code: int | None,
+        search_val: str | None,
+        state_type: str | None,
+        start_date: str | None,
+        end_date: str | None,
+        page_no: int,
+        page_size: int,
+    ) -> RawPage[RawProcessInstance]:
         self.calls.append(
             (
                 "query_process_instances",
@@ -191,11 +206,15 @@ class SchedulingGateway:
         )
         return self.process_instances_page
 
-    async def get_process_instance(self, *, project_code, process_instance_id):
+    async def get_process_instance(
+        self, *, project_code: int, process_instance_id: int
+    ) -> RawProcessInstance:
         self.calls.append(("get_process_instance", {"process_instance_id": process_instance_id}))
         return self.process_instance
 
-    async def list_task_instances_of_process(self, *, project_code, process_instance_id):
+    async def list_task_instances_of_process(
+        self, *, project_code: int, process_instance_id: int
+    ) -> tuple[RawTaskInstance, ...]:
         self.calls.append(
             ("list_task_instances_of_process", {"process_instance_id": process_instance_id})
         )
@@ -204,16 +223,16 @@ class SchedulingGateway:
     async def query_task_instances(
         self,
         *,
-        project_code,
-        process_instance_id,
-        search_val,
-        task_name,
-        state_type,
-        start_date,
-        end_date,
-        page_no,
-        page_size,
-    ):
+        project_code: int,
+        process_instance_id: int | None,
+        search_val: str | None,
+        task_name: str | None,
+        state_type: str | None,
+        start_date: str | None,
+        end_date: str | None,
+        page_no: int,
+        page_size: int,
+    ) -> RawPage[RawTaskInstance]:
         self.calls.append(
             (
                 "query_task_instances",
@@ -227,8 +246,14 @@ class SchedulingGateway:
         return self.task_instances_page
 
     async def start_workflow(
-        self, *, project_code, process_definition_code, dry_run, start_node_list, timeout
-    ):
+        self,
+        *,
+        project_code: int,
+        process_definition_code: int,
+        dry_run: int,
+        start_node_list: str | None,
+        timeout: int | None,
+    ) -> RawStartResult:
         self.calls.append(
             (
                 "start_workflow",
@@ -237,11 +262,13 @@ class SchedulingGateway:
         )
         return self.start_result
 
-    async def get_task_log(self, *, project_code, task_instance_id, skip_line_num, limit):
+    async def get_task_log(
+        self, *, project_code: int, task_instance_id: int, skip_line_num: int, limit: int
+    ) -> RawTaskLog:
         self.calls.append(("get_task_log", {"skip_line_num": skip_line_num, "limit": limit}))
         return self.task_log
 
-    async def download_task_log(self, *, project_code, task_instance_id):
+    async def download_task_log(self, *, project_code: int, task_instance_id: int) -> str:
         self.calls.append(("download_task_log", {"task_instance_id": task_instance_id}))
         return self.downloaded_log
 
@@ -281,6 +308,7 @@ async def test_list_workflows_uses_project_code() -> None:
     gw.workflows = (RawWorkflow(11, "wf"),)
     service, gw = _sched(gateway=gw)
     result = await service.list_objects(object_type="workflow", project_code=9)
+    assert isinstance(result.items[0], WorkflowSummary)
     assert result.items[0].code == 11
     assert gw.calls[0] == ("list_workflows", {"project_code": 9})
 
@@ -333,8 +361,10 @@ async def test_get_workflow_returns_related_process_instances() -> None:
     gw.process_instances_page = RawPage((RawProcessInstance(5, "pi"),), 1)
     service, _ = _sched(gateway=gw)
     result = await service.get_object(object_type="workflow", project_code=9, code=11)
+    assert isinstance(result.object, WorkflowSummary)
     assert result.object.code == 11
     assert result.related is not None
+    assert isinstance(result.related[0], ProcessInstanceSummary)
     assert result.related[0].id == 5
 
 
@@ -344,8 +374,10 @@ async def test_get_process_instance_returns_related_task_instances() -> None:
     gw.task_instances_of_process = (RawTaskInstance(77, "t"),)
     service, _ = _sched(gateway=gw)
     result = await service.get_object(object_type="process_instance", project_code=9, id=5)
+    assert isinstance(result.object, ProcessInstanceSummary)
     assert result.object.id == 5
     assert result.related is not None
+    assert isinstance(result.related[0], TaskInstanceSummary)
     assert result.related[0].id == 77
 
 
@@ -356,6 +388,7 @@ async def test_get_task_instance_resolves_via_process_instance_tasks() -> None:
     result = await service.get_object(
         object_type="task_instance", project_code=9, process_instance_id=5, task_instance_id=77
     )
+    assert isinstance(result.object, TaskInstanceSummary)
     assert result.object.id == 77
 
 
