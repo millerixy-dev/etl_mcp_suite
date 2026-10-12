@@ -24,7 +24,7 @@ MCP Host
 │     └── Hive plugin ── PyHive/Thrift/LDAP ── HiveServer2
 │
 ├── mcp-stdio --plugin zeppelin [--config zeppelin.yaml]   # --config optional; ZEPPELIN_* env vars may supply everything
-│     └── Zeppelin plugin ── REST ── Zeppelin Server
+│     └── Zeppelin plugin ── HTTP / WebSocket ── Zeppelin Server
 │
 └── mcp-stdio --plugin dolphinscheduler --config dolphinscheduler.json   (deferred)
       └── DolphinScheduler plugin ── REST ── DolphinScheduler             (deferred)
@@ -141,6 +141,28 @@ stateDiagram-v2
 
 Opaque notebook and paragraph IDs are size-checked and URL-encoded. Large output is truncated to the configured limit and marked with `truncated: true`.
 
+### Interpreter discovery and restart
+
+The Zeppelin process exposes nine tools, including `cancel_paragraph`, `get_interpreter_bindings` and `restart_interpreter` in addition to the six lifecycle tools above.
+
+```text
+get_interpreter_bindings(notebook_id)
+  -> validate opaque ID locally
+  -> acquire serialized discovery slot within one overall deadline
+  -> HTTP verify readable notebook with matching ID (discard content)
+  -> obtain fresh private session ticket
+  -> derive same-origin /api -> /ws, HTTP(S) -> WS(S)
+  -> query GET_INTERPRETER_BINDINGS on one isolated outgoing socket
+  -> bound/validate response, discard extra/auth fields, close socket
+  -> return notebook_id + bindings (setting_id/name/interpreters/selected/restart_allowed)
+```
+
+Discovery needs neither execution nor restart permission. `restart_allowed` is the exact local ID allowlist decision, not upstream authorization or health. Select the exact returned ID with `selected=true` and `restart_allowed=true`; pass it with the same notebook ID to restart. Execution interpreter names and restart setting IDs have independent default-deny allowlists.
+
+The service checks the local restart allowlist before any network call. The HTTP gateway serializes fresh discovery, selected membership enforcement and one HTTP PUT with `{"noteId": notebook_id}`. Its overall deadline includes lock waiting, precheck, ticket, socket query and PUT. Omitted/null notebook context explicitly retains legacy setting-wide PUT with no body/discovery. Failures never drop context, retry/reconnect a PUT, or automatically execute paragraphs. A four-field `setting_id/name/group/status` result acknowledges reported state only; a shared interpreter process can affect other notebooks.
+
+Local MCP transport remains JSON-RPC over stdio. HTTP and WebSocket are outgoing Zeppelin connections, with no MCP HTTP/SSE/WebSocket listener. An ambiguous REST mount fails before network access rather than guessing a route. Success, failure, cancellation and shutdown close built-in streams/sockets within the configured cleanup allowance, terminate receive tasks and close the owned HTTP session. Discovery is serialized per plugin process and tickets are never cached between queries. The query authentication envelope is released after its socket closes; contextual restart retains only a call-local secret guard through success-result validation, then clears it on every outcome. Application logging setup and the adapter before HTTP client creation apply the shared HTTPX/httpcore wire-log suppression policy; root logging and safe application diagnostics remain unchanged. Both restart modes reject configured/session secrets in public strings, including response-installed cookies; contextual mode also checks its query-scoped secret values.
+
 ## DolphinScheduler Request Flow
 
 The v1 DolphinScheduler plugin exposes only `get_server_status`. This plugin is **deferred** to a follow-up change; the flow below describes the planned behavior for reference.
@@ -188,7 +210,7 @@ Shutdown starts when stdin reaches EOF, the MCP session is cancelled, startup fa
 ```text
 Stop accepting MCP work
   -> allow the active request to finish or cancel it
-  -> close plugin-owned HTTP client/session state
+  -> close plugin-owned WebSocket queries/receive tasks and HTTP client/session state
   -> close any active cursor/connection in its existing finally path
   -> flush redacted stderr logs
   -> exit child process

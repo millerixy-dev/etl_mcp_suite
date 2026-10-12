@@ -1,7 +1,7 @@
 # plugin-stdio-runtime Specification
 
 ## Purpose
-TBD - created by archiving change deliver-hive-plugin-slice. Update Purpose after archive.
+Provide a reproducible Python package and isolated plugin processes communicating with MCP hosts over stdio, with validated local configuration, protected credentials, safe errors, and owned-resource cleanup.
 ## Requirements
 ### Requirement: Reproduce the project with uv on Python 3.10+
 The project SHALL declare Python 3.10 or newer, SHALL use uv for project and dependency management, and SHALL commit `uv.lock` so a locked environment can be reproduced without ad hoc pip commands.

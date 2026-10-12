@@ -16,6 +16,7 @@ from mcp_stdio.plugins.zeppelin.models import (
     AddParagraphResult,
     CancelParagraphResult,
     CreateNotebookResult,
+    InterpreterBindingsResult,
     NotebookTreeResult,
     ParagraphResult,
     ParagraphStatusResult,
@@ -25,6 +26,10 @@ from mcp_stdio.plugins.zeppelin.models import (
 from mcp_stdio.plugins.zeppelin.service import ZeppelinNotebookService
 
 ZeppelinToolString = Annotated[object, WithJsonSchema({"type": "string"})]
+ZeppelinToolNullableString = Annotated[
+    object,
+    WithJsonSchema({"anyOf": [{"type": "string"}, {"type": "null"}]}),
+]
 
 
 class ZeppelinToolAdapter:
@@ -40,7 +45,7 @@ class ZeppelinToolAdapter:
         self._secret_values = tuple(value for value in secret_values if value)
 
     def register_tools(self, registrar: ToolRegistrar) -> None:
-        """Register exactly the seven approved Zeppelin tools."""
+        """Register exactly the nine approved Zeppelin notebook tools."""
 
         registrar.add_tool(self.list_notebooks, name="list_notebooks")
         registrar.add_tool(self.create_notebook, name="create_notebook")
@@ -48,6 +53,10 @@ class ZeppelinToolAdapter:
         registrar.add_tool(self.run_paragraph, name="run_paragraph")
         registrar.add_tool(self.get_paragraph_status, name="get_paragraph_status")
         registrar.add_tool(self.get_paragraph_result, name="get_paragraph_result")
+        registrar.add_tool(
+            self.get_interpreter_bindings,
+            name="get_interpreter_bindings",
+        )
         registrar.add_tool(self.restart_interpreter, name="restart_interpreter")
         registrar.add_tool(self.cancel_paragraph, name="cancel_paragraph")
 
@@ -134,11 +143,48 @@ class ZeppelinToolAdapter:
                 unexpected_tool_error(error, operation=ToolOperation.GET_PARAGRAPH_RESULT)
             )
 
-    async def restart_interpreter(self, setting_id: ZeppelinToolString) -> RestartInterpreterResult:
-        """Restart an allowlisted Zeppelin interpreter setting."""
+    async def get_interpreter_bindings(
+        self, notebook_id: ZeppelinToolString,
+    ) -> InterpreterBindingsResult:
+        """Discover exact setting IDs for a readable notebook without execution/restart.
+
+        Explicitly select a binding with selected=true and restart_allowed=true,
+        then restart with that exact ID and the same notebook_id; never guess IDs
+        from names or paragraph prefixes. restart_allowed is local policy, not
+        upstream authorization or health. Execution and restart allowlists are
+        independent; discovery requires neither permission.
+        """
 
         try:
-            return await self._service.restart_interpreter(setting_id)
+            return await self._service.get_interpreter_bindings(notebook_id)
+        except ZeppelinGatewayError as error:
+            self._raise_tool_error(error.tool_error)
+        except Exception as error:
+            self._raise_tool_error(
+                unexpected_tool_error(
+                    error,
+                    operation=ToolOperation.GET_INTERPRETER_BINDINGS,
+                )
+            )
+
+    async def restart_interpreter(
+        self,
+        setting_id: ZeppelinToolString,
+        notebook_id: ZeppelinToolNullableString = None,
+    ) -> RestartInterpreterResult:
+        """Restart an exact allowlisted setting after explicit binding selection.
+
+        Use get_interpreter_bindings first and pass the same notebook_id with a
+        selected, restart_allowed setting_id. Execution and restart permissions
+        are independent. Omitted/null notebook_id preserves legacy setting-wide
+        scope. Notebook context does not isolate shared interpreter processes.
+        Never guess IDs, drop context as fallback, retry a restart automatically,
+        treat restart as a general retry, or automatically re-execute a paragraph.
+        The four-field result acknowledges reported state, not verified health.
+        """
+
+        try:
+            return await self._service.restart_interpreter(setting_id, notebook_id)
         except ZeppelinGatewayError as error:
             self._raise_tool_error(error.tool_error)
         except Exception as error:

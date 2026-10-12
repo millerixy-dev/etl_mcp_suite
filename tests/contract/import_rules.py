@@ -42,9 +42,16 @@ def _imports(tree: ast.AST, package: str) -> list[tuple[str, int]]:
         if isinstance(node, ast.Import):
             imports.extend((alias.name, node.lineno) for alias in node.names)
         elif isinstance(node, ast.ImportFrom):
-            imports.extend(
-                (imported, node.lineno) for imported in _resolve_from_import(node, package)
-            )
+            resolved = _resolve_from_import(node, package)
+            imports.extend((imported, node.lineno) for imported in resolved)
+            if node.module:
+                # A package import may name the adapter in the imported aliases.
+                imports.extend(
+                    (f"{imported}.{alias.name}", node.lineno)
+                    for imported in resolved
+                    for alias in node.names
+                    if alias.name == "websocket_client"
+                )
     return imports
 
 
@@ -58,9 +65,9 @@ def _plugin_name(module: str) -> str | None:
 def _is_service_infrastructure_import(module: str, imported: str) -> bool:
     if not module.endswith(".service"):
         return False
-    if imported.split(".", maxsplit=1)[0] in {"httpx", "mcp", "pyhive"}:
+    if imported.split(".", maxsplit=1)[0] in {"httpx", "mcp", "pyhive", "websockets"}:
         return True
-    infrastructure_modules = {"http_client", "plugin", "pyhive", "tools"}
+    infrastructure_modules = {"http_client", "plugin", "pyhive", "tools", "websocket_client"}
     return imported.split(".")[-1] in infrastructure_modules
 
 

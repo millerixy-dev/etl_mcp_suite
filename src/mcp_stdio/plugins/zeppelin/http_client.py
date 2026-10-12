@@ -2,16 +2,26 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
-from typing import Any, cast
+import re
+from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import dataclass
+from http.cookies import CookieError, SimpleCookie
+from typing import Any, TypeVar, cast
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
-from mcp_stdio.core.errors import ErrorCategory, ToolError, ToolOperation
+from mcp_stdio.core.errors import ErrorCategory, ToolError, ToolOperation, safe_error_identifiers
+from mcp_stdio.core.logging import suppress_http_transport_logging
 from mcp_stdio.plugins.zeppelin.config import ZeppelinSecrets, ZeppelinSettings
 from mcp_stdio.plugins.zeppelin.gateway import ZeppelinGatewayError
+from mcp_stdio.plugins.zeppelin.http_resources import HttpResources, abort_http_response
 from mcp_stdio.plugins.zeppelin.models import (
     CancelParagraphResult,
+    InterpreterBindingRecord,
     NotebookTreeNode,
     OutputItem,
     OutputKind,
@@ -23,10 +33,168 @@ from mcp_stdio.plugins.zeppelin.models import (
     truncate_utf8,
     validate_opaque_id,
 )
+from mcp_stdio.plugins.zeppelin.websocket_client import (
+    SingleQueryConnection,
+    SocketConnector,
+    await_cleanup,
+    query_bindings,
+)
 
 logger = logging.getLogger("mcp_stdio.zeppelin")
 
 _ZEPPELIN_STATUS_OK = "OK"
+_COOKIE_NAME_PATTERN = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
+_Result = TypeVar("_Result")
+
+# A non-cooperative transport must not hold shutdown open or lose task ownership.
+_http_close_tasks: set[asyncio.Task[None]] = set()
+_http_work_tasks: set[asyncio.Task[object]] = set()
+
+
+def _observe_http_close(task: asyncio.Task[None]) -> None:
+    _http_close_tasks.discard(task)
+    if not task.cancelled():
+        task.exception()
+
+
+def _observe_http_work(task: asyncio.Task[object]) -> None:
+    _http_work_tasks.discard(task)
+    if not task.cancelled():
+        task.exception()
+
+
+class _OwnedResponseStream(httpx.AsyncByteStream):
+    """Own EOF-triggered closure independently of HTTPX's early is_closed flag."""
+
+    def __init__(
+        self, stream: httpx.AsyncByteStream, close: Callable[[], Awaitable[None]],
+    ) -> None:
+        self._stream = stream
+        self._close = close
+        self._close_task: asyncio.Future[None] | None = None
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        async for chunk in self._stream:
+            yield chunk
+
+    async def aclose(self) -> None:
+        if self._close_task is None:
+            self._close_task = asyncio.ensure_future(self._close())
+        await await_cleanup(self._close_task)
+
+    async def finish(self, response: httpx.Response) -> None:
+        try:
+            await response.aclose()
+        finally:
+            await self.aclose()
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class _TicketContext:
+    """Transient adapter-only authentication; never include its fields in repr."""
+
+    principal: str
+    ticket: str
+    roles: str
+    websocket_url: str
+    origin: str
+    cookie_header: str | None
+    sensitive_values: tuple[str, ...]
+
+
+@dataclass(slots=True, repr=False)
+class _RestartSecretGuard:
+    """Call-local taint values; never retain the query authentication envelope."""
+
+    values: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class _DiscoveryTarget:
+    websocket_url: str
+    http_url: str
+    origin: str
+
+
+def _derive_discovery_target(base_url: str) -> _DiscoveryTarget:
+    """Derive the documented same-origin Zeppelin WebSocket target."""
+    parts = urlsplit(base_url)
+    try:
+        hostname = parts.hostname
+        _ = parts.port
+    except ValueError:
+        raise ValueError("base URL has no unambiguous WebSocket mapping") from None
+    websocket_scheme = {"http": "ws", "https": "wss"}.get(parts.scheme)
+    prefix, separator, final_component = parts.path.rpartition("/")
+    if (
+        websocket_scheme is None
+        or not parts.netloc
+        or not hostname
+        or parts.username is not None
+        or parts.password is not None
+        or parts.query
+        or parts.fragment
+        or not separator
+        or final_component != "api"
+    ):
+        raise ValueError("base URL has no unambiguous WebSocket mapping")
+    websocket_path = f"{prefix}/ws"
+    return _DiscoveryTarget(
+        websocket_url=urlunsplit(
+            (websocket_scheme, parts.netloc, websocket_path, "", "")
+        ),
+        http_url=urlunsplit((parts.scheme, parts.netloc, websocket_path, "", "")),
+        origin=urlunsplit((parts.scheme, parts.netloc, "", "", "")),
+    )
+
+
+def _cookie_values(cookie_header: str | None) -> tuple[str, ...]:
+    if cookie_header is None:
+        return ()
+    segments: list[str] = []
+    start = 0
+    quoted = False
+    escaped = False
+    for index, character in enumerate(cookie_header):
+        if escaped:
+            escaped = False
+        elif quoted and character == "\\":
+            escaped = True
+        elif character == '"':
+            quoted = not quoted
+        elif character == ";" and not quoted:
+            segments.append(cookie_header[start:index])
+            start = index + 1
+    if quoted or escaped:
+        raise ValueError("invalid Cookie header")
+    segments.append(cookie_header[start:])
+
+    values: list[str] = []
+    for raw_segment in segments:
+        segment = raw_segment.strip(" \t")
+        raw_name, separator, raw_value = segment.partition("=")
+        name = raw_name.strip(" \t")
+        coded_value = raw_value.strip(" \t")
+        if (
+            not segment
+            or not separator
+            or _COOKIE_NAME_PATTERN.fullmatch(name) is None
+        ):
+            raise ValueError("invalid Cookie header")
+        cookie = SimpleCookie()
+        try:
+            cookie.load(f"mcp_cookie={coded_value}")
+        except CookieError:
+            raise ValueError("invalid Cookie header") from None
+        if (
+            len(cookie) != 1
+            or "mcp_cookie" not in cookie
+            or cookie["mcp_cookie"].coded_value != coded_value
+        ):
+            raise ValueError("invalid Cookie header")
+        if cookie["mcp_cookie"].value:
+            values.append(cookie["mcp_cookie"].value)
+    return tuple(values)
 
 
 class ZeppelinHttpClient:
@@ -38,47 +206,314 @@ class ZeppelinHttpClient:
         settings: ZeppelinSettings,
         secrets: ZeppelinSecrets,
         transport: httpx.AsyncBaseTransport | None = None,
+        websocket_connector: SocketConnector = SingleQueryConnection,
     ) -> None:
         self._settings = settings
         self._secrets = secrets
         self._transport = transport
+        self._http_resources = HttpResources()
         self._client: httpx.AsyncClient | None = None
         self._authenticated = False
         self._closed = False
+        self._websocket_connector = websocket_connector
+        self._discovery_lock = asyncio.Lock()
+        self._discoveries: set[asyncio.Task[tuple[InterpreterBindingRecord, ...]]] = set()
+        self._restarts: set[asyncio.Task[RestartInterpreterResult]] = set()
+        self._close_task: asyncio.Task[None] | None = None
+
+    async def get_interpreter_bindings(
+        self, notebook_id: str,
+    ) -> tuple[InterpreterBindingRecord, ...]:
+        deadline = asyncio.get_running_loop().time() + self._settings.request_timeout_seconds
+        if self._closed:
+            raise asyncio.CancelledError
+        cancelled = asyncio.Event()
+        task = asyncio.create_task(self._serialized_discovery(notebook_id, deadline, cancelled))
+        self._discoveries.add(task)
+        try:
+            return await self._await_owned_task(task, cancelled)
+        finally:
+            self._discoveries.discard(task)
+
+    async def _await_owned_task(
+        self, task: asyncio.Task[_Result], cancelled: asyncio.Event,
+    ) -> _Result:
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled.set()
+            task.cancel()
+            try:
+                await await_cleanup(task)
+            except (Exception, asyncio.CancelledError):
+                pass
+            raise
+
+    async def _release_discovery_lock(self, acquisition: asyncio.Task[bool]) -> None:
+        if not acquisition.done():
+            acquisition.cancel()
+        try:
+            await await_cleanup(asyncio.gather(acquisition, return_exceptions=True))
+        finally:
+            if not acquisition.cancelled() and acquisition.exception() is None:
+                if acquisition.result():
+                    self._discovery_lock.release()
+
+    async def _serialized_discovery(
+        self, notebook_id: str, deadline: float, cancelled: asyncio.Event,
+    ) -> tuple[InterpreterBindingRecord, ...]:
+        operation = ToolOperation.GET_INTERPRETER_BINDINGS
+        identifiers = {"notebook_id": notebook_id}
+        acquisition = asyncio.create_task(self._discovery_lock.acquire())
+        guard = _RestartSecretGuard()
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(acquisition),
+                max(0, deadline - asyncio.get_running_loop().time()),
+            )
+            if self._closed or cancelled.is_set():
+                raise asyncio.CancelledError
+            result = await self._discover_locked(
+                notebook_id, deadline=deadline, operation=operation, identifiers=identifiers,
+                cancelled=cancelled,
+                secret_guard=guard,
+            )
+            if self._closed or cancelled.is_set():
+                raise asyncio.CancelledError
+            return result
+        except asyncio.TimeoutError:
+            raise self._gateway_error(
+                ErrorCategory.TIMEOUT, operation,
+                self._untainted_identifiers(identifiers, guard.values),
+            ) from None
+        finally:
+            guard.values = ()
+            await self._release_discovery_lock(acquisition)
+
+    async def _discover_locked(
+        self, notebook_id: str, *, deadline: float, operation: ToolOperation,
+        identifiers: dict[str, str],
+        cancelled: asyncio.Event | None = None,
+        secret_guard: _RestartSecretGuard | None = None,
+    ) -> tuple[InterpreterBindingRecord, ...]:
+        """Use only with the discovery lock held; never acquire it recursively."""
+        preparation = asyncio.create_task(
+            self._prepare_discovery(
+                notebook_id, operation=operation, identifiers=identifiers,
+                secret_guard=secret_guard,
+            ),
+        )
+        try:
+            context = await asyncio.wait_for(
+                asyncio.shield(preparation),
+                max(0, deadline - asyncio.get_running_loop().time()),
+            )
+        finally:
+            if not preparation.done():
+                preparation.cancel()
+            # Python 3.10/3.11 wait_for must not detach a stream on a second cancel.
+            await await_cleanup(asyncio.gather(preparation, return_exceptions=True))
+        try:
+            if self._closed or (cancelled is not None and cancelled.is_set()):
+                raise asyncio.CancelledError
+            if secret_guard is not None:
+                secret_guard.values += context.sensitive_values
+            query_identifiers = self._untainted_identifiers(identifiers, context.sensitive_values)
+            if operation == ToolOperation.GET_INTERPRETER_BINDINGS and any(
+                secret in notebook_id for secret in context.sensitive_values
+            ):
+                raise self._gateway_error(
+                    ErrorCategory.UNEXPECTED_RESPONSE, operation, query_identifiers,
+                    retryable=False,
+                )
+            return await query_bindings(
+                url=context.websocket_url, origin=context.origin, principal=context.principal,
+                ticket=context.ticket, roles=context.roles, cookie_header=context.cookie_header,
+                notebook_id=notebook_id, max_response_bytes=self._settings.max_response_bytes,
+                max_opaque_id_chars=self._settings.max_opaque_id_chars,
+                request_timeout_seconds=self._settings.request_timeout_seconds,
+                operation=operation, identifiers=query_identifiers,
+                connector=self._websocket_connector,
+                deadline=deadline, sensitive_values=context.sensitive_values,
+            )
+        finally:
+            del context
 
     async def _ensure_client(self) -> httpx.AsyncClient:
         if self._client is None:
+            suppress_http_transport_logging()
             self._client = httpx.AsyncClient(
                 base_url=self._settings.base_url,
                 timeout=self._settings.request_timeout_seconds,
-                transport=self._transport,
+                transport=self._http_resources.attach(self._transport),
                 trust_env=False,
+                follow_redirects=False,
             )
         return self._client
 
-    async def _ensure_authenticated(self) -> httpx.AsyncClient:
+    async def _ensure_authenticated(
+        self,
+        *,
+        operation: ToolOperation,
+        identifiers: dict[str, str],
+        discovery: bool = False,
+    ) -> httpx.AsyncClient:
         client = await self._ensure_client()
         if self._authenticated or self._secrets.username is None:
             return client
         username = self._secrets.username.get_secret_value()
         password = self._secrets.password
         assert password is not None
-        response = await self._request(
+        await self._request(
             client,
             "POST",
             "/login",
-            content=f"userName={username}&password={password.get_secret_value()}",
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-            operation=ToolOperation.CREATE_NOTEBOOK,
-            identifiers={},
+            form_data={"userName": username, "password": password.get_secret_value()},
+            operation=operation,
+            identifiers=identifiers,
             expect_body=False,
+            discovery=discovery,
         )
         self._authenticated = True
-        del response
         return client
 
+    async def _prepare_discovery(
+        self,
+        notebook_id: str,
+        *,
+        operation: ToolOperation,
+        identifiers: dict[str, str],
+        secret_guard: _RestartSecretGuard | None = None,
+    ) -> _TicketContext:
+        """Check notebook readability and obtain fresh auth on the same session."""
+        try:
+            target = _derive_discovery_target(self._settings.base_url)
+        except ValueError:
+            raise self._gateway_error(
+                ErrorCategory.CONFIG_ERROR,
+                operation,
+                identifiers,
+                retryable=False,
+            ) from None
+        encoded_id = self._encode_id(notebook_id)
+        session_values = self._stage_sensitive_values(operation, secret_guard)
+        identifiers = self._untainted_identifiers(identifiers, session_values)
+        client = await self._ensure_authenticated(
+            operation=operation, identifiers=identifiers, discovery=True,
+        )
+        session_values += self._stage_sensitive_values(operation, secret_guard)
+        identifiers = self._untainted_identifiers(identifiers, session_values)
+        notebook = await self._request(
+            client, "GET", f"/notebook/{encoded_id}", operation=operation,
+            identifiers=identifiers, expect_body=True, discovery=True, notebook_precheck=True,
+        )
+        session_values += self._stage_sensitive_values(operation, secret_guard)
+        identifiers = self._untainted_identifiers(identifiers, session_values)
+        if (
+            not isinstance(notebook, dict)
+            or cast(dict[str, Any], notebook).get("id") != notebook_id
+        ):
+            raise self._gateway_error(ErrorCategory.UNEXPECTED_RESPONSE, operation, identifiers)
+        del notebook
+        body = await self._request(
+            client, "GET", "/security/ticket", operation=operation,
+            identifiers=identifiers, expect_body=True, discovery=True,
+        )
+        session_values += self._stage_sensitive_values(operation, secret_guard)
+        identifiers = self._untainted_identifiers(identifiers, session_values)
+        if not isinstance(body, dict):
+            raise self._gateway_error(ErrorCategory.UNEXPECTED_RESPONSE, operation, identifiers)
+        available_identity_fields = tuple(
+            value for key in ("principal", "ticket")
+            if isinstance(value := cast(dict[str, object], body).get(key), str) and value
+        )
+        raw_roles = cast(dict[str, object], body).get("roles")
+        available_fields = (*available_identity_fields,
+                            *((raw_roles,) if isinstance(raw_roles, str) and raw_roles else ()))
+        session_values += available_identity_fields
+        guard_before_fields = () if secret_guard is None else secret_guard.values
+        if secret_guard is not None:
+            secret_guard.values += available_fields
+        identifiers = self._untainted_identifiers(identifiers, (*session_values, *available_fields))
+        fields: list[str] = []
+        for key in ("principal", "ticket", "roles"):
+            value = cast(dict[str, Any], body).get(key)
+            if not isinstance(value, str) or not value:
+                raise self._gateway_error(ErrorCategory.UNEXPECTED_RESPONSE, operation, identifiers)
+            try:
+                byte_length = len(value.encode("utf-8"))
+            except UnicodeError:
+                raise self._gateway_error(
+                    ErrorCategory.UNEXPECTED_RESPONSE, operation, identifiers,
+                ) from None
+            if byte_length > self._settings.max_response_bytes:
+                raise self._gateway_error(ErrorCategory.UNEXPECTED_RESPONSE, operation, identifiers)
+            fields.append(value)
+        principal, ticket, roles = fields
+        try:
+            decoded_roles: object = json.loads(roles)
+        except (ValueError, RecursionError):
+            raise self._gateway_error(
+                ErrorCategory.UNEXPECTED_RESPONSE, operation, identifiers,
+            ) from None
+        available_roles: tuple[str, ...] = ()
+        if isinstance(decoded_roles, list):
+            available_roles = tuple(
+                role for role in cast(list[object], decoded_roles) if isinstance(role, str) and role
+            )
+            session_values += available_roles
+            if secret_guard is not None:
+                secret_guard.values += available_roles
+            identifiers = self._untainted_identifiers(identifiers, session_values)
+        if not isinstance(decoded_roles, list) or not all(
+            isinstance(role, str) for role in cast(list[object], decoded_roles)
+        ):
+            raise self._gateway_error(ErrorCategory.UNEXPECTED_RESPONSE, operation, identifiers)
+        if secret_guard is not None:
+            # Valid roles protect decoded nonempty values, not harmless JSON punctuation.
+            secret_guard.values = (
+                *guard_before_fields, *available_identity_fields, *available_roles,
+            )
+        cookie_header = client.build_request("GET", target.http_url).headers.get("cookie")
+        try:
+            cookie_values = _cookie_values(cookie_header)
+        except ValueError:
+            raise self._gateway_error(
+                ErrorCategory.UNEXPECTED_RESPONSE,
+                operation,
+                identifiers,
+                retryable=False,
+            ) from None
+        configured_secrets = tuple(
+            secret.get_secret_value()
+            for secret in (self._secrets.username, self._secrets.password)
+            if secret is not None and secret.get_secret_value()
+        )
+        role_values = tuple(
+            role for role in cast(list[str], decoded_roles) if role
+        )
+        return _TicketContext(
+            principal=principal,
+            ticket=ticket,
+            roles=roles,
+            websocket_url=target.websocket_url,
+            origin=target.origin,
+            cookie_header=cookie_header,
+            sensitive_values=tuple(value for value in (
+                *session_values,
+                *self._stage_sensitive_values(operation, secret_guard),
+                *configured_secrets,
+                principal,
+                ticket,
+                *role_values,
+                *cookie_values,
+            ) if value),
+        )
+
     async def list_notebooks(self) -> tuple[NotebookTreeNode, ...]:
-        client = await self._ensure_authenticated()
+        client = await self._ensure_authenticated(
+            operation=ToolOperation.LIST_NOTEBOOKS, identifiers={},
+        )
         body = await self._request_json(
             client,
             "GET",
@@ -106,7 +541,9 @@ class ZeppelinHttpClient:
         return build_notebook_tree(tuple(entries))
 
     async def create_notebook(self, name: str) -> str:
-        client = await self._ensure_authenticated()
+        client = await self._ensure_authenticated(
+            operation=ToolOperation.CREATE_NOTEBOOK, identifiers={},
+        )
         body = await self._request_json(
             client,
             "POST",
@@ -124,7 +561,9 @@ class ZeppelinHttpClient:
         body: str,
     ) -> str:
         encoded_nb = self._encode_id(notebook_id)
-        client = await self._ensure_authenticated()
+        client = await self._ensure_authenticated(
+            operation=ToolOperation.ADD_PARAGRAPH, identifiers={"notebook_id": notebook_id},
+        )
         result = await self._request_json(
             client,
             "POST",
@@ -138,7 +577,10 @@ class ZeppelinHttpClient:
     async def run_paragraph(self, notebook_id: str, paragraph_id: str) -> ParagraphStatus:
         encoded_nb = self._encode_id(notebook_id)
         encoded_p = self._encode_id(paragraph_id)
-        client = await self._ensure_authenticated()
+        client = await self._ensure_authenticated(
+            operation=ToolOperation.RUN_PARAGRAPH,
+            identifiers={"notebook_id": notebook_id, "paragraph_id": paragraph_id},
+        )
         await self._request_json(
             client,
             "POST",
@@ -154,7 +596,10 @@ class ZeppelinHttpClient:
     ) -> CancelParagraphResult:
         encoded_nb = self._encode_id(notebook_id)
         encoded_p = self._encode_id(paragraph_id)
-        client = await self._ensure_authenticated()
+        client = await self._ensure_authenticated(
+            operation=ToolOperation.CANCEL_PARAGRAPH,
+            identifiers={"notebook_id": notebook_id, "paragraph_id": paragraph_id},
+        )
         await self._request_json(
             client,
             "DELETE",
@@ -209,7 +654,10 @@ class ZeppelinHttpClient:
     async def _fetch_paragraph(self, notebook_id: str, paragraph_id: str) -> dict[str, Any]:
         encoded_nb = self._encode_id(notebook_id)
         encoded_p = self._encode_id(paragraph_id)
-        client = await self._ensure_authenticated()
+        client = await self._ensure_authenticated(
+            operation=ToolOperation.GET_PARAGRAPH_RESULT,
+            identifiers={"notebook_id": notebook_id, "paragraph_id": paragraph_id},
+        )
         body = await self._request_json(
             client,
             "GET",
@@ -226,53 +674,237 @@ class ZeppelinHttpClient:
             )
         return cast(dict[str, Any], body)
 
-    async def restart_interpreter(self, setting_id: str) -> RestartInterpreterResult:
+    async def restart_interpreter(
+        self, setting_id: str, notebook_id: str | None = None,
+    ) -> RestartInterpreterResult:
+        deadline = asyncio.get_running_loop().time() + self._settings.request_timeout_seconds
+        if notebook_id is not None:
+            if self._closed:
+                raise asyncio.CancelledError
+            cancelled = asyncio.Event()
+            task = asyncio.create_task(
+                self._serialized_restart(setting_id, notebook_id, deadline, cancelled),
+            )
+            self._restarts.add(task)
+            try:
+                return await self._await_owned_task(task, cancelled)
+            finally:
+                self._restarts.discard(task)
+
         encoded_id = self._encode_id(setting_id)
-        client = await self._ensure_authenticated()
-        body = await self._request_json(
-            client,
-            "PUT",
-            f"/interpreter/setting/restart/{encoded_id}",
-            json_payload=None,
-            operation=ToolOperation.RESTART_INTERPRETER,
-            identifiers={"setting_id": setting_id},
-        )
-        if not isinstance(body, dict):
-            raise self._gateway_error(
-                ErrorCategory.UNEXPECTED_RESPONSE,
-                ToolOperation.RESTART_INTERPRETER,
-                {"setting_id": setting_id},
-            )
-        typed_body = cast(dict[str, Any], body)
+        identifiers = {"setting_id": setting_id}
+        path = f"/interpreter/setting/restart/{encoded_id}"
+        guard = _RestartSecretGuard()
         try:
-            return RestartInterpreterResult(
-                setting_id=str(typed_body["id"]),
-                name=str(typed_body["name"]),
-                group=str(typed_body["group"]),
-                status=str(typed_body["status"]),
+            guard.values = self._stage_sensitive_values(ToolOperation.RESTART_INTERPRETER)
+            client = await self._ensure_authenticated(
+                operation=ToolOperation.RESTART_INTERPRETER,
+                identifiers=self._untainted_identifiers(identifiers, guard.values),
             )
-        except KeyError:
+            guard.values += self._restart_sensitive_values(client, path, identifiers)
+            body = await self._request_json(
+                client, "PUT", path, json_payload=None,
+                operation=ToolOperation.RESTART_INTERPRETER,
+                identifiers=self._untainted_identifiers(identifiers, guard.values),
+            )
+            guard.values += self._restart_sensitive_values(client, path, identifiers)
+            return self._parse_restart_result(body, setting_id, identifiers, guard.values)
+        finally:
+            guard.values = ()
+
+    async def _serialized_restart(
+        self, setting_id: str, notebook_id: str, deadline: float, cancelled: asyncio.Event,
+    ) -> RestartInterpreterResult:
+        operation = ToolOperation.RESTART_INTERPRETER
+        identifiers = {"setting_id": setting_id, "notebook_id": notebook_id}
+        acquisition = asyncio.create_task(self._discovery_lock.acquire())
+        guard = _RestartSecretGuard()
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(acquisition),
+                max(0, deadline - asyncio.get_running_loop().time()),
+            )
+            if self._closed or cancelled.is_set():
+                raise asyncio.CancelledError
+            bindings = await self._discover_locked(
+                notebook_id, deadline=deadline, operation=operation, identifiers=identifiers,
+                cancelled=cancelled,
+                secret_guard=guard,
+            )
+            if self._closed or cancelled.is_set():
+                raise asyncio.CancelledError
+            if not any(item.setting_id == setting_id and item.selected for item in bindings):
+                raise self._gateway_error(ErrorCategory.INVALID_INPUT, operation, identifiers)
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                raise asyncio.TimeoutError
+            client = await self._ensure_client()
+            path = f"/interpreter/setting/restart/{self._encode_id(setting_id)}"
+            guard.values += self._restart_sensitive_values(client, path, identifiers)
+            put = asyncio.create_task(self._request(
+                client, "PUT", path,
+                json_payload={"noteId": notebook_id}, operation=operation,
+                identifiers=self._untainted_identifiers(identifiers, guard.values),
+                expect_body=True, discovery=True,
+            ))
+            try:
+                body = await asyncio.wait_for(asyncio.shield(put), remaining)
+            finally:
+                await await_cleanup(asyncio.create_task(self._finish_http_work(put)))
+            if self._closed or cancelled.is_set():
+                raise asyncio.CancelledError
+            guard.values += self._restart_sensitive_values(client, path, identifiers)
+            return self._parse_restart_result(body, setting_id, identifiers, guard.values)
+        except asyncio.TimeoutError:
             raise self._gateway_error(
-                ErrorCategory.UNEXPECTED_RESPONSE,
-                ToolOperation.RESTART_INTERPRETER,
-                {"setting_id": setting_id},
+                ErrorCategory.TIMEOUT, operation,
+                self._untainted_identifiers(identifiers, guard.values), retryable=False,
+            ) from None
+        except ZeppelinGatewayError as exc:
+            raise self._gateway_error(
+                exc.tool_error.category, operation,
+                self._untainted_identifiers(dict(exc.tool_error.identifiers), guard.values),
+                retryable=False,
+            ) from None
+        finally:
+            guard.values = ()
+            await self._release_discovery_lock(acquisition)
+
+    async def _finish_http_work(self, task: asyncio.Task[object]) -> None:
+        """Bound cleanup and retain a silent owner if a custom transport cannot stop."""
+        _http_work_tasks.add(task)
+        task.add_done_callback(_observe_http_work)
+        if not task.done():
+            task.cancel()
+            await asyncio.wait(
+                (task,), timeout=min(5.0, self._settings.request_timeout_seconds),
+            )
+            if not task.done():
+                try:
+                    self._http_resources.abort()
+                except Exception:
+                    pass
+                task.cancel()
+                # Abort schedules socket and waiter callbacks. Give them finite
+                # loop turns without another potentially unbounded task join.
+                for _ in range(8):
+                    if task.done():
+                        break
+                    await asyncio.sleep(0)
+        if task.done():
+            _observe_http_work(task)
+
+    @staticmethod
+    def _untainted_identifiers(
+        identifiers: dict[str, str], sensitive_values: tuple[str, ...],
+    ) -> dict[str, str]:
+        return {
+            key: value for key, value in identifiers.items()
+            if not any(secret in value for secret in sensitive_values)
+        }
+
+    def _restart_sensitive_values(
+        self, client: httpx.AsyncClient, path: str, identifiers: dict[str, str],
+    ) -> tuple[str, ...]:
+        available = self._stage_sensitive_values(ToolOperation.RESTART_INTERPRETER)
+        try:
+            cookies = _cookie_values(client.build_request("PUT", path).headers.get("cookie"))
+        except ValueError:
+            raise self._gateway_error(
+                ErrorCategory.UNEXPECTED_RESPONSE, ToolOperation.RESTART_INTERPRETER,
+                {}, retryable=False,
+            ) from None
+        return (*available, *cookies)
+
+    def _parse_restart_result(
+        self, body: object, setting_id: str, identifiers: dict[str, str],
+        sensitive_values: tuple[str, ...],
+    ) -> RestartInterpreterResult:
+        try:
+            if not isinstance(body, dict):
+                raise ValueError
+            fields = cast(dict[str, object], body)
+            result = RestartInterpreterResult(
+                setting_id=validate_opaque_id(
+                    fields.get("id"), max_chars=self._settings.max_opaque_id_chars,
+                ),
+                name=validate_opaque_id(fields.get("name"), max_chars=256),
+                group=validate_opaque_id(fields.get("group"), max_chars=256),
+                status=validate_opaque_id(fields.get("status"), max_chars=256),
+            )
+            if result.setting_id != setting_id:
+                raise ValueError
+            public_values = (result.setting_id, result.name, result.group, result.status)
+            if any(secret in value for secret in sensitive_values for value in public_values):
+                raise ValueError
+            serialized = json.dumps(
+                result.model_dump(mode="json"), ensure_ascii=False, separators=(",", ":"),
+            ).encode("utf-8")
+            if len(serialized) > self._settings.max_result_bytes:
+                raise ValueError
+            return result
+        except (ValueError, UnicodeError):
+            raise self._gateway_error(
+                ErrorCategory.UNEXPECTED_RESPONSE, ToolOperation.RESTART_INTERPRETER,
+                self._untainted_identifiers(identifiers, sensitive_values), retryable=False,
             ) from None
 
     async def close(self) -> None:
-        if self._closed:
-            return
         self._closed = True
+        if self._close_task is None:
+            deadline = asyncio.get_running_loop().time() + min(
+                5.0, self._settings.request_timeout_seconds,
+            )
+            self._close_task = asyncio.create_task(self._close(deadline))
+        await await_cleanup(self._close_task)
+
+    async def _close(self, deadline: float) -> None:
+        discoveries = (*self._discoveries, *self._restarts)
+        for task in discoveries:
+            task.cancel()
+        pending = cast(tuple[Awaitable[object], ...], discoveries)
+        await asyncio.gather(*pending, return_exceptions=True)
         if self._client is not None:
-            try:
-                await self._client.aclose()
-            except Exception:
-                logger.debug("error closing zeppelin http client", exc_info=True)
+            await self._close_http_resource(
+                self._client, deadline=deadline, abort=self._http_resources.abort,
+            )
+            self._http_resources.clear()
             self._client = None
+
+    async def _close_http_resource(
+        self, resource: httpx.Response | httpx.AsyncClient | httpx.AsyncByteStream, *,
+        deadline: float | None = None, abort: Callable[[], None] | None = None,
+    ) -> None:
+        remaining = min(5.0, self._settings.request_timeout_seconds) if deadline is None else (
+            max(0, deadline - asyncio.get_running_loop().time())
+        )
+        task = asyncio.create_task(resource.aclose())
+        _http_close_tasks.add(task)
+        task.add_done_callback(_observe_http_close)
+        try:
+            # wait_for waits for cancellation acknowledgement and isn't a hard cap.
+            await asyncio.wait((task,), timeout=remaining)
+        finally:
+            failed = task.done() and (task.cancelled() or task.exception() is not None)
+            if (not task.done() or failed) and abort is not None:
+                try:
+                    abort()
+                except Exception:
+                    pass
+                # asyncio transport abort schedules the final descriptor close.
+                await asyncio.sleep(0)
+            if not task.done():
+                task.cancel()
+                # Give cooperative closers one turn; retain and observe the rest.
+                await asyncio.sleep(0)
 
     def _encode_id(self, opaque_id: str) -> str:
         from urllib.parse import quote
 
         validated = validate_opaque_id(opaque_id, max_chars=self._settings.max_opaque_id_chars)
+        # quote() leaves unreserved dots intact; HTTPX normalizes whole dot segments.
+        if validated in (".", ".."):
+            return "%2E" * len(validated)
         return quote(validated, safe="")
 
     async def _request_json(
@@ -302,56 +934,82 @@ class ZeppelinHttpClient:
         path: str,
         *,
         json_payload: dict[str, Any] | None = None,
-        content: str | None = None,
-        headers: dict[str, str] | None = None,
+        form_data: dict[str, str] | None = None,
         operation: ToolOperation,
         identifiers: dict[str, str],
         expect_body: bool,
+        discovery: bool = False,
+        notebook_precheck: bool = False,
     ) -> Any:
+        known_secrets = self._current_sensitive_values()
+        identifiers = ({} if known_secrets is None else
+                       self._untainted_identifiers(identifiers, known_secrets))
         try:
-            response = await client.request(
-                method,
-                path,
-                json=json_payload,
-                content=content,
-                headers=headers,
-            )
-        except httpx.ConnectTimeout:
-            raise self._gateway_error(ErrorCategory.TIMEOUT, operation, identifiers) from None
-        except httpx.ReadTimeout:
-            raise self._gateway_error(ErrorCategory.TIMEOUT, operation, identifiers) from None
+            if discovery:
+                response = await client.send(
+                    client.build_request(method, path, json=json_payload, data=form_data),
+                    stream=True,
+                )
+                self._http_resources.record(response.extensions.get("network_stream"))
+                stream = cast(httpx.AsyncByteStream, response.stream)
+                owned_stream = _OwnedResponseStream(
+                    stream,
+                    lambda: self._close_http_resource(
+                        stream, abort=lambda: abort_http_response(response),
+                    ),
+                )
+                response.stream = owned_stream
+                try:
+                    self._check_http_status(
+                        response, operation, identifiers, discovery=True,
+                        notebook_precheck=notebook_precheck,
+                    )
+                    content = await self._read_bounded(response, operation, identifiers)
+                finally:
+                    await await_cleanup(asyncio.create_task(owned_stream.finish(response)))
+            else:
+                response = await client.request(method, path, json=json_payload, data=form_data)
+                self._http_resources.record(response.extensions.get("network_stream"))
+                bounded = await self._bound_response(response)
+                self._check_http_status(bounded, operation, identifiers)
+                content = bounded.content
+        except (httpx.ConnectTimeout, httpx.ReadTimeout):
+            raise self._gateway_error(
+                ErrorCategory.TIMEOUT, operation, identifiers,
+                retryable=not (discovery and operation == ToolOperation.RESTART_INTERPRETER),
+            ) from None
         except (httpx.ConnectError, httpx.RemoteProtocolError):
             raise self._gateway_error(
-                ErrorCategory.CONNECTION_FAILED, operation, identifiers
+                ErrorCategory.CONNECTION_FAILED, operation, identifiers,
+                retryable=not (discovery and operation == ToolOperation.RESTART_INTERPRETER),
             ) from None
-        except httpx.HTTPError:
+        except httpx.HTTPError as exc:
+            if discovery and isinstance(exc, httpx.NetworkError):
+                raise self._gateway_error(
+                    ErrorCategory.CONNECTION_FAILED, operation, identifiers,
+                    retryable=operation != ToolOperation.RESTART_INTERPRETER,
+                ) from None
+            if discovery and isinstance(exc, httpx.TimeoutException):
+                raise self._gateway_error(
+                    ErrorCategory.TIMEOUT, operation, identifiers,
+                    retryable=operation != ToolOperation.RESTART_INTERPRETER,
+                ) from None
             raise self._gateway_error(
                 ErrorCategory.UPSTREAM_ERROR, operation, identifiers
             ) from None
 
-        bounded = await self._bound_response(response)
-        if bounded.status_code == 401 or bounded.status_code == 403:
-            raise self._gateway_error(
-                ErrorCategory.AUTHENTICATION_FAILED,
-                operation,
-                identifiers,
-            )
-        if bounded.status_code >= 400:
-            raise self._gateway_error(
-                ErrorCategory.UPSTREAM_ERROR,
-                operation,
-                identifiers,
-            )
         if not expect_body:
-            return bounded
+            return None
         try:
-            document = bounded.json()
-        except Exception:
+            document: object = json.loads(content)
+        except (ValueError, UnicodeError, RecursionError):
             raise self._gateway_error(
                 ErrorCategory.UNEXPECTED_RESPONSE,
                 operation,
                 identifiers,
             ) from None
+        if not isinstance(document, dict):
+            raise self._gateway_error(ErrorCategory.UNEXPECTED_RESPONSE, operation, identifiers)
         typed_doc = cast(dict[str, Any], document)
         status = typed_doc.get("status")
         if status is None:
@@ -365,6 +1023,41 @@ class ZeppelinHttpClient:
                 identifiers,
             )
         return typed_doc.get("body")
+
+    def _check_http_status(
+        self,
+        response: httpx.Response,
+        operation: ToolOperation,
+        identifiers: dict[str, str],
+        *,
+        discovery: bool = False,
+        notebook_precheck: bool = False,
+    ) -> None:
+        status = response.status_code
+        if status == 401 or (status == 403 and not discovery):
+            category = ErrorCategory.AUTHENTICATION_FAILED
+        elif status == 403:
+            category = ErrorCategory.PERMISSION_DENIED
+        elif status == 404 and notebook_precheck:
+            category = ErrorCategory.NOT_FOUND
+        elif status >= 400 or (discovery and not 200 <= status < 300):
+            category = ErrorCategory.UPSTREAM_ERROR
+        else:
+            return
+        raise self._gateway_error(category, operation, identifiers)
+
+    async def _read_bounded(
+        self,
+        response: httpx.Response,
+        operation: ToolOperation,
+        identifiers: dict[str, str],
+    ) -> bytes:
+        content = bytearray()
+        async for chunk in response.aiter_bytes():
+            if len(content) + len(chunk) > self._settings.max_response_bytes:
+                raise self._gateway_error(ErrorCategory.UNEXPECTED_RESPONSE, operation, identifiers)
+            content.extend(chunk)
+        return bytes(content)
 
     async def _bound_response(self, response: httpx.Response) -> httpx.Response:
         max_bytes = self._settings.max_response_bytes
@@ -386,17 +1079,54 @@ class ZeppelinHttpClient:
                     return kind
         return OutputKind.TEXT
 
+    def _current_sensitive_values(self) -> tuple[str, ...] | None:
+        """Read local credentials/cookies only; None means collection failed closed."""
+        try:
+            values = [
+                secret.get_secret_value()
+                for secret in (self._secrets.username, self._secrets.password)
+                if secret is not None and secret.get_secret_value()
+            ]
+            if self._client is not None:
+                for cookie in self._client.cookies.jar:
+                    value = cast(object, cookie.value)
+                    if value is not None and not isinstance(value, str):
+                        return None
+                    if isinstance(value, str) and value:
+                        values.append(value)
+            return tuple(values)
+        except Exception:
+            return None
+
+    def _stage_sensitive_values(
+        self, operation: ToolOperation, secret_guard: _RestartSecretGuard | None = None,
+    ) -> tuple[str, ...]:
+        values = self._current_sensitive_values()
+        if values is None:
+            raise self._gateway_error(
+                ErrorCategory.UNEXPECTED_RESPONSE, operation, {}, retryable=False,
+            ) from None
+        if secret_guard is not None:
+            secret_guard.values += values
+        return values
+
     def _gateway_error(
         self,
         category: ErrorCategory,
         operation: ToolOperation,
         identifiers: dict[str, str],
+        *,
+        retryable: bool | None = None,
     ) -> ZeppelinGatewayError:
+        known_secrets = self._current_sensitive_values()
+        identifiers = ({} if known_secrets is None else
+                       self._untainted_identifiers(identifiers, known_secrets))
         return ZeppelinGatewayError(
             ToolError.create(
                 category=category,
                 operation=operation,
-                retryable=category in (ErrorCategory.TIMEOUT, ErrorCategory.CONNECTION_FAILED),
-                identifiers=identifiers,
+                retryable=(category in (ErrorCategory.TIMEOUT, ErrorCategory.CONNECTION_FAILED)
+                           if retryable is None else retryable),
+                identifiers=safe_error_identifiers(operation, identifiers),
             )
         )

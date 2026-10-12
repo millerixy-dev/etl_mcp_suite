@@ -2,12 +2,21 @@
 
 from __future__ import annotations
 
-from mcp_stdio.core.errors import ErrorCategory, ToolError, ToolOperation
+import json
+
+from mcp_stdio.core.errors import (
+    ErrorCategory,
+    ToolError,
+    ToolOperation,
+    safe_error_identifiers,
+)
 from mcp_stdio.plugins.zeppelin.gateway import ZeppelinGateway, ZeppelinGatewayError
 from mcp_stdio.plugins.zeppelin.models import (
     AddParagraphResult,
     CancelParagraphResult,
     CreateNotebookResult,
+    InterpreterBinding,
+    InterpreterBindingsResult,
     NotebookTreeResult,
     ParagraphResult,
     ParagraphStatus,
@@ -16,7 +25,6 @@ from mcp_stdio.plugins.zeppelin.models import (
     RunParagraphResult,
     SafeErrorDetail,
     parse_paragraph_interpreter,
-    validate_interpreter_name,
     validate_notebook_name,
     validate_opaque_id,
     validate_paragraph_body,
@@ -51,6 +59,7 @@ class ZeppelinNotebookService:
         max_paragraph_title_chars: int,
         max_paragraph_body_bytes: int,
         max_opaque_id_chars: int,
+        max_result_bytes: int,
     ) -> None:
         self._gateway = gateway
         self._safety_hook = safety_hook
@@ -59,24 +68,93 @@ class ZeppelinNotebookService:
         self._max_title = max_paragraph_title_chars
         self._max_body = max_paragraph_body_bytes
         self._max_id = max_opaque_id_chars
+        self._max_result_bytes = max_result_bytes
 
     async def list_notebooks(self) -> NotebookTreeResult:
         nodes = await self._gateway.list_notebooks()
         return NotebookTreeResult(nodes=nodes)
 
-    async def restart_interpreter(self, setting_id: object) -> RestartInterpreterResult:
+    async def get_interpreter_bindings(
+        self, notebook_id: object
+    ) -> InterpreterBindingsResult:
+        operation = ToolOperation.GET_INTERPRETER_BINDINGS
+        identifiers = safe_error_identifiers(
+            operation,
+            {"notebook_id": notebook_id},
+        )
         try:
-            sid = validate_interpreter_name(setting_id)
+            nb = validate_opaque_id(notebook_id, max_chars=self._max_id)
         except ValueError as exc:
-            raise _invalid_input(
-                ToolOperation.RESTART_INTERPRETER, explanation=str(exc)
+            raise ZeppelinGatewayError(
+                ToolError.create(
+                    category=ErrorCategory.INVALID_INPUT,
+                    operation=operation,
+                    retryable=False,
+                    identifiers=identifiers,
+                    explanation=str(exc),
+                )
+            ) from None
+
+        records = await self._gateway.get_interpreter_bindings(nb)
+        result = InterpreterBindingsResult(
+            notebook_id=nb,
+            bindings=tuple(
+                InterpreterBinding(
+                    setting_id=record.setting_id,
+                    name=record.name,
+                    interpreters=record.interpreters,
+                    selected=record.selected,
+                    restart_allowed=record.setting_id in self._restartable,
+                )
+                for record in records
+            ),
+        )
+        serialized = json.dumps(
+            result.model_dump(mode="json"),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        if len(serialized) > self._max_result_bytes:
+            raise ZeppelinGatewayError(
+                ToolError.create(
+                    category=ErrorCategory.UNEXPECTED_RESPONSE,
+                    operation=operation,
+                    retryable=False,
+                    identifiers=identifiers,
+                    explanation="interpreter bindings result exceeds the configured byte limit",
+                )
+            )
+        return result
+
+    async def restart_interpreter(
+        self, setting_id: object, notebook_id: object = None,
+    ) -> RestartInterpreterResult:
+        operation = ToolOperation.RESTART_INTERPRETER
+        identifiers = safe_error_identifiers(
+            operation, {"setting_id": setting_id, "notebook_id": notebook_id},
+        )
+        try:
+            sid = validate_opaque_id(setting_id, max_chars=self._max_id)
+            nb = (
+                None if notebook_id is None
+                else validate_opaque_id(notebook_id, max_chars=self._max_id)
+            )
+        except ValueError as exc:
+            raise ZeppelinGatewayError(
+                ToolError.create(
+                    category=ErrorCategory.INVALID_INPUT, operation=operation,
+                    retryable=False, identifiers=identifiers, explanation=str(exc),
+                )
             ) from None
         if sid not in self._restartable:
-            raise _invalid_input(
-                ToolOperation.RESTART_INTERPRETER,
-                explanation=f"interpreter setting '{sid}' is not in the restart allowlist",
+            raise ZeppelinGatewayError(
+                ToolError.create(
+                    category=ErrorCategory.INVALID_INPUT, operation=operation,
+                    retryable=False, identifiers=identifiers,
+                    explanation="The interpreter setting is not in the restart allowlist.",
+                )
             ) from None
-        return await self._gateway.restart_interpreter(sid)
+        return await self._gateway.restart_interpreter(sid, nb)
 
     async def create_notebook(self, name: object) -> CreateNotebookResult:
         try:

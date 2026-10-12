@@ -9,12 +9,22 @@ from urllib.parse import urlsplit
 from pydantic import BeforeValidator, Field, SecretStr, field_validator, model_validator
 
 from mcp_stdio.core.config import SecretConfigModel, StrictConfigModel
+from mcp_stdio.plugins.zeppelin.models import validate_opaque_id
 
 
 def _to_tuple(value: object) -> tuple[str, ...] | object:
     if isinstance(value, list):
         raw_items = cast(list[object], value)
         return tuple(str(item) for item in raw_items)
+    return value
+
+
+def _to_strict_string_tuple(value: object) -> tuple[str, ...] | object:
+    if isinstance(value, list):
+        raw_items = cast(list[object], value)
+        if not all(isinstance(item, str) for item in raw_items):
+            raise ValueError("collection entries must be strings")
+        return tuple(cast(list[str], raw_items))
     return value
 
 
@@ -63,7 +73,9 @@ class ZeppelinSettings(StrictConfigModel):
         "DROP",
         "TRUNCATE",
     )
-    restartable_interpreter_settings: Annotated[tuple[str, ...], BeforeValidator(_to_tuple)] = ()
+    restartable_interpreter_settings: Annotated[
+        tuple[str, ...], BeforeValidator(_to_strict_string_tuple)
+    ] = ()
 
     @field_validator("base_url")
     @classmethod
@@ -107,14 +119,15 @@ class ZeppelinSettings(StrictConfigModel):
             uppered, _SQL_KEYWORD_PATTERN, item_label="forbidden keyword"
         )
 
-    @field_validator("restartable_interpreter_settings")
-    @classmethod
-    def validate_restartable_interpreter_settings(
-        cls, value: tuple[str, ...] | list[str]
-    ) -> tuple[str, ...]:
-        return _validate_unique_tokens(
-            value, _INTERPRETER_PATTERN, item_label="restartable interpreter setting"
-        )
+    @model_validator(mode="after")
+    def validate_restartable_interpreter_settings(self) -> ZeppelinSettings:
+        seen: set[str] = set()
+        for setting_id in self.restartable_interpreter_settings:
+            validate_opaque_id(setting_id, max_chars=self.max_opaque_id_chars)
+            if setting_id in seen:
+                raise ValueError("restartable interpreter setting entries must be unique")
+            seen.add(setting_id)
+        return self
 
 
 class ZeppelinSecrets(SecretConfigModel):

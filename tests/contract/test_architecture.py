@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from tests.contract.import_rules import find_import_violations
 
 SOURCE_ROOT = Path(__file__).parents[2] / "src"
@@ -76,3 +78,40 @@ def test_only_registry_may_import_a_concrete_plugin_from_shared_code(
 
 def test_source_tree_respects_architecture_import_boundaries() -> None:
     assert find_import_violations(SOURCE_ROOT) == []
+
+
+@pytest.mark.parametrize(
+    "source, imported",
+    [
+        ("import websockets\n", "websockets"),
+        (
+            "from mcp_stdio.plugins.zeppelin import websocket_client\n",
+            "mcp_stdio.plugins.zeppelin.websocket_client",
+        ),
+        ("from websockets.asyncio.client import connect\n", "websockets.asyncio.client"),
+        (
+            "from .websocket_client import query_bindings\n",
+            "mcp_stdio.plugins.zeppelin.websocket_client",
+        ),
+        (
+            "import mcp_stdio.plugins.zeppelin.websocket_client\n",
+            "mcp_stdio.plugins.zeppelin.websocket_client",
+        ),
+    ],
+)
+def test_service_websocket_imports_are_rejected(tmp_path: Path, source: str, imported: str) -> None:
+    root = tmp_path / "src"
+    _write_module(root, "mcp_stdio/plugins/zeppelin/service.py", source)
+    assert [(v.rule, v.imported) for v in find_import_violations(root)] == [
+        ("service-to-infrastructure", imported),
+    ]
+
+
+def test_registry_exemption_does_not_allow_other_shared_zeppelin_imports(tmp_path: Path) -> None:
+    root = tmp_path / "src"
+    source = "from mcp_stdio.plugins.zeppelin.plugin import PLUGIN_DEFINITION\n"
+    _write_module(root, "mcp_stdio/registry.py", source)
+    _write_module(root, "mcp_stdio/bootstrap.py", source)
+    assert [(v.rule, v.module, v.imported) for v in find_import_violations(root)] == [
+        ("shared-to-plugin", "mcp_stdio.bootstrap", "mcp_stdio.plugins.zeppelin.plugin"),
+    ]

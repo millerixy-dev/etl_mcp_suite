@@ -32,7 +32,6 @@ class ZeppelinRuntime:
         self._tools = tools
         self._gateway = gateway
         self._redaction_values = tuple(value for value in redaction_values if value)
-        self._closed = False
 
     @property
     def name(self) -> BuiltinPluginName:
@@ -46,9 +45,6 @@ class ZeppelinRuntime:
         self._tools.register_tools(registrar)
 
     async def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
         await self._gateway.close()
 
 
@@ -88,6 +84,7 @@ def _create_runtime(
         max_paragraph_title_chars=loaded.settings.max_paragraph_title_chars,
         max_paragraph_body_bytes=loaded.settings.max_paragraph_body_bytes,
         max_opaque_id_chars=loaded.settings.max_opaque_id_chars,
+        max_result_bytes=loaded.settings.max_result_bytes,
     )
     secrets = _secret_values(loaded.secrets)
     tools = ZeppelinToolAdapter(service=service, secret_values=secrets)

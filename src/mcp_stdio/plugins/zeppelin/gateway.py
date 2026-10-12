@@ -7,6 +7,7 @@ from typing import Protocol
 from mcp_stdio.core.errors import ToolError
 from mcp_stdio.plugins.zeppelin.models import (
     CancelParagraphResult,
+    InterpreterBindingRecord,
     NotebookTreeNode,
     OutputItem,
     ParagraphStatus,
@@ -24,7 +25,7 @@ class ZeppelinGatewayError(RuntimeError):
 
 
 class ZeppelinGateway(Protocol):
-    """REST operations required by the Zeppelin application service."""
+    """Upstream operations required by the Zeppelin application service."""
 
     async def list_notebooks(self) -> tuple[NotebookTreeNode, ...]:
         """Return the notebook directory tree."""
@@ -70,7 +71,16 @@ class ZeppelinGateway(Protocol):
 
         ...
 
-    async def restart_interpreter(self, setting_id: str) -> RestartInterpreterResult:
+    async def get_interpreter_bindings(
+        self, notebook_id: str
+    ) -> tuple[InterpreterBindingRecord, ...]:
+        """Return sanitized interpreter bindings visible for one notebook."""
+
+        ...
+
+    async def restart_interpreter(
+        self, setting_id: str, notebook_id: str | None = None
+    ) -> RestartInterpreterResult:
         """Restart an interpreter setting and return bounded status."""
 
         ...

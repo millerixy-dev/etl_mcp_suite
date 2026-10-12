@@ -25,7 +25,8 @@ description: Use when an agent needs to list, create, reuse, execute, cancel, in
 | `get_paragraph_status` | 查询归一化状态 | `notebook_id`, `paragraph_id` |
 | `get_paragraph_result` | 获取有界结果或安全错误详情 | `notebook_id`, `paragraph_id` |
 | `cancel_paragraph` | 取消活动段落 | `notebook_id`, `paragraph_id` |
-| `restart_interpreter` | 重启已知且允许的解释器设置 | `setting_id` |
+| `get_interpreter_bindings` | 发现可读 Notebook 的解释器绑定 | `notebook_id` |
+| `restart_interpreter` | 重启已知且允许的解释器设置 | `setting_id`，可选 `notebook_id`（字符串或 null） |
 
 ## Notebook 组织
 
@@ -73,7 +74,13 @@ description: Use when an agent needs to list, create, reuse, execute, cancel, in
 ## 取消与恢复
 
 - 用户要求停止活动段落时，调用 `cancel_paragraph`，随后调用 `get_paragraph_status` 确认终态。若段落已经结束，报告工具返回的安全错误，不要创建替代请求。
-- 只有用户明确要求，或错误证据明确指向解释器状态且已知 `setting_id` 时，才调用 `restart_interpreter`。重启后重新检查段落状态；不要猜测 Setting ID，也不要把重启当作通用重试。
+- 只有用户明确要求，或错误证据明确指向解释器状态时，才准备重启；不要把重启当作通用重试。
+- 先调用 `get_interpreter_bindings({"notebook_id":"note-example"})`，再显式选择 `selected=true` 且 `restart_allowed=true` 的绑定，复制其精确 `setting_id`，使用同一 `notebook_id` 调用 `restart_interpreter`。不要从名称、group、段落前缀或 `interpreters` 推断 ID；ID 不裁剪、不改大小写。
+- 发现结果为 `{"notebook_id":"note-example","bindings":[{"setting_id":"spark_prod","name":"spark_prod","interpreters":["spark","sql"],"selected":true,"restart_allowed":true}]}`；可读且无绑定时为 `bindings=[]`。拒绝读取或不存在不会伪装为空结果。
+- `restart_allowed` 只表示本地重启白名单，不保证上游权限或健康。执行白名单 `allowed_interpreters` 与重启白名单 `restartable_interpreter_settings` 相互独立，默认均拒绝；发现无需执行或重启权限。部署环境的集合覆盖使用 JSON 数组，例如 `ZEPPELIN_RESTARTABLE_INTERPRETER_SETTINGS='["spark_prod","2AY6GV7Q3"]'`；只使用操作者确认的精确 ID。
+- 省略 `notebook_id` 或显式 `notebook_id=null` 保留旧的 setting-wide（设置全局）重启，不进行 Notebook 绑定发现。Notebook 模式失败时不得移除上下文或回退到全局重启；两种模式都不得自动重试 PUT、重连重试或自动重新执行段落。
+- Notebook 上下文不保证影响隔离：解释器进程可能由多个 Notebook 共享。成功结果只有 `setting_id`、`name`、`group`、`status`，例如 `{"setting_id":"spark_prod","name":"spark_prod","group":"spark","status":"READY"}`；只确认上游报告状态，不代表 Spark 健康或任务恢复。重启后检查状态，重新执行必须获得用户明确要求。
+- MCP 客户端通过本地 stdio 通信；插件向 Zeppelin 发起 HTTP 与发现所需的短期 WebSocket 查询。认证由插件私下处理，不可通过工具参数提供。
 - 执行失败时先依据工具返回的稳定错误类别判断配置、权限、连接、超时、输入或上游问题。修改段落内容前重新检查安全约束。
 
 ## 常见错误

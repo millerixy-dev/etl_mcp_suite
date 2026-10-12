@@ -44,6 +44,128 @@ uv sync --frozen
 
 该命令使用已提交的 `uv.lock` 在隔离环境中安装包和命令行入口 `mcp-stdio`。
 
+## 本地开发环境与生产环境隔离
+
+以下是部署指引；只有安装 release 并显式切换 MCP 注册入口后，现有服务才完成迁移。
+
+源码检出目录和 Codex MCP 运行目录必须分离：
+
+```text
+开发检出目录：/absolute/path/to/hive_cli_mcp_stdio
+生产根目录：  /absolute/path/to/hive-cli-mcp-stdio-prod
+```
+
+开发目录用于源码、worktree、`.venv`、测试和 editable 安装。Codex 的生产 MCP 注册只能指向
+生产根目录中的不可变 wheel release，不能指向源码目录、开发 `.venv`、editable uv tool，也不能
+通过 `PYTHONPATH` 引用源码目录。因此，`./scripts/install-skills-codex.sh --with-mcp` 属于开发
+工作流，不能把它生成的 editable MCP 注册作为本地生产运行环境。
+
+从已提交且已跟踪文件无修改的版本创建 release，并按 `uv.lock` 安装生产依赖：
+
+```bash
+set -e
+PROJECT_DIR=/absolute/path/to/hive_cli_mcp_stdio
+PROD_ROOT=/absolute/path/to/hive-cli-mcp-stdio-prod
+RELEASE_ID="$(date +%Y%m%d%H%M%S)-$(git -C "$PROJECT_DIR" rev-parse --short=12 HEAD)"
+RELEASE_DIR="$PROD_ROOT/releases/$RELEASE_ID"
+
+test -z "$(git -C "$PROJECT_DIR" status --porcelain --untracked-files=no)"
+mkdir -p "$RELEASE_DIR/dist"
+
+uv build --project "$PROJECT_DIR" --wheel --out-dir "$RELEASE_DIR/dist"
+uv export \
+  --project "$PROJECT_DIR" \
+  --locked \
+  --no-dev \
+  --no-emit-project \
+  --format requirements.txt \
+  --output-file "$RELEASE_DIR/runtime-requirements.txt"
+
+uv venv --python 3.12 "$RELEASE_DIR/venv"
+uv pip install \
+  --python "$RELEASE_DIR/venv/bin/python" \
+  --requirement "$RELEASE_DIR/runtime-requirements.txt"
+
+WHEEL_PATH="$(find "$RELEASE_DIR/dist" -maxdepth 1 -name '*.whl' -print -quit)"
+uv pip install \
+  --python "$RELEASE_DIR/venv/bin/python" \
+  --no-deps \
+  "$WHEEL_PATH"
+
+"$RELEASE_DIR/venv/bin/mcp-stdio" --help
+ln -sfn "$RELEASE_DIR" "$PROD_ROOT/current"
+```
+
+这些命令将源码打包，并把程序和锁定版本的依赖安装到独立生产环境中：
+
+| 命令 | 作用及关键参数 |
+| --- | --- |
+| `uv build --project ... --wheel --out-dir ...` | 将 `--project` 指定的项目打包成 `.whl` 文件，输出到 `--out-dir`。wheel 包含项目代码，第三方依赖需要单独安装。 |
+| `uv export --project ... --locked --no-dev --no-emit-project --format requirements.txt --output-file ...` | 从 `uv.lock` 导出依赖。`--locked` 在需要更新锁文件时拒绝继续；`--no-dev` 排除开发依赖组；`--no-emit-project` 不导出项目自身。`--format` 指定 requirements 格式，`--output-file` 指定输出文件。 |
+| `uv venv --python 3.12 ...` | 使用 Python 3.12，在指定路径创建隔离的虚拟环境，每个 release 拥有自己的环境。 |
+| `uv pip install --python ... --requirement ...` | 安装导出的依赖。`--python` 指定目标环境的 Python 解释器，`--requirement` 指定依赖清单文件。 |
+| `uv pip install --python ... --no-deps "$WHEEL_PATH"` | 将项目 wheel 安装到同一个环境。`--no-deps` 跳过依赖解析和安装，因为前一步已经安装了锁定版本的依赖。 |
+
+`uv pip` 是 uv 提供的包安装接口，不是调用系统的 `pip`。安装 wheel 会把打包后的代码安装到
+release 环境中，而不像 editable 安装那样引用开发源码；后续修改源码不会改变该已安装版本。
+
+最后两条不是 uv 命令：`mcp-stdio --help` 检查命令行入口能否启动，但不会验证 Zeppelin
+连接；`ln -sfn` 更新 `current` 符号链接，使其指向新 release。已经运行的 MCP 进程仍需
+重启，才会加载新版。
+
+以下示例使用 Codex 中显式的环境变量配置，并且不传 `--config`。项目级
+`.codex/config.toml` 会保存明文凭据，因此已被 Git 忽略，并且必须使用 `chmod 600` 限制为
+当前用户可读写。三个项目 MCP 注册统一使用同一个生产入口：
+
+```toml
+[mcp_servers.hive]
+command = "/absolute/path/to/hive-cli-mcp-stdio-prod/current/venv/bin/mcp-stdio"
+args = ["--plugin", "hive"]
+
+[mcp_servers.hive.env]
+HIVE_HOST = "<hive-host>"
+HIVE_USERNAME = "<hive-user>"
+HIVE_PASSWORD = "<hive-password>"
+
+[mcp_servers.zeppelin]
+command = "/absolute/path/to/hive-cli-mcp-stdio-prod/current/venv/bin/mcp-stdio"
+args = ["--plugin", "zeppelin"]
+
+[mcp_servers.zeppelin.env]
+ZEPPELIN_BASE_URL = "<zeppelin-base-url>"
+ZEPPELIN_USERNAME = "<zeppelin-user>"
+ZEPPELIN_PASSWORD = "<zeppelin-password>"
+ZEPPELIN_ALLOWED_INTERPRETERS = "[\"spark.sql\", \"spark.pyspark\"]"
+ZEPPELIN_RESTARTABLE_INTERPRETER_SETTINGS = "[\"<actual-setting-id>\"]"
+
+[mcp_servers.dolphinscheduler]
+command = "/absolute/path/to/hive-cli-mcp-stdio-prod/current/venv/bin/mcp-stdio"
+args = ["--plugin", "dolphinscheduler"]
+
+[mcp_servers.dolphinscheduler.env]
+DOLPHINSCHEDULER_BASE_URL = "<dolphinscheduler-base-url>"
+DOLPHINSCHEDULER_TOKEN = "<dolphinscheduler-token>"
+```
+
+```bash
+chmod 600 "$PROJECT_DIR/.codex/config.toml"
+```
+
+确认模块从生产 release 加载，然后重启 MCP 子进程，使 Codex 读取新的 `current` 指向：
+
+```bash
+"$PROD_ROOT/current/venv/bin/python" -c \
+  'import pathlib, mcp_stdio; print(pathlib.Path(mcp_stdio.__file__).resolve())'
+codex mcp list --json
+```
+
+保留历史 release 以便回滚。把 `current` 重新指向上一版，再重启 MCP 子进程即可，不需要源码
+检出目录或重新安装依赖：
+
+```bash
+ln -sfn "$PROD_ROOT/releases/<previous-release>" "$PROD_ROOT/current"
+```
+
 ## Agent Skills
 
 客户端无关的 Hive、Zeppelin 和自然语言查询 Skill 统一维护在 `skills/hive`、`skills/zeppelin` 与 `skills/nl2sql`。根据正在使用的 MCP 客户端，将相同的规范文件安装到当前项目：
@@ -279,6 +401,113 @@ Hive 进程恰好暴露三个只读工具。
 | `cached` | boolean | 缓存标志 |
 
 不安全的标识符会返回 `INVALID_INPUT`，且不会打开 Hive 连接。
+
+## Zeppelin 工具契约
+
+Zeppelin 进程精确暴露九个工具。所有 ID 都是大小写敏感的不透明字符串；调用方必须原样保留，
+不能根据解释器名称、setting 名称或 paragraph 内容猜测 setting ID。
+
+| 工具 | 参数 | 精确返回字段 |
+| --- | --- | --- |
+| `list_notebooks` | 无 | `nodes: NotebookTreeNode[]` |
+| `create_notebook` | `name: string` | `notebook_id`、`name` |
+| `add_paragraph` | `notebook_id: string`、`title: string`、`body: string` | `notebook_id`、`paragraph_id`、`title`、`interpreter` |
+| `run_paragraph` | `notebook_id: string`、`paragraph_id: string` | `notebook_id`、`paragraph_id`、`status` |
+| `get_paragraph_status` | `notebook_id: string`、`paragraph_id: string` | `notebook_id`、`paragraph_id`、`status` |
+| `get_paragraph_result` | `notebook_id: string`、`paragraph_id: string` | `notebook_id`、`paragraph_id`、`status`、`outputs`、`truncated`、`error` |
+| `get_interpreter_bindings` | `notebook_id: string` | `notebook_id`、`bindings` |
+| `restart_interpreter` | `setting_id: string`，可选 `notebook_id: string \| null = null` | `setting_id`、`name`、`group`、`status` |
+| `cancel_paragraph` | `notebook_id: string`、`paragraph_id: string` | `notebook_id`、`paragraph_id` |
+
+嵌套返回结构：
+
+- `NotebookTreeNode` 包含 `notebook_id: string | null`、`name: string`、`path: string` 和递归的
+  `children: NotebookTreeNode[]`。
+- paragraph 的 `status` 是 `PENDING`、`RUNNING`、`FINISHED`、`ERROR`、`CANCELLED` 或
+  `UNKNOWN` 之一。
+- 每个 paragraph 输出包含 `kind` 和 `text`；`kind` 是 `TEXT`、`TABLE`、`HTML`、`ANGULAR`
+  或 `IMG` 之一。`error` 为 null 或 `{ "message": string }`；`truncated=true` 表示达到已配置的
+  输出上限。
+- 每个 interpreter binding 精确包含 `setting_id`、`name`、`interpreters: string[]`、
+  `selected: boolean` 和 `restart_allowed: boolean`。`restart_allowed` 只表示本地 allowlist
+  判断，不代表上游授权或 interpreter 健康状态。
+
+### Interpreter 发现与重启
+
+按以下三个显式步骤执行 notebook 范围重启：
+
+1. 使用可读的 notebook ID 调用 `get_interpreter_bindings`。
+2. 选择 `selected` 和 `restart_allowed` 都为 true 的 binding，并使用其精确 `setting_id`。
+3. 使用该 `setting_id` 和同一个 `notebook_id` 调用 `restart_interpreter`。
+
+发现结果示例：
+
+```json
+{
+  "notebook_id": "note-1",
+  "bindings": [
+    {
+      "setting_id": "spark_prod",
+      "name": "Spark Production",
+      "interpreters": ["spark", "sql", "pyspark"],
+      "selected": true,
+      "restart_allowed": true
+    }
+  ]
+}
+```
+
+notebook 范围重启的调用与结果示例：
+
+```json
+{
+  "arguments": {
+    "setting_id": "spark_prod",
+    "notebook_id": "note-1"
+  },
+  "result": {
+    "setting_id": "spark_prod",
+    "name": "Spark Production",
+    "group": "spark",
+    "status": "READY"
+  }
+}
+```
+
+`ZEPPELIN_RESTARTABLE_INTERPRETER_SETTINGS` 是由精确 setting ID 组成的 JSON 数组，默认拒绝
+所有重启。服务在登录、HTTP、ticket 或 WebSocket 请求之前检查 allowlist。发现 binding 不要求
+具备重启权限；本地禁止重启的 binding 仍会返回，并带有 `restart_allowed=false`。
+
+省略 `notebook_id` 或显式传 null 会保留旧的 setting 范围重启。notebook 模式失败时不会丢弃
+notebook 上下文或回退到 setting 范围重启；两种模式都不会自动重试重启或重新执行 paragraph。
+Zeppelin 可能在多个 notebook 之间共享同一个 interpreter 进程，因此 notebook 上下文不能保证
+影响范围完全隔离。
+
+MCP Host 连接仍是本地 stdio 上的 JSON-RPC。notebook 和 paragraph 操作通过出站 Zeppelin HTTP
+完成；binding 发现还会在同一个用户 session 中使用经过认证且有边界的出站 WebSocket 查询。
+进程不会开放 MCP HTTP、SSE 或 WebSocket 监听端口。
+
+### Zeppelin 配置示例
+
+等价的 [YAML](docs/examples/zeppelin.yaml) 与 [JSON](docs/examples/zeppelin.json) 示例中，`secrets` 只包含环境变量名称，不包含凭据。由启动环境提供成对的用户名和密码后运行：
+
+```bash
+uv run --locked mcp-stdio --plugin zeppelin --config docs/examples/zeppelin.yaml
+```
+
+仅环境变量启动的等价配置（凭据仍由外部提供）：
+
+```bash
+export ZEPPELIN_BASE_URL='https://zeppelin.example.invalid/zeppelin/api'
+export ZEPPELIN_REQUEST_TIMEOUT_SECONDS='30'
+export ZEPPELIN_ALLOWED_INTERPRETERS='["spark_prod.sql"]'
+export ZEPPELIN_RESTARTABLE_INTERPRETER_SETTINGS='["spark_prod"]'
+uv run --locked mcp-stdio --plugin zeppelin
+```
+
+执行前缀与精确重启设置 ID 使用相互独立的白名单，默认均拒绝。所有集合覆盖（`ALLOWED_INTERPRETERS`、`RESTARTABLE_INTERPRETER_SETTINGS`、`SQL_WRITE_ALLOWED_DATABASES`、`SQL_FORBIDDEN_KEYWORDS`、`SH_ALLOWED_COMMANDS`）在 `ZEPPELIN_` 前缀下使用 JSON 数组。插件前缀覆盖优先于 `MCP_STDIO__SETTINGS__<FIELD>`，再优先于文件和默认值。启动与工具列表读取均不访问网络。发现功能要求 REST base 以 `/api` 结尾：只将该末尾路径映射为 `/ws`（HTTP→WS，HTTPS→WSS），保留源站与反向代理前缀；模糊挂载在联网前失败。
+
+不要把解释器重启当作通用重试；结果仅确认上游报告状态，不保证 Spark 健康或恢复成功。
 
 ## DolphinScheduler 配置与工具
 

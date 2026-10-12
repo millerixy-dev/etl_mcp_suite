@@ -14,6 +14,7 @@ PROJECT_ROOT = Path(__file__).parents[2]
 CANONICAL_SKILLS = {
     "hive": {"list_databases", "list_tables", "get_table_schema"},
     "zeppelin": {
+        "get_interpreter_bindings",
         "list_notebooks",
         "create_notebook",
         "add_paragraph",
@@ -38,6 +39,11 @@ CANONICAL_SKILLS = {
 REQUIRED_GUIDANCE = {
     "hive": {"partition_columns", "[A-Za-z_][A-Za-z0-9_]*", "zeppelin"},
     "zeppelin": {
+        "restart_allowed",
+        "selected",
+        "notebook_id=null",
+        "JSON 数组",
+        "共享",
         "/agents/",
         "PENDING",
         "RUNNING",

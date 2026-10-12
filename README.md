@@ -53,6 +53,135 @@ uv sync --frozen
 This installs the package and its console entry point, `mcp-stdio`, in an
 isolated virtual environment using the committed `uv.lock`.
 
+## Local development and production isolation
+
+The following is a deployment guide. Existing MCP registrations are not migrated
+until the release is installed and their entry points are switched explicitly.
+
+Keep the source checkout and the Codex MCP runtime in separate directories:
+
+```text
+Development checkout: /absolute/path/to/hive_cli_mcp_stdio
+Production root:      /absolute/path/to/hive-cli-mcp-stdio-prod
+```
+
+The development checkout owns source files, worktrees, `.venv`, tests, and editable installs.
+Codex production registrations must point only to an immutable wheel release under the production
+root. They must not point to the checkout, its `.venv`, an editable uv tool, or a `PYTHONPATH`
+containing the checkout. `./scripts/install-skills-codex.sh --with-mcp` is therefore a development
+workflow; do not use its editable MCP registration as the local production runtime.
+
+Create a release from a tracked, clean commit with locked runtime dependencies:
+
+```bash
+set -e
+PROJECT_DIR=/absolute/path/to/hive_cli_mcp_stdio
+PROD_ROOT=/absolute/path/to/hive-cli-mcp-stdio-prod
+RELEASE_ID="$(date +%Y%m%d%H%M%S)-$(git -C "$PROJECT_DIR" rev-parse --short=12 HEAD)"
+RELEASE_DIR="$PROD_ROOT/releases/$RELEASE_ID"
+
+test -z "$(git -C "$PROJECT_DIR" status --porcelain --untracked-files=no)"
+mkdir -p "$RELEASE_DIR/dist"
+
+uv build --project "$PROJECT_DIR" --wheel --out-dir "$RELEASE_DIR/dist"
+uv export \
+  --project "$PROJECT_DIR" \
+  --locked \
+  --no-dev \
+  --no-emit-project \
+  --format requirements.txt \
+  --output-file "$RELEASE_DIR/runtime-requirements.txt"
+
+uv venv --python 3.12 "$RELEASE_DIR/venv"
+uv pip install \
+  --python "$RELEASE_DIR/venv/bin/python" \
+  --requirement "$RELEASE_DIR/runtime-requirements.txt"
+
+WHEEL_PATH="$(find "$RELEASE_DIR/dist" -maxdepth 1 -name '*.whl' -print -quit)"
+uv pip install \
+  --python "$RELEASE_DIR/venv/bin/python" \
+  --no-deps \
+  "$WHEEL_PATH"
+
+"$RELEASE_DIR/venv/bin/mcp-stdio" --help
+ln -sfn "$RELEASE_DIR" "$PROD_ROOT/current"
+```
+
+The commands package the source and install it with locked dependencies in an independent
+production environment:
+
+| Command | Purpose and key options |
+| --- | --- |
+| `uv build --project ... --wheel --out-dir ...` | Build the project in `--project` into a `.whl` file under `--out-dir`. The wheel contains the project's code; third-party dependencies are installed separately. |
+| `uv export --project ... --locked --no-dev --no-emit-project --format requirements.txt --output-file ...` | Export dependencies from `uv.lock`. `--locked` rejects changes that would require updating the lockfile; `--no-dev` excludes the development dependency group; `--no-emit-project` leaves out the project itself. `--format` selects the requirements format and `--output-file` sets its destination. |
+| `uv venv --python 3.12 ...` | Create an isolated virtual environment using Python 3.12 at the specified path. Each release has its own environment. |
+| `uv pip install --python ... --requirement ...` | Install the exported dependencies. `--python` selects the target environment's interpreter; `--requirement` selects the dependency file. |
+| `uv pip install --python ... --no-deps "$WHEEL_PATH"` | Install the project wheel into the same environment. `--no-deps` skips dependency resolution and installation because the preceding step already installed the locked dependencies. |
+
+`uv pip` is uv's package installation interface; it does not invoke the system `pip`.
+Installing a wheel copies the packaged code into the release environment rather than linking
+to the development source as an editable install would. Later source edits therefore do not
+change that installed release.
+
+The final two commands are not uv commands. `mcp-stdio --help` checks that the console entry
+point starts, but does not test a Zeppelin connection. `ln -sfn` updates the `current` symlink
+to select the new release; already-running MCP processes must still be restarted to load it.
+
+The following example keeps plugin settings and credentials as explicit Codex
+environment entries and omits `--config`. The project-local `.codex/config.toml` is ignored by Git
+because it contains plain-text credentials; restrict it to the current user with `chmod 600`.
+All three project registrations should use the same production entry point:
+
+```toml
+[mcp_servers.hive]
+command = "/absolute/path/to/hive-cli-mcp-stdio-prod/current/venv/bin/mcp-stdio"
+args = ["--plugin", "hive"]
+
+[mcp_servers.hive.env]
+HIVE_HOST = "<hive-host>"
+HIVE_USERNAME = "<hive-user>"
+HIVE_PASSWORD = "<hive-password>"
+
+[mcp_servers.zeppelin]
+command = "/absolute/path/to/hive-cli-mcp-stdio-prod/current/venv/bin/mcp-stdio"
+args = ["--plugin", "zeppelin"]
+
+[mcp_servers.zeppelin.env]
+ZEPPELIN_BASE_URL = "<zeppelin-base-url>"
+ZEPPELIN_USERNAME = "<zeppelin-user>"
+ZEPPELIN_PASSWORD = "<zeppelin-password>"
+ZEPPELIN_ALLOWED_INTERPRETERS = "[\"spark.sql\", \"spark.pyspark\"]"
+ZEPPELIN_RESTARTABLE_INTERPRETER_SETTINGS = "[\"<actual-setting-id>\"]"
+
+[mcp_servers.dolphinscheduler]
+command = "/absolute/path/to/hive-cli-mcp-stdio-prod/current/venv/bin/mcp-stdio"
+args = ["--plugin", "dolphinscheduler"]
+
+[mcp_servers.dolphinscheduler.env]
+DOLPHINSCHEDULER_BASE_URL = "<dolphinscheduler-base-url>"
+DOLPHINSCHEDULER_TOKEN = "<dolphinscheduler-token>"
+```
+
+```bash
+chmod 600 "$PROJECT_DIR/.codex/config.toml"
+```
+
+Confirm that the installed module resolves inside the production release, then restart the MCP
+children so Codex reads the new `current` target:
+
+```bash
+"$PROD_ROOT/current/venv/bin/python" -c \
+  'import pathlib, mcp_stdio; print(pathlib.Path(mcp_stdio.__file__).resolve())'
+codex mcp list --json
+```
+
+Keep previous release directories for rollback. Point `current` at the previous release and restart
+the MCP children; no source checkout or dependency reinstall is needed:
+
+```bash
+ln -sfn "$PROD_ROOT/releases/<previous-release>" "$PROD_ROOT/current"
+```
+
 ## Agent Skills
 
 The client-neutral Hive, Zeppelin, and natural-language query skills are maintained once at
@@ -328,6 +457,112 @@ DDL from `SHOW CREATE TABLE`.
 | `cached` | boolean | Cache indicator |
 
 Unsafe identifiers return `INVALID_INPUT` without opening a Hive connection.
+
+## Zeppelin tool contracts
+
+The Zeppelin process exposes exactly nine tools. IDs are opaque, case-sensitive strings; callers
+must preserve them exactly and must not infer a setting ID from an interpreter name, setting name,
+or paragraph body.
+
+| Tool | Arguments | Exact result fields |
+| --- | --- | --- |
+| `list_notebooks` | none | `nodes: NotebookTreeNode[]` |
+| `create_notebook` | `name: string` | `notebook_id`, `name` |
+| `add_paragraph` | `notebook_id: string`, `title: string`, `body: string` | `notebook_id`, `paragraph_id`, `title`, `interpreter` |
+| `run_paragraph` | `notebook_id: string`, `paragraph_id: string` | `notebook_id`, `paragraph_id`, `status` |
+| `get_paragraph_status` | `notebook_id: string`, `paragraph_id: string` | `notebook_id`, `paragraph_id`, `status` |
+| `get_paragraph_result` | `notebook_id: string`, `paragraph_id: string` | `notebook_id`, `paragraph_id`, `status`, `outputs`, `truncated`, `error` |
+| `get_interpreter_bindings` | `notebook_id: string` | `notebook_id`, `bindings` |
+| `restart_interpreter` | `setting_id: string`, optional `notebook_id: string \| null = null` | `setting_id`, `name`, `group`, `status` |
+| `cancel_paragraph` | `notebook_id: string`, `paragraph_id: string` | `notebook_id`, `paragraph_id` |
+
+Nested result contracts:
+
+- `NotebookTreeNode` contains `notebook_id: string | null`, `name: string`, `path: string`, and
+  recursive `children: NotebookTreeNode[]`.
+- Paragraph `status` is one of `PENDING`, `RUNNING`, `FINISHED`, `ERROR`, `CANCELLED`, or
+  `UNKNOWN`.
+- Each paragraph output contains `kind` and `text`; `kind` is one of `TEXT`, `TABLE`, `HTML`,
+  `ANGULAR`, or `IMG`. `error` is either null or `{ "message": string }`. `truncated=true`
+  means the configured output limit was reached.
+- Each interpreter binding contains exactly `setting_id`, `name`, `interpreters: string[]`,
+  `selected: boolean`, and `restart_allowed: boolean`. `restart_allowed` reports the local
+  allowlist decision; it does not assert upstream authorization or interpreter health.
+
+### Interpreter discovery and restart
+
+Do not treat interpreter restart as a general retry. Use notebook-scoped restart as an explicit three-step workflow:
+
+1. Call `get_interpreter_bindings` with the readable notebook ID.
+2. Select an exact binding whose `selected` and `restart_allowed` fields are both true.
+3. Call `restart_interpreter` with that `setting_id` and the same `notebook_id`.
+
+Example discovery result:
+
+```json
+{
+  "notebook_id": "note-1",
+  "bindings": [
+    {
+      "setting_id": "spark_prod",
+      "name": "Spark Production",
+      "interpreters": ["spark", "sql", "pyspark"],
+      "selected": true,
+      "restart_allowed": true
+    }
+  ]
+}
+```
+
+Example notebook-scoped restart call and result:
+
+```json
+{
+  "arguments": {
+    "setting_id": "spark_prod",
+    "notebook_id": "note-1"
+  },
+  "result": {
+    "setting_id": "spark_prod",
+    "name": "Spark Production",
+    "group": "spark",
+    "status": "READY"
+  }
+}
+```
+
+`ZEPPELIN_RESTARTABLE_INTERPRETER_SETTINGS` is a JSON array of exact setting IDs and defaults to
+deny. The allowlist is checked before any login, HTTP, ticket, or WebSocket request. Discovery does
+not require restart permission and includes locally denied bindings with `restart_allowed=false`.
+
+Omitting `notebook_id`, or passing null, preserves the legacy setting-wide restart. A notebook-mode
+failure never drops the notebook context or falls back to setting-wide restart. Neither mode retries
+the restart automatically or re-executes paragraphs. Zeppelin may share one interpreter process
+across notebooks, so notebook context does not guarantee isolated impact.
+
+The MCP host connection remains local JSON-RPC over stdio. Notebook and paragraph operations use
+outgoing Zeppelin HTTP; binding discovery additionally uses an authenticated, bounded outgoing
+WebSocket query in the same user session. No MCP HTTP, SSE, or WebSocket listener is opened.
+
+### Zeppelin configuration examples
+
+Equivalent [YAML](docs/examples/zeppelin.yaml) and [JSON](docs/examples/zeppelin.json) examples contain environment variable names under `secrets`, never credentials. Supply paired credentials externally, then launch:
+
+```bash
+uv run --locked mcp-stdio --plugin zeppelin --config docs/examples/zeppelin.yaml
+```
+
+Environment-only equivalent (credentials remain externally supplied):
+
+```bash
+export ZEPPELIN_BASE_URL='https://zeppelin.example.invalid/zeppelin/api'
+export ZEPPELIN_REQUEST_TIMEOUT_SECONDS='30'
+export ZEPPELIN_ALLOWED_INTERPRETERS='["spark_prod.sql"]'
+export ZEPPELIN_RESTARTABLE_INTERPRETER_SETTINGS='["spark_prod"]'
+uv run --locked mcp-stdio --plugin zeppelin
+```
+
+Execution prefixes and exact restart setting IDs use independent allowlists; both default to deny. All collection overrides (`ALLOWED_INTERPRETERS`, `RESTARTABLE_INTERPRETER_SETTINGS`, `SQL_WRITE_ALLOWED_DATABASES`, `SQL_FORBIDDEN_KEYWORDS`, `SH_ALLOWED_COMMANDS`) use JSON arrays under the `ZEPPELIN_` prefix. Plugin-prefixed overrides take precedence over `MCP_STDIO__SETTINGS__<FIELD>` and file/default values. Startup and tool listing make no network request. Discovery requires a REST base ending in `/api`: only that final component becomes `/ws` (HTTP→WS, HTTPS→WSS), preserving origin and proxy prefix; ambiguous mounts fail before network access.
 
 ## DolphinScheduler configuration and tools
 

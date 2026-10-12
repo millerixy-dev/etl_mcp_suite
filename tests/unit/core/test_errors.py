@@ -59,6 +59,7 @@ def test_tool_operations_are_closed_to_v1_tools_plus_internal_fallback() -> None
         "run_paragraph",
         "get_paragraph_status",
         "get_paragraph_result",
+        "get_interpreter_bindings",
         "get_server_status",
         "restart_interpreter",
         "cancel_paragraph",
@@ -71,16 +72,39 @@ def test_tool_operations_are_closed_to_v1_tools_plus_internal_fallback() -> None
     }
 
 
-def test_restart_interpreter_operation_allows_setting_id_identifier() -> None:
+def test_restart_interpreter_operation_allows_setting_and_notebook_identifiers() -> None:
     from mcp_stdio.core.errors import ErrorCategory, ToolError, ToolOperation
 
     error = ToolError.create(
         category=ErrorCategory.UPSTREAM_ERROR,
         operation=ToolOperation.RESTART_INTERPRETER,
         retryable=False,
-        identifiers={"setting_id": "spark"},
+        identifiers={"setting_id": "spark", "notebook_id": "note-1"},
     )
-    assert error.to_dict(secret_values=())["identifiers"] == {"setting_id": "spark"}
+    assert error.to_dict(secret_values=())["identifiers"] == {
+        "setting_id": "spark",
+        "notebook_id": "note-1",
+    }
+
+
+def test_get_interpreter_bindings_operation_allows_only_notebook_identifier() -> None:
+    from mcp_stdio.core.errors import ErrorCategory, ToolError, ToolOperation
+
+    error = ToolError.create(
+        category=ErrorCategory.UPSTREAM_ERROR,
+        operation=ToolOperation.GET_INTERPRETER_BINDINGS,
+        retryable=False,
+        identifiers={"notebook_id": "note-1"},
+    )
+    assert error.to_dict(secret_values=())["identifiers"] == {"notebook_id": "note-1"}
+
+    with pytest.raises(ValueError, match="identifier key is not allowed"):
+        ToolError.create(
+            category=ErrorCategory.UPSTREAM_ERROR,
+            operation=ToolOperation.GET_INTERPRETER_BINDINGS,
+            retryable=False,
+            identifiers={"setting_id": "spark"},
+        )
 
 
 def test_cancel_paragraph_operation_allows_notebook_and_paragraph_identifiers() -> None:
@@ -256,6 +280,8 @@ def test_tool_error_rejects_arbitrary_operation_string() -> None:
         ("get_table_schema", {"password": "identifier-password-sentinel"}),
         ("add_paragraph", {"notebook_id": "unsafe\ncontrol"}),
         ("add_paragraph", {"notebook_id": "x" * 257}),
+        ("restart_interpreter", {"cookie": "identifier-cookie-sentinel"}),
+        ("restart_interpreter", {"paragraph_id": "not-allowed"}),
     ],
 )
 def test_tool_error_rejects_disallowed_or_unsafe_identifiers(
@@ -285,6 +311,41 @@ def test_tool_error_accepts_bounded_opaque_identifier_characters() -> None:
     )
 
     assert error.to_dict(secret_values=())["identifiers"] == {"notebook_id": opaque_id}
+
+
+def test_safe_error_identifiers_omit_unsafe_values_instead_of_truncating() -> None:
+    from mcp_stdio.core.errors import ToolOperation, safe_error_identifiers
+
+    overlong_notebook_id = "n" * 257
+    identifiers = safe_error_identifiers(
+        ToolOperation.RESTART_INTERPRETER,
+        {
+            "setting_id": "spark+prod/%2F",
+            "notebook_id": overlong_notebook_id,
+            "paragraph_id": "not-allowed",
+            "access_token": "sensitive",
+        },
+    )
+
+    assert identifiers == {"setting_id": "spark+prod/%2F"}
+    assert overlong_notebook_id not in identifiers.values()
+
+
+def test_safe_error_identifiers_support_discovery_and_reject_unsafe_shapes() -> None:
+    from mcp_stdio.core.errors import ToolOperation, safe_error_identifiers
+
+    assert safe_error_identifiers(
+        ToolOperation.GET_INTERPRETER_BINDINGS,
+        {"notebook_id": "note-1"},
+    ) == {"notebook_id": "note-1"}
+    assert safe_error_identifiers(
+        ToolOperation.GET_INTERPRETER_BINDINGS,
+        {"notebook_id": "bad\x00id"},
+    ) == {}
+    assert safe_error_identifiers(
+        ToolOperation.GET_INTERPRETER_BINDINGS,
+        {"notebook_id": 123},
+    ) == {}
 
 
 def test_tool_error_serialization_omits_identifier_containing_known_secret() -> None:

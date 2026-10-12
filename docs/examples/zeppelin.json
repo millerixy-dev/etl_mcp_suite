@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "plugin": "zeppelin",
+  "settings": {
+    "base_url": "https://zeppelin.example.invalid/zeppelin/api",
+    "request_timeout_seconds": 30,
+    "allowed_interpreters": [
+      "spark_prod.sql"
+    ],
+    "restartable_interpreter_settings": [
+      "spark_prod"
+    ]
+  },
+  "secrets": {
+    "username": "ZEPPELIN_USERNAME",
+    "password": "ZEPPELIN_PASSWORD"
+  }
+}

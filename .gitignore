@@ -9,6 +9,10 @@ build/
 *.egg-info/
 __pycache__/
 *.py[cod]
+.DS_Store
 
 # Durable local ledger for Superpowers subagent-driven development.
 .superpowers/sdd/
+
+# Local Codex MCP registrations may contain explicit credentials.
+.codex/config.toml
