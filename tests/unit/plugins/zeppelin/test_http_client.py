@@ -3214,3 +3214,409 @@ async def test_contextual_restart_cancellation_clears_call_secret_guard(
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
         await gateway.close()
+
+
+@pytest.mark.parametrize("notebook_id,source", [
+    (None, "username"), (None, "password"), (None, "cookie"),
+    (None, "response_cookie"), ("note", "response_cookie"),
+])
+@pytest.mark.parametrize("failure", ["500", "timeout"])
+async def test_failed_restart_tool_filters_available_secret_identifiers(
+    notebook_id: str | None, source: str, failure: str,
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from mcp.server.fastmcp.exceptions import ToolError as FastMCPToolError
+
+    secrets = {name: f"unique-{name}-failed-restart-sentinel" for name in
+               ("username", "password", "cookie", "response_cookie")}
+    setting_id = f"prefix-{secrets[source]}"
+    guards = _record_restart_guards(monkeypatch)
+    puts: list[httpx.Request] = []
+    streams: list[_TrackedStream] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/login":
+            return httpx.Response(200, headers={
+                "set-cookie": f"JSESSIONID={secrets['cookie']}; Path=/",
+            })
+        if request.url.path == "/api/notebook/note":
+            return _ok({"id": "note"})
+        if request.url.path == "/api/security/ticket":
+            return _ok(_ticket(principal="private-user", ticket="private-ticket", roles="[]"))
+        puts.append(request)
+        headers = {"set-cookie": f"JSESSIONID={secrets['response_cookie']}; Path=/"}
+        if failure == "500":
+            return httpx.Response(500, headers=headers)
+        stream = _TrackedStream([b"{"], httpx.ReadTimeout(secrets[source]))
+        streams.append(stream)
+        return httpx.Response(200, headers=headers, stream=stream)
+
+    connection = LifecycleSocket()
+    connection.frames = [response([binding(id=setting_id, name="Spark", interpreters=[])])]
+    gateway = ZeppelinHttpClient(settings=_settings(),
+        secrets=ZeppelinSecrets.model_validate({"username": secrets["username"],
+                                               "password": secrets["password"]}),
+        transport=_mock_transport(handler), websocket_connector=DiscoverySockets(connection))
+    caplog.set_level(logging.DEBUG)
+    try:
+        with pytest.raises(FastMCPToolError) as error:
+            await _restart_tool(gateway, setting_id).restart_interpreter(setting_id, notebook_id)
+        payload = json.loads(str(error.value))
+        assert payload["category"] == ("UPSTREAM_ERROR" if failure == "500" else "TIMEOUT")
+        assert payload["retryable"] is (failure == "timeout" and notebook_id is None)
+        assert payload["operation"] == "restart_interpreter"
+        assert payload["identifiers"] == ({"notebook_id": "note"} if notebook_id else {})
+        assert len(puts) == 1
+        assert puts[0].content == (b'{"noteId":"note"}' if notebook_id else b"")
+        assert all(stream.closed for stream in streams)
+        assert guards[0].values == ()
+    finally:
+        await gateway.close()
+    captured = capsys.readouterr()
+    for secret in secrets.values():
+        assert secret not in str(error.value)
+        assert secret not in repr(error.value)
+        assert secret not in caplog.text
+        assert secret not in captured.out
+        assert secret not in captured.err
+
+
+@pytest.mark.parametrize("operation,stage", [
+    ("legacy", "login"), ("contextual", "login"), ("contextual", "notebook"),
+    ("contextual", "ticket"), ("discovery", "login"), ("discovery", "notebook"),
+    ("discovery", "ticket"),
+])
+@pytest.mark.parametrize("source", ["password", "cookie", "response_cookie"])
+@pytest.mark.parametrize("failure", ["500", "timeout"])
+async def test_setup_errors_filter_stage_available_secret_ids(
+    operation: str, stage: str, source: str, failure: str,
+    caplog: pytest.LogCaptureFixture, capsys: pytest.CaptureFixture[str],
+) -> None:
+    from mcp.server.fastmcp.exceptions import ToolError as FastMCPToolError
+
+    secrets = {name: f"unique-{name}-setup-secret" for name in
+               ("password", "cookie", "response_cookie")}
+    tainted_id = f"prefix-{secrets[source]}"
+    setting_id = tainted_id if operation != "discovery" else "spark-prod"
+    notebook_id = tainted_id if operation == "discovery" else "note"
+    paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        current_stage = ("login" if request.url.path == "/api/login" else "ticket"
+                         if request.url.path == "/api/security/ticket" else "notebook")
+        if current_stage == stage:
+            headers = {"set-cookie": f"JSESSIONID={secrets['response_cookie']}; Path=/"}
+            if failure == "500":
+                return httpx.Response(500, headers=headers)
+            return httpx.Response(200, headers=headers,
+                stream=_TrackedStream([b"{"], httpx.ReadTimeout(secrets[source])))
+        if current_stage == "login":
+            return httpx.Response(200, headers={
+                "set-cookie": f"JSESSIONID={secrets['cookie']}; Path=/",
+            })
+        if current_stage == "notebook":
+            return _ok({"id": notebook_id})
+        raise AssertionError("Failed setup must not make later requests")
+
+    sockets = DiscoverySockets()
+    gateway = ZeppelinHttpClient(settings=_settings(),
+        secrets=ZeppelinSecrets.model_validate({"username": "clean-user",
+                                               "password": secrets["password"]}),
+        transport=_mock_transport(handler), websocket_connector=sockets)
+    caplog.set_level(logging.DEBUG)
+    try:
+        with pytest.raises(FastMCPToolError) as error:
+            tool = _restart_tool(gateway, setting_id)
+            if operation == "discovery":
+                await tool.get_interpreter_bindings(notebook_id)
+            else:
+                await tool.restart_interpreter(
+                    setting_id, None if operation == "legacy" else "note",
+                )
+        payload = json.loads(str(error.value))
+        assert payload["category"] == ("UPSTREAM_ERROR" if failure == "500" else "TIMEOUT")
+        assert payload["retryable"] is (failure == "timeout" and operation != "contextual")
+        assert payload["operation"] == ("get_interpreter_bindings" if operation == "discovery"
+                                        else "restart_interpreter")
+        # At login, the old cookie was not installed or used by this operation.
+        taint_known = not (stage == "login" and source == "cookie")
+        expected = ({"notebook_id": notebook_id} if operation == "discovery" else
+                    {"setting_id": setting_id, "notebook_id": "note"}
+                    if operation == "contextual" else {"setting_id": setting_id})
+        if taint_known:
+            expected.pop("notebook_id" if operation == "discovery" else "setting_id")
+        assert payload["identifiers"] == expected
+        assert len(paths) == {"login": 1, "notebook": 2, "ticket": 3}[stage]
+        assert sockets.calls == 0
+    finally:
+        await gateway.close()
+    captured = capsys.readouterr()
+    for name, secret in secrets.items():
+        if name == "cookie" and stage == "login" and source == "cookie":
+            continue  # This synthetic value was never available as a secret.
+        assert secret not in str(error.value)
+        assert secret not in caplog.text
+        assert secret not in captured.out
+        assert secret not in captured.err
+
+
+@pytest.mark.parametrize("source", ["password", "cookie", "principal", "ticket", "role"])
+async def test_discovery_tool_rejects_secret_tainted_echoed_notebook_id(
+    source: str, caplog: pytest.LogCaptureFixture, capsys: pytest.CaptureFixture[str],
+) -> None:
+    from mcp.server.fastmcp.exceptions import ToolError as FastMCPToolError
+
+    secrets = {name: f"unique-{name}-discovery-echo-secret" for name in
+               ("password", "cookie", "principal", "ticket", "role")}
+    notebook_id = f"prefix-{secrets[source]}"
+    paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        if request.url.path == "/api/login":
+            return httpx.Response(200, headers={
+                "set-cookie": f"JSESSIONID={secrets['cookie']}; Path=/",
+            })
+        if request.url.path.startswith("/api/notebook/"):
+            return _ok({"id": notebook_id})
+        return _ok(_ticket(principal=secrets["principal"], ticket=secrets["ticket"],
+                           roles=json.dumps([secrets["role"]])))
+
+    connection = LifecycleSocket()
+    connection.frames = [response([])]
+    sockets = DiscoverySockets(connection)
+    gateway = ZeppelinHttpClient(settings=_settings(),
+        secrets=ZeppelinSecrets.model_validate({"username": "clean-user",
+                                               "password": secrets["password"]}),
+        transport=_mock_transport(handler), websocket_connector=sockets)
+    caplog.set_level(logging.DEBUG)
+    try:
+        with pytest.raises(FastMCPToolError) as error:
+            await _restart_tool(gateway).get_interpreter_bindings(notebook_id)
+        payload = json.loads(str(error.value))
+        assert payload["category"] == "UNEXPECTED_RESPONSE"
+        assert payload["operation"] == "get_interpreter_bindings"
+        assert payload["retryable"] is False
+        assert payload["identifiers"] == {}
+        assert len(paths) == 3
+        assert sockets.calls == 0
+    finally:
+        await gateway.close()
+    captured = capsys.readouterr()
+    for secret in secrets.values():
+        assert secret not in str(error.value)
+        assert secret not in caplog.text
+        assert secret not in captured.out
+        assert secret not in captured.err
+
+
+@pytest.mark.parametrize("failure", ["500", "timeout"])
+async def test_legacy_restart_keeps_original_failure_correlation(
+    failure: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "legacy-original-cookie-secret"
+    setting_id = f"prefix-{secret}"
+    mapped: list[ZeppelinGatewayError] = []
+    original_check = ZeppelinHttpClient._gateway_error  # pyright: ignore[reportPrivateUsage] - inspect original mapper correlation
+
+    def record_error(
+        self: ZeppelinHttpClient, category: ErrorCategory, operation: ToolOperation,
+        identifiers: dict[str, str], *, retryable: bool | None = None,
+    ) -> ZeppelinGatewayError:
+        error = original_check(self, category, operation, identifiers, retryable=retryable)
+        mapped.append(error)
+        return error
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/login":
+            return httpx.Response(200, headers={"set-cookie": f"JSESSIONID={secret}; Path=/"})
+        if failure == "500":
+            return httpx.Response(500)
+        raise httpx.ReadTimeout(secret)
+
+    monkeypatch.setattr(ZeppelinHttpClient, "_gateway_error", record_error)
+    gateway = ZeppelinHttpClient(settings=_settings(), secrets=_secrets(),
+        transport=_mock_transport(handler))
+    try:
+        with pytest.raises(ZeppelinGatewayError) as error:
+            await gateway.restart_interpreter(setting_id)
+        assert len(mapped) == 1
+        assert error.value is mapped[0]
+        assert error.value.tool_error.identifiers == {}
+        assert error.value.tool_error.retryable is (failure == "timeout")
+    finally:
+        await gateway.close()
+
+
+@pytest.mark.parametrize("notebook_id", [None, "note"])
+async def test_restart_cookie_parse_failure_omits_all_identifiers_and_clears_guard(
+    notebook_id: str | None, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str], caplog: pytest.LogCaptureFixture,
+) -> None:
+    from mcp.server.fastmcp.exceptions import ToolError as FastMCPToolError
+
+    secret = "malformed-cookie-secret"
+    setting_id = f"prefix-{secret}"
+    puts: list[httpx.Request] = []
+    guards = _record_restart_guards(monkeypatch)
+    original_parser = adapter_module._cookie_values  # pyright: ignore[reportPrivateUsage] - test malformed-cookie failure seam
+
+    def parse_cookie(header: str | None) -> tuple[str, ...]:
+        if puts:
+            raise ValueError(secret)
+        return original_parser(header)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/login":
+            return httpx.Response(200)
+        if request.url.path == "/api/notebook/note":
+            return _ok({"id": "note"})
+        if request.url.path == "/api/security/ticket":
+            return _ok(_ticket(principal="private-user", ticket="private-ticket", roles="[]"))
+        puts.append(request)
+        return _ok({"id": setting_id, "name": "Spark", "group": "spark", "status": "READY"})
+
+    monkeypatch.setattr(adapter_module, "_cookie_values", parse_cookie)
+    connection = LifecycleSocket()
+    connection.frames = [response([binding(id=setting_id, name="Spark", interpreters=[])])]
+    gateway = ZeppelinHttpClient(settings=_settings(), secrets=_secrets(),
+        transport=_mock_transport(handler), websocket_connector=DiscoverySockets(connection))
+    try:
+        with pytest.raises(FastMCPToolError) as error:
+            await _restart_tool(gateway, setting_id).restart_interpreter(setting_id, notebook_id)
+        payload = json.loads(str(error.value))
+        assert payload["category"] == "UNEXPECTED_RESPONSE"
+        assert payload["operation"] == "restart_interpreter"
+        assert payload["retryable"] is False
+        assert payload["identifiers"] == {}
+        assert len(puts) == 1
+        assert guards[0].values == ()
+    finally:
+        await gateway.close()
+    captured = capsys.readouterr()
+    assert secret not in str(error.value)
+    assert secret not in caplog.text
+    assert secret not in captured.out
+    assert secret not in captured.err
+
+
+@pytest.mark.parametrize("operation", ["discovery", "contextual"])
+@pytest.mark.parametrize("failure", [
+    "notebook_id", "ticket_body", "ticket_roles", "principal_roles", "role_mixed",
+])
+async def test_preparation_local_errors_keep_prior_cookie_and_ticket_secrets_private(
+    operation: str, failure: str, caplog: pytest.LogCaptureFixture,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from mcp.server.fastmcp.exceptions import ToolError as FastMCPToolError
+
+    old_cookie = "old-preparation-cookie-secret"
+    new_cookie = "new-preparation-cookie-secret"
+    ticket = "available-preparation-ticket-secret"
+    principal = "available-preparation-principal-secret"
+    role = "available-preparation-role-secret"
+    secret = ({"ticket_roles": ticket, "principal_roles": principal, "role_mixed": role}
+              .get(failure, old_cookie))
+    tainted_id = f"prefix-{secret}"
+    notebook_id = tainted_id if operation == "discovery" else "note"
+    setting_id = tainted_id if operation == "contextual" else "spark-prod"
+    paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        if request.url.path == "/api/login":
+            return httpx.Response(200, headers={"set-cookie": f"JSESSIONID={old_cookie}; Path=/"})
+        if request.url.path.startswith("/api/notebook/"):
+            return httpx.Response(200, json={"status": "OK", "body": {
+                "id": "other" if failure == "notebook_id" else notebook_id,
+            }}, headers={"set-cookie": f"JSESSIONID={new_cookie}; Path=/"})
+        body = {} if failure == "ticket_body" else _ticket(
+            principal=principal, ticket=ticket,
+            roles=json.dumps([role, 1]) if failure == "role_mixed" else "invalid-json",
+        )
+        return _ok(body)
+
+    sockets = DiscoverySockets()
+    gateway = ZeppelinHttpClient(settings=_settings(), secrets=_secrets(),
+        transport=_mock_transport(handler), websocket_connector=sockets)
+    caplog.set_level(logging.DEBUG)
+    try:
+        with pytest.raises(FastMCPToolError) as error:
+            tool = _restart_tool(gateway, setting_id)
+            if operation == "discovery":
+                await tool.get_interpreter_bindings(notebook_id)
+            else:
+                await tool.restart_interpreter(setting_id, notebook_id)
+        payload = json.loads(str(error.value))
+        assert payload["category"] == "UNEXPECTED_RESPONSE"
+        assert payload["retryable"] is False
+        assert payload["identifiers"] == (
+            {"notebook_id": "note"} if operation == "contextual" else {}
+        )
+        assert sockets.calls == 0
+        assert len(paths) == (2 if failure == "notebook_id" else 3)
+    finally:
+        await gateway.close()
+    captured = capsys.readouterr()
+    for value in (old_cookie, new_cookie, ticket, principal, role):
+        assert value not in str(error.value)
+        assert value not in caplog.text
+        assert value not in captured.out
+        assert value not in captured.err
+
+
+async def test_discovery_overall_timeout_keeps_rotated_cookie_private(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from mcp.server.fastmcp.exceptions import ToolError as FastMCPToolError
+
+    old_cookie = "overall-discovery-old-cookie-secret"
+    notebook_id = f"prefix-{old_cookie}"
+    guards = _record_restart_guards(monkeypatch)
+    paths: list[str] = []
+    closed = asyncio.Event()
+
+    class PendingTicket(httpx.AsyncByteStream):
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            await asyncio.Event().wait()
+            yield b"unreachable"
+
+        async def aclose(self) -> None:
+            closed.set()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        if request.url.path == "/api/login":
+            return httpx.Response(200, headers={"set-cookie": f"JSESSIONID={old_cookie}; Path=/"})
+        if request.url.path.startswith("/api/notebook/"):
+            return _ok({"id": notebook_id})
+        return httpx.Response(200, stream=PendingTicket(), headers={
+            "set-cookie": "JSESSIONID=new-overall-cookie-secret; Path=/",
+        })
+
+    gateway = ZeppelinHttpClient(
+        settings=_settings(request_timeout_seconds=0.03), secrets=_secrets(),
+        transport=_mock_transport(handler), websocket_connector=DiscoverySockets(),
+    )
+    caplog.set_level(logging.DEBUG)
+    try:
+        with pytest.raises(FastMCPToolError) as error:
+            await _restart_tool(gateway).get_interpreter_bindings(notebook_id)
+        payload = json.loads(str(error.value))
+        assert payload["category"] == "TIMEOUT"
+        assert payload["retryable"] is True
+        assert payload["operation"] == "get_interpreter_bindings"
+        assert payload["identifiers"] == {}
+        assert len(paths) == 3
+        assert closed.is_set()
+        assert guards[0].values == ()
+    finally:
+        await gateway.close()
+    captured = capsys.readouterr()
+    assert old_cookie not in str(error.value)
+    assert old_cookie not in caplog.text
+    assert old_cookie not in captured.out
+    assert old_cookie not in captured.err

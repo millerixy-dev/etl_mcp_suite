@@ -265,6 +265,7 @@ class ZeppelinHttpClient:
         operation = ToolOperation.GET_INTERPRETER_BINDINGS
         identifiers = {"notebook_id": notebook_id}
         acquisition = asyncio.create_task(self._discovery_lock.acquire())
+        guard = _RestartSecretGuard()
         try:
             await asyncio.wait_for(
                 asyncio.shield(acquisition),
@@ -275,13 +276,18 @@ class ZeppelinHttpClient:
             result = await self._discover_locked(
                 notebook_id, deadline=deadline, operation=operation, identifiers=identifiers,
                 cancelled=cancelled,
+                secret_guard=guard,
             )
             if self._closed or cancelled.is_set():
                 raise asyncio.CancelledError
             return result
         except asyncio.TimeoutError:
-            raise self._gateway_error(ErrorCategory.TIMEOUT, operation, identifiers) from None
+            raise self._gateway_error(
+                ErrorCategory.TIMEOUT, operation,
+                self._untainted_identifiers(identifiers, guard.values),
+            ) from None
         finally:
+            guard.values = ()
             await self._release_discovery_lock(acquisition)
 
     async def _discover_locked(
@@ -292,7 +298,10 @@ class ZeppelinHttpClient:
     ) -> tuple[InterpreterBindingRecord, ...]:
         """Use only with the discovery lock held; never acquire it recursively."""
         preparation = asyncio.create_task(
-            self._prepare_discovery(notebook_id, operation=operation, identifiers=identifiers),
+            self._prepare_discovery(
+                notebook_id, operation=operation, identifiers=identifiers,
+                secret_guard=secret_guard,
+            ),
         )
         try:
             context = await asyncio.wait_for(
@@ -308,14 +317,23 @@ class ZeppelinHttpClient:
             if self._closed or (cancelled is not None and cancelled.is_set()):
                 raise asyncio.CancelledError
             if secret_guard is not None:
-                secret_guard.values = context.sensitive_values
+                secret_guard.values += context.sensitive_values
+            query_identifiers = self._untainted_identifiers(identifiers, context.sensitive_values)
+            if operation == ToolOperation.GET_INTERPRETER_BINDINGS and any(
+                secret in notebook_id for secret in context.sensitive_values
+            ):
+                raise self._gateway_error(
+                    ErrorCategory.UNEXPECTED_RESPONSE, operation, query_identifiers,
+                    retryable=False,
+                )
             return await query_bindings(
                 url=context.websocket_url, origin=context.origin, principal=context.principal,
                 ticket=context.ticket, roles=context.roles, cookie_header=context.cookie_header,
                 notebook_id=notebook_id, max_response_bytes=self._settings.max_response_bytes,
                 max_opaque_id_chars=self._settings.max_opaque_id_chars,
                 request_timeout_seconds=self._settings.request_timeout_seconds,
-                operation=operation, identifiers=identifiers, connector=self._websocket_connector,
+                operation=operation, identifiers=query_identifiers,
+                connector=self._websocket_connector,
                 deadline=deadline, sensitive_values=context.sensitive_values,
             )
         finally:
@@ -365,6 +383,7 @@ class ZeppelinHttpClient:
         *,
         operation: ToolOperation,
         identifiers: dict[str, str],
+        secret_guard: _RestartSecretGuard | None = None,
     ) -> _TicketContext:
         """Check notebook readability and obtain fresh auth on the same session."""
         try:
@@ -377,13 +396,19 @@ class ZeppelinHttpClient:
                 retryable=False,
             ) from None
         encoded_id = self._encode_id(notebook_id)
+        session_values = self._stage_sensitive_values(operation, secret_guard)
+        identifiers = self._untainted_identifiers(identifiers, session_values)
         client = await self._ensure_authenticated(
             operation=operation, identifiers=identifiers, discovery=True,
         )
+        session_values += self._stage_sensitive_values(operation, secret_guard)
+        identifiers = self._untainted_identifiers(identifiers, session_values)
         notebook = await self._request(
             client, "GET", f"/notebook/{encoded_id}", operation=operation,
             identifiers=identifiers, expect_body=True, discovery=True, notebook_precheck=True,
         )
+        session_values += self._stage_sensitive_values(operation, secret_guard)
+        identifiers = self._untainted_identifiers(identifiers, session_values)
         if (
             not isinstance(notebook, dict)
             or cast(dict[str, Any], notebook).get("id") != notebook_id
@@ -394,8 +419,22 @@ class ZeppelinHttpClient:
             client, "GET", "/security/ticket", operation=operation,
             identifiers=identifiers, expect_body=True, discovery=True,
         )
+        session_values += self._stage_sensitive_values(operation, secret_guard)
+        identifiers = self._untainted_identifiers(identifiers, session_values)
         if not isinstance(body, dict):
             raise self._gateway_error(ErrorCategory.UNEXPECTED_RESPONSE, operation, identifiers)
+        available_identity_fields = tuple(
+            value for key in ("principal", "ticket")
+            if isinstance(value := cast(dict[str, object], body).get(key), str) and value
+        )
+        raw_roles = cast(dict[str, object], body).get("roles")
+        available_fields = (*available_identity_fields,
+                            *((raw_roles,) if isinstance(raw_roles, str) and raw_roles else ()))
+        session_values += available_identity_fields
+        guard_before_fields = () if secret_guard is None else secret_guard.values
+        if secret_guard is not None:
+            secret_guard.values += available_fields
+        identifiers = self._untainted_identifiers(identifiers, (*session_values, *available_fields))
         fields: list[str] = []
         for key in ("principal", "ticket", "roles"):
             value = cast(dict[str, Any], body).get(key)
@@ -417,10 +456,24 @@ class ZeppelinHttpClient:
             raise self._gateway_error(
                 ErrorCategory.UNEXPECTED_RESPONSE, operation, identifiers,
             ) from None
+        available_roles: tuple[str, ...] = ()
+        if isinstance(decoded_roles, list):
+            available_roles = tuple(
+                role for role in cast(list[object], decoded_roles) if isinstance(role, str) and role
+            )
+            session_values += available_roles
+            if secret_guard is not None:
+                secret_guard.values += available_roles
+            identifiers = self._untainted_identifiers(identifiers, session_values)
         if not isinstance(decoded_roles, list) or not all(
             isinstance(role, str) for role in cast(list[object], decoded_roles)
         ):
             raise self._gateway_error(ErrorCategory.UNEXPECTED_RESPONSE, operation, identifiers)
+        if secret_guard is not None:
+            # Valid roles protect decoded nonempty values, not harmless JSON punctuation.
+            secret_guard.values = (
+                *guard_before_fields, *available_identity_fields, *available_roles,
+            )
         cookie_header = client.build_request("GET", target.http_url).headers.get("cookie")
         try:
             cookie_values = _cookie_values(cookie_header)
@@ -447,6 +500,8 @@ class ZeppelinHttpClient:
             origin=target.origin,
             cookie_header=cookie_header,
             sensitive_values=tuple(value for value in (
+                *session_values,
+                *self._stage_sensitive_values(operation, secret_guard),
                 *configured_secrets,
                 principal,
                 ticket,
@@ -637,17 +692,20 @@ class ZeppelinHttpClient:
                 self._restarts.discard(task)
 
         encoded_id = self._encode_id(setting_id)
-        client = await self._ensure_authenticated(
-            operation=ToolOperation.RESTART_INTERPRETER, identifiers={"setting_id": setting_id},
-        )
         identifiers = {"setting_id": setting_id}
         path = f"/interpreter/setting/restart/{encoded_id}"
         guard = _RestartSecretGuard()
         try:
-            guard.values = self._restart_sensitive_values(client, path, identifiers)
+            guard.values = self._stage_sensitive_values(ToolOperation.RESTART_INTERPRETER)
+            client = await self._ensure_authenticated(
+                operation=ToolOperation.RESTART_INTERPRETER,
+                identifiers=self._untainted_identifiers(identifiers, guard.values),
+            )
+            guard.values += self._restart_sensitive_values(client, path, identifiers)
             body = await self._request_json(
                 client, "PUT", path, json_payload=None,
-                operation=ToolOperation.RESTART_INTERPRETER, identifiers=identifiers,
+                operation=ToolOperation.RESTART_INTERPRETER,
+                identifiers=self._untainted_identifiers(identifiers, guard.values),
             )
             guard.values += self._restart_sensitive_values(client, path, identifiers)
             return self._parse_restart_result(body, setting_id, identifiers, guard.values)
@@ -686,7 +744,8 @@ class ZeppelinHttpClient:
             put = asyncio.create_task(self._request(
                 client, "PUT", path,
                 json_payload={"noteId": notebook_id}, operation=operation,
-                identifiers=identifiers, expect_body=True, discovery=True,
+                identifiers=self._untainted_identifiers(identifiers, guard.values),
+                expect_body=True, discovery=True,
             ))
             try:
                 body = await asyncio.wait_for(asyncio.shield(put), remaining)
@@ -704,7 +763,8 @@ class ZeppelinHttpClient:
         except ZeppelinGatewayError as exc:
             raise self._gateway_error(
                 exc.tool_error.category, operation,
-                self._untainted_identifiers(identifiers, guard.values), retryable=False,
+                self._untainted_identifiers(dict(exc.tool_error.identifiers), guard.values),
+                retryable=False,
             ) from None
         finally:
             guard.values = ()
@@ -746,18 +806,15 @@ class ZeppelinHttpClient:
     def _restart_sensitive_values(
         self, client: httpx.AsyncClient, path: str, identifiers: dict[str, str],
     ) -> tuple[str, ...]:
-        configured = tuple(
-            secret.get_secret_value() for secret in (self._secrets.username, self._secrets.password)
-            if secret is not None and secret.get_secret_value()
-        )
+        available = self._stage_sensitive_values(ToolOperation.RESTART_INTERPRETER)
         try:
             cookies = _cookie_values(client.build_request("PUT", path).headers.get("cookie"))
         except ValueError:
             raise self._gateway_error(
                 ErrorCategory.UNEXPECTED_RESPONSE, ToolOperation.RESTART_INTERPRETER,
-                self._untainted_identifiers(identifiers, configured), retryable=False,
+                {}, retryable=False,
             ) from None
-        return (*configured, *cookies)
+        return (*available, *cookies)
 
     def _parse_restart_result(
         self, body: object, setting_id: str, identifiers: dict[str, str],
@@ -884,6 +941,9 @@ class ZeppelinHttpClient:
         discovery: bool = False,
         notebook_precheck: bool = False,
     ) -> Any:
+        known_secrets = self._current_sensitive_values()
+        identifiers = ({} if known_secrets is None else
+                       self._untainted_identifiers(identifiers, known_secrets))
         try:
             if discovery:
                 response = await client.send(
@@ -1019,6 +1079,37 @@ class ZeppelinHttpClient:
                     return kind
         return OutputKind.TEXT
 
+    def _current_sensitive_values(self) -> tuple[str, ...] | None:
+        """Read local credentials/cookies only; None means collection failed closed."""
+        try:
+            values = [
+                secret.get_secret_value()
+                for secret in (self._secrets.username, self._secrets.password)
+                if secret is not None and secret.get_secret_value()
+            ]
+            if self._client is not None:
+                for cookie in self._client.cookies.jar:
+                    value = cast(object, cookie.value)
+                    if value is not None and not isinstance(value, str):
+                        return None
+                    if isinstance(value, str) and value:
+                        values.append(value)
+            return tuple(values)
+        except Exception:
+            return None
+
+    def _stage_sensitive_values(
+        self, operation: ToolOperation, secret_guard: _RestartSecretGuard | None = None,
+    ) -> tuple[str, ...]:
+        values = self._current_sensitive_values()
+        if values is None:
+            raise self._gateway_error(
+                ErrorCategory.UNEXPECTED_RESPONSE, operation, {}, retryable=False,
+            ) from None
+        if secret_guard is not None:
+            secret_guard.values += values
+        return values
+
     def _gateway_error(
         self,
         category: ErrorCategory,
@@ -1027,6 +1118,9 @@ class ZeppelinHttpClient:
         *,
         retryable: bool | None = None,
     ) -> ZeppelinGatewayError:
+        known_secrets = self._current_sensitive_values()
+        identifiers = ({} if known_secrets is None else
+                       self._untainted_identifiers(identifiers, known_secrets))
         return ZeppelinGatewayError(
             ToolError.create(
                 category=category,

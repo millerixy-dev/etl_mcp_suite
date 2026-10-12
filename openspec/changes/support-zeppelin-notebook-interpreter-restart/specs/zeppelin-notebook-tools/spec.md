@@ -80,6 +80,16 @@ The shared logging policy SHALL suppress `httpx` and `httpcore` transport logs, 
 - **WHEN** the Zeppelin adapter performs a restart with its owned client
 - **THEN** no `httpx` or `httpcore` record or transport debug representation is emitted, application safe diagnostics remain available, and unrelated root logging is unchanged
 
+#### Scenario: Failed authentication or requests omit available session secrets
+- **GIVEN** configured credentials or cookies installed before or by a login, notebook precheck, ticket or restart response match a public error identifier
+- **WHEN** discovery or either restart mode fails during that stage, including failed HTTP status or a response-stream timeout
+- **THEN** those identifiers are omitted without extra requests or retry, the operation/category/retryability remain appropriate to the original mode and failure, and no secret is emitted through errors or logging
+
+#### Scenario: Discovery does not echo a tainted notebook identifier
+- **GIVEN** a readable notebook ID contains an available configured/session or query-scoped principal, ticket or decoded role secret
+- **WHEN** discovery has acquired its private authentication context
+- **THEN** it fails closed with secret-safe `UNEXPECTED_RESPONSE` rather than returning `InterpreterBindingsResult` with the tainted `notebook_id`, releases the query context, and does not send a binding query
+
 #### Scenario: Tainted restart success fields fail safely
 - **GIVEN** a legacy or contextual restart PUT returns a success body containing an available configured or session secret in a public string, or a contextual success body contains a query-scoped principal, ticket, decoded role or cookie value
 - **WHEN** the four-field restart result is validated

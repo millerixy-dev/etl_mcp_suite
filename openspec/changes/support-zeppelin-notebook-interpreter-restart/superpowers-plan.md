@@ -503,3 +503,33 @@ Task 14 review repair scope extension (before logging source edits):
   client creation invoke it. Preserve root state; retain no global secret values.
 - Verify core logging/errors and Zeppelin HTTP/WebSocket/tools, Ruff, Pyright and
   strict active validation. Parent performs final whole-suite/re-review gate.
+
+Task 14 residual failure-branch repair micro-plan (base 34782ed):
+- Existing confidentiality and clear-on-every-outcome requirements govern failed
+  restart PUTs too. No new settings, upstream API or mode error policy is introduced.
+- Files: `http_client.py`, `test_http_client.py`, and this canonical plan.
+- RED: legacy configured/current-cookie tainted IDs on PUT500/timeout, and both
+  modes new response-cookie tainted IDs on failed response/stream timeout. Assert
+  unchanged category/retryable/operation, safe IDs, one PUT/no retry and guard clear.
+- GREEN: capture post-request cookie secrets on failure as well as success while
+  the client is available; legacy gateway error rewrap preserves original metadata
+  and filters IDs with the guard. Cookie parse failure itself must fail safely.
+- Verify focused RED/GREEN, covering core/HTTP/WebSocket/tools, Ruff and complete
+  Pyright; controller re-reviews and keeps OpenSpec checkbox pending.
+
+Residual repair scope clarification before source edits:
+- Named scenarios now cover stage-available credentials/cookies on failed login,
+  precheck, ticket and PUT, plus discovery's echoed notebook identifier.
+- A leaf current-credential/session-jar collector filters before request and at
+  the common gateway error factory, without recursion or new network work. Keep
+  per-call guard history for rotated cookies/query values and preserve original
+  legacy ToolError metadata/correlation (avoid wrapping when unnecessary).
+- Test discovery/restart prep failures, configured/old/new cookie IDs, query-tainted
+  successful discovery IDs, malformed cookie parsing, and guard cleanup.
+
+Preparation closure evidence scope: cumulative guards apply to local validation
+errors and outer discovery deadlines; identifiers may only shrink across stages.
+Collect available principal/ticket/roles strings before metadata validation and
+decoded string roles before mixed-type rejection. Raw roles JSON belongs to the
+validation-error guard only; successful contexts protect decoded nonempty values
+so empty roles do not taint harmless JSON punctuation in public names.
