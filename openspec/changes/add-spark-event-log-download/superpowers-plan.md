@@ -82,3 +82,27 @@ Recognize credential field/assignment and URL userinfo forms, replace known secr
 3. VERIFY: `uv run --locked pytest tests/unit/plugins/spark/test_files.py` and `uv run --locked ruff check src/mcp_stdio/plugins/spark/files.py tests/unit/plugins/spark/test_files.py`; all pass and digests track actual bytes.
 4. COMMIT: `git add src/mcp_stdio/plugins/spark/files.py tests/unit/plugins/spark/test_files.py openspec/changes/add-spark-event-log-download`; `git commit -m "feat(spark): redact credentials from staged event logs"`.
 Self-review 2.3: source bytes remain only transient; event structure, order and safe numeric metrics stay intact.
+
+## Task 2.4 — Private directory publication and reuse
+
+Files: src/mcp_stdio/plugins/spark/cache.py; tests/unit/plugins/spark/test_cache.py.
+Consumes SparkHttpClient.receive, process_archive and SparkEventLogFetchResult. Produces SparkEventLogAdapter implementing lookup/download/close.
+1. RED: test exclusive root lock, restart reuse, source/selector misses, manifest/hash corruption, refresh directories and failed/cancelled staging cleanup. Run `uv run --locked pytest tests/unit/plugins/spark/test_cache.py --tb=short -q`; expected missing adapter failures.
+2. GREEN: startup uses fcntl root lock (no network); download serializes under remaining deadline:
+```python
+staging = Path(tempfile.mkdtemp(prefix=".part-", dir=cache_dir))
+try:
+    await http.receive(application_id, attempt_id, staging / "archive.zip", deadline=deadline)
+    files = await process_archive(staging / "archive.zip", staging, application_id=application_id,
+                                  attempt_id=attempt_id, max_bytes=max_bytes, deadline=deadline,
+                                  secret_values=secret_values)
+    # replace temporary paths with generated final paths; write bounded manifest; delete ZIP
+    os.rename(staging, final_directory)
+finally:
+    # remove only this call's unpublished staging; old directories are immutable
+    shutil.rmtree(staging, ignore_errors=True)
+```
+Lookup reads bounded manifests under exact app/selector, validates source before adoption and re-hashes fixed local files. Never follow symlink roots/files; no GC, dedup, owner marker or extra index.
+3. VERIFY: same test command; `uv run --locked ruff check src/mcp_stdio/plugins/spark tests/unit/plugins/spark` and focused pyright.
+4. COMMIT: `git add src/mcp_stdio/plugins/spark/cache.py tests/unit/plugins/spark/test_cache.py openspec/changes/add-spark-event-log-download`; `git commit -m "feat(spark): persist and reuse private event log directories"`.
+Self-review 2.4: publication is one directory rename; source/request scope and file digests gate reuse.
