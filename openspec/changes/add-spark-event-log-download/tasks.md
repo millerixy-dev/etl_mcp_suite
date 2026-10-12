@@ -4,7 +4,7 @@
 
 ## 2. 下载与文件处理
 
-- [ ] 2.1 RED → GREEN → REFACTOR：用 mock transport 先验证两条 GET/mount、环境 Cookie、TLS/CA、无重定向/环境代理、HTML-200/状态安全映射、实际字节上限、超时与响应关闭，再实现 lazy HTTP adapter 和既有 wire-log suppression；验证 `uv run --locked pytest tests/unit/plugins/spark/test_http_client.py`。不自动登录或重试。
+- [x] 2.1 RED → GREEN → REFACTOR：用 mock transport 先验证两条 GET/mount、环境 Cookie、TLS/CA、无重定向/环境代理、HTML-200/状态安全映射、实际字节上限、超时与响应关闭，再实现 lazy HTTP adapter 和既有 wire-log suppression；验证 `uv run --locked pytest tests/unit/plugins/spark/test_http_client.py`。不自动登录或重试。
 - [ ] 2.2 RED → GREEN → REFACTOR：用合成 ZIP 先验证 CRC、普通安全 basename、固定成员/行及 max_bytes 上限、JSONL/LogStart/ApplicationStart 身份、single/all/null attempts、缺 ApplicationEnd 允许和坏尾行拒绝，再实现标准 ZipFile 逐成员读取；验证 `uv run --locked pytest tests/unit/plugins/spark/test_files.py -k 'archive or identity or record or limit'`。不写 ZIP 格式解析器或修复算法。
 - [ ] 2.3 RED → GREEN → REFACTOR：先用合成秘密验证递归字段/字符串、Cookie、URL、EnvironmentUpdate 固定白名单脱敏，以及行序、数值和源/输出摘要，再实现流式 JSONL 输出；验证 `uv run --locked pytest tests/unit/plugins/spark/test_files.py -k 'redact or digest'`，再运行整个 test_files.py。无脱敏策略框架或原始 ZIP 持久化。
 - [ ] 2.4 RED → GREEN → REFACTOR：先测试私有目录/根锁、单下载目录+manifest、整目录 rename、失败/取消清理、exact source/selection 复用、hash 损坏检测与 refresh 新目录，再实现最小本地保存/lookup；验证 `uv run --locked pytest tests/unit/plugins/spark/test_cache.py`。不实现 owner marker、对象库、去重、TTL、配额、GC 或强杀恢复。
