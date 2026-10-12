@@ -211,3 +211,18 @@ async def test_redact_environment_allowlist_and_digest(tmp_path: Path) -> None:
     env = json.loads(saved.splitlines()[2])
     assert env["Spark Properties"]["spark.executor.memory"] == "4g"
     assert env["Spark Properties"]["spark.my.custom"] == "[REDACTED]"
+
+
+async def test_redact_complete_unknown_cookie_header(tmp_path: Path) -> None:
+    records = events()
+    records.insert(
+        2,
+        {
+            "Event": "SparkListenerTaskEnd",
+            "detail": "Cookie: sid=unknown-cookie-one; auth_ticket=unknown-cookie-two",
+        },
+    )
+    result = await _process(tmp_path, {APP + "_1": encode(records)})
+    saved = Path(result[0].local_path).read_text()
+    assert "unknown-cookie-one" not in saved
+    assert "unknown-cookie-two" not in saved

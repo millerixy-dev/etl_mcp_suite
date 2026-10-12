@@ -36,7 +36,8 @@ class SparkHttpClient:
             raise spark_error(ErrorCategory.UPSTREAM_ERROR)
         if self._client is None:
             suppress_http_transport_logging()
-            context = ssl.create_default_context(cafile=self._settings.ca_bundle_path)
+            ca_path = self._settings.ca_bundle_path
+            context = ssl.create_default_context(cafile=ca_path) if ca_path else True
             self._client = httpx.AsyncClient(
                 verify=context,
                 trust_env=False,

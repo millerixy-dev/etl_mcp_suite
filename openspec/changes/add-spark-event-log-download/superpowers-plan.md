@@ -175,3 +175,24 @@ Consumes implemented settings/tool/result contracts. Produces equivalent executa
 3. VERIFY: run the configuration test and strict change validation; manually compare documented fields, defaults, paths, transport and cleanup to design/specs. No code behavior is changed in this task.
 4. COMMIT: `git add README.md README.zh-CN.md docs/examples/spark.yaml docs/examples/spark.json docs/architecture AGENTS.md tests/unit/plugins/spark/test_config.py openspec/changes/add-spark-event-log-download`; `git commit -m "docs(spark): document event log acquisition and local evidence"`.
 Self-review 4.1: examples use placeholders, optional CA and environment secret names; no live fixture or credential values.
+
+## Task 4.2 — Review corrections and full verification
+
+Files: core/server.py; plugins/spark/{http_client,files}.py; corresponding regression tests; this change's verification.md.
+Consumes independent code review against d2d80c1..edf0eac and all approved requirements.
+1. RED: separate regressions for literal nullable attempt "null", ambient SSL_CERT_FILE/SSL_CERT_DIR isolation and multi-value unknown Cookie strings. Run the individual selected pytest commands before each fix; expected scope change, implicit CA override and retained second cookie failures.
+2. GREEN (one finding at a time):
+```python
+class _RawArguments(FuncMetadata):
+    def pre_parse_json(self, data: dict[str, Any]) -> dict[str, Any]:
+        return data
+# Install this metadata on the registered SDK tool, preserving its output metadata.
+verify = ssl.create_default_context(cafile=ca_path) if ca_path else True
+# HTTPX verify=True + trust_env=False explicitly selects its default CA bundle.
+_COOKIE_HEADER = re.compile(r"(?i)(\\b(?:set-cookie|cookie)\\s*[:=]\\s*)[^\\r\\n]+")
+# Replace the entire header value before generic assignment redaction.
+```
+Use actual installed SDK metadata APIs; preserve existing tool output conversion and argument model declarations. Re-review the fixes independently.
+3. VERIFY: `uv sync --locked`; `PYTHONPATH=src uv run --locked pytest`; `uv run --locked ruff check .`; `uv run --locked pyright`; `uv build`; console help and actual Spark EOF smoke with a fresh temporary root; strict change/all-changes/all-specs validation. `PYTHONPATH=src uv run --locked pytest -m integration tests/integration/test_spark_server.py` reports skipped if deployment gate missing. Exact results are recorded in verification.md. PYTHONPATH is a development-test workaround for this host's reappearing hidden .pth flags, never a production launch instruction.
+4. COMMIT: `git add src/mcp_stdio/core/server.py src/mcp_stdio/plugins/spark tests/unit/plugins/spark openspec/changes/add-spark-event-log-download`; `git commit -m "fix(spark): preserve exact scope and isolate credential boundaries"`, then commit final verification evidence and gated task completion.
+Self-review 4.2: fixes address reproduced scope/security defects without adding product capabilities.

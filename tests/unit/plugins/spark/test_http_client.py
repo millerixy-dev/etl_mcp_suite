@@ -1,4 +1,5 @@
 """Bounded History Server GET tests using synthetic responses."""
+# pyright: reportPrivateUsage=false
 
 from __future__ import annotations
 
@@ -77,7 +78,7 @@ async def test_path_cookie_lazy_and_safe_tls(
         assert requests[0].headers["Cookie"] == "session=synthetic-cookie"
         assert options[0]["trust_env"] is False
         assert options[0]["follow_redirects"] is False
-        assert isinstance(options[0]["verify"], ssl.SSLContext)
+        assert options[0]["verify"] is True
         assert (tmp_path / "archive.part").stat().st_mode & 0o777 == 0o600
     finally:
         await client.close()
@@ -168,5 +169,40 @@ async def test_deadline_and_cancel_close_stream(tmp_path: Path, cancel: bool) ->
             assert error.value.tool_error.category.value == "TIMEOUT"
         assert stream.closed
         assert not (tmp_path / "archive.part").exists()
+    finally:
+        await client.close()
+
+
+async def test_default_tls_ignores_ambient_ca_overrides(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from mcp_stdio.plugins.spark.http_client import SparkHttpClient
+
+    calls: list[str | None] = []
+    contexts: list[ssl.SSLContext] = []
+    original = ssl.create_default_context
+
+    def capture(
+        *, cafile: str | None = None, capath: str | None = None, cadata: str | bytes | None = None
+    ) -> ssl.SSLContext:
+        calls.append(cafile)
+        context = original(cafile=cafile, capath=capath, cadata=cadata)
+        contexts.append(context)
+        return context
+
+    monkeypatch.setenv("SSL_CERT_FILE", str(tmp_path / "unknown-ca.pem"))
+    monkeypatch.setenv("SSL_CERT_DIR", str(tmp_path / "unknown-ca-dir"))
+    monkeypatch.setattr(ssl, "create_default_context", capture)
+    client = SparkHttpClient(
+        settings=SparkSettings(
+            history_server_url="https://history.example", cache_dir=str(tmp_path)
+        ),
+        secrets=SparkSecrets(),
+    )
+    try:
+        client._ensure_client()
+        assert calls and calls[0] is not None
+        assert calls[0] != str(tmp_path / "unknown-ca.pem")
+        assert contexts[0].cert_store_stats()["x509_ca"] > 0
     finally:
         await client.close()

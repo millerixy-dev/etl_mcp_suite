@@ -61,3 +61,20 @@ async def test_strict_mcp_schema_and_unknown_parameters(tmp_path: Path) -> None:
             assert "INVALID_INPUT" in str(error.value)
     finally:
         await runtime.close()
+
+
+@pytest.mark.parametrize("attempt", ["null", "1", None])
+async def test_nullable_attempt_preserves_literal_string(attempt: str | None) -> None:
+    from mcp_stdio.plugins.spark.plugin import SparkRuntime
+    from mcp_stdio.plugins.spark.tools import SparkToolAdapter
+
+    gateway = FakeGateway()
+    service = SparkEventLogService(gateway=gateway, request_timeout_seconds=2)
+    server = StdioMcpServer(
+        SparkRuntime(SparkToolAdapter(service=service, secret_values=()), gateway, ())
+    )
+    await server._fastmcp.call_tool(
+        "fetch_spark_event_log", {"application_id": "application_1_42", "attempt_id": attempt}
+    )
+    assert gateway.calls[0][2] == attempt
+    assert gateway.calls[-1][2] == attempt
