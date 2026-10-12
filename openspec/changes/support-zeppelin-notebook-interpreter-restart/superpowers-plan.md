@@ -378,3 +378,25 @@
 - Also run affected service/contract smoke tests that exercise FastMCP schema/result behavior.
 - Also run Ruff over changed production/tests and scoped Pyright over `tools.py`, `plugin.py`, and task tests; report existing test diagnostics separately.
 - Commit the task with a focused message and write TDD evidence to the assigned implementation report.
+
+### Task 11: OpenSpec 5.2 — Architecture and real stdio contracts
+
+**Files:** modify `tests/contract/import_rules.py`, `tests/contract/test_architecture.py`; create `tests/contract/test_zeppelin_stdio.py`.
+**Interfaces:** consume `find_import_violations(Path)`, `StdioMcpServer(runtime).run()`, real Zeppelin runtime with injected `DiscoveryTransport` and `LifecycleSocket`; produce architecture and JSON-RPC subprocess regression contracts.
+
+- [ ] Add parameterized service imports covering `import websockets`, `from websockets.asyncio.client import connect`, and relative/absolute `websocket_client` imports. Assert exactly `service-to-infrastructure` violations. Add registry-allowed and bootstrap-rejected Zeppelin concrete imports.
+```python
+assert [(v.rule, v.imported) for v in find_import_violations(root)] == [
+    ("service-to-infrastructure", imported)
+]
+```
+- [ ] Run RED: `chflags nohidden .venv/lib/python3.12/site-packages/_editable_impl_hive_cli_mcp_stdio.pth && uv run --locked --no-sync pytest tests/contract/test_architecture.py -q`; expect missing WebSocket rules to fail.
+- [ ] Extend external root set and local adapter module set:
+```python
+{"httpx", "mcp", "pyhive", "websockets"}
+{"http_client", "plugin", "pyhive", "tools", "websocket_client"}
+```
+- [ ] Add real stdin/stdout JSON-RPC subprocess tests using injected fake HTTP/WebSocket transports. Exchange initialize, initialized, list and discovery call, then EOF. Assert nine tools, exact discovery result or safe error, only JSON-RPC stdout, no auth sentinels, one socket close and one HTTP close reported after actual runtime shutdown. Exercise both successful discovery and invalid upstream frame. Temporarily disable `StdioMcpServer.serve` runtime close in the test driver for RED; expect cleanup assertion to fail; restore driver and run GREEN. No production changes unless an actual contract fails.
+- [ ] Run GREEN/refactor: `chflags nohidden .venv/lib/python3.12/site-packages/_editable_impl_hive_cli_mcp_stdio.pth && uv run --locked --no-sync pytest tests/contract tests/unit/plugins/zeppelin -q`; also attempt required locked command without `--no-sync`. Record exact results and stage only task files.
+
+**Self-review:** matches design architecture paragraph and stdio/cleanup requirements; fake transports exercise the real gateway/service/tool/server path, never a live backend. Registry exemption remains explicit. No separate implementation checklist or task checkbox mutation.
