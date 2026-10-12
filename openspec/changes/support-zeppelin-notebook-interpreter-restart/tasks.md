@@ -21,7 +21,7 @@
 
 ## 5. MCP wiring and architecture
 
-- [ ] 5.1 Write and run failing tool/plugin tests for exactly nine tools, required notebook input on discovery, optional nullable notebook input on restart, exact public result schemas, safe errors, and zero network on startup/tool listing. Register/combine the new behavior and refactor. Verify with `uv run --locked pytest tests/unit/plugins/zeppelin/test_tools.py tests/unit/plugins/zeppelin/test_plugin.py -q`.
+- [x] 5.1 Write and run failing tool/plugin tests for exactly nine tools, required notebook input on discovery, optional nullable notebook input on restart, exact public result schemas, safe errors, and zero network on startup/tool listing. Register/combine the new behavior and refactor. Verify with `uv run --locked pytest tests/unit/plugins/zeppelin/test_tools.py tests/unit/plugins/zeppelin/test_plugin.py -q`.
 - [ ] 5.2 Write and run failing architecture/contract tests that reject service imports of `websockets` and `websocket_client`, preserve registry-only concrete-plugin imports, and verify MCP stdio discipline plus cleanup with fakes. Extend `tests/contract/import_rules.py` and contract coverage; refactor with all tests green. Verify with `uv run --locked pytest tests/contract tests/unit/plugins/zeppelin -q`.
 
 ## 6. Documentation and deployment checks
