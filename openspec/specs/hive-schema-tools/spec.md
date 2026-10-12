@@ -1,7 +1,7 @@
 # hive-schema-tools Specification
 
 ## Purpose
-TBD - created by archiving change deliver-hive-plugin-slice. Update Purpose after archive.
+Provide bounded, read-only Hive database, table, and schema metadata through the Hive plugin, with validated identifiers, safe errors, and no arbitrary SQL or row access.
 ## Requirements
 ### Requirement: Expose exactly the Hive metadata tools
 The Hive plugin SHALL expose exactly `list_databases`, `list_tables`, and `get_table_schema` and MUST NOT expose arbitrary SQL, row reads, or DDL execution.
