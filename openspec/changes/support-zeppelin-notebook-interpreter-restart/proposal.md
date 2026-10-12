@@ -31,7 +31,7 @@ None; this change extends the Zeppelin capability already defined by active chan
 
 ## Impact
 
-- Existing Zeppelin modules: `config.py`, `models.py`, `gateway.py`, `service.py`, `http_client.py`, `tools.py`, and `plugin.py`; a proposed plugin-local `websocket_client.py` will isolate WebSocket infrastructure. Shared changes are limited to the operation enum and safe identifier mapping in `core/errors.py`.
+- Existing Zeppelin modules: `config.py`, `models.py`, `gateway.py`, `service.py`, `http_client.py`, `tools.py`, and `plugin.py`; a proposed plugin-local `websocket_client.py` will isolate WebSocket infrastructure. Shared changes cover the operation enum and safe identifier mapping in `core/errors.py`, plus the limited HTTPX/httpcore wire-log suppression policy in `core/logging.py` required to prevent transport secret emission while preserving root and application logging.
 - Add `websockets>=15,<16` as a direct dependency in `pyproject.toml`, resolved through `uv.lock`, preserving Python 3.10 compatibility. No dependency change is made during proposal creation.
 - Tests: configuration, models, service fakes, HTTP mock transports, injected WebSocket fakes, plugin/tool schemas, stdout/secret discipline, architecture boundaries, and explicitly opt-in live verification.
 - Documentation: README, new Zeppelin YAML/JSON examples, both architecture documents, and `skills/zeppelin/SKILL.md`; the tool-count test for that skill must follow the nine-tool contract.

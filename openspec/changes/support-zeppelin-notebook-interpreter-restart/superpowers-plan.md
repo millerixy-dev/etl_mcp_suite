@@ -452,3 +452,54 @@ Produces independently gated live tests; test controls are not runtime settings.
 Chronology: initial scoped plan was recorded in `.superpowers/sdd/progress.md`
 before gate tests. This canonical micro-plan was appended after observing RED and
 before editing integration setup (an unavailable bare python command made no edit).
+
+### Task 14 micro-plan — OpenSpec 7.1 verification repairs
+
+Files: DolphinScheduler test_service.py/test_tools.py and shared typed fake;
+Zeppelin test_http_client.py/test_models.py/test_service.py/test_tools.py;
+contract test_zeppelin_stdio.py; integration test_opt_in.py;
+main hive-schema-tools/plugin-stdio-runtime spec Purpose sections.
+1. RED: retain complete pre-final Pyright JSON and run strict main spec validation.
+2. Match test gateway annotations to the production Protocol; complete status-only fake
+   unsupported methods with explicit AssertionError; narrow result unions with isinstance.
+3. Express intentionally malformed Pydantic values through model_validate and narrow
+   intentional private test seams without suppressing legitimate protocol mismatches.
+4. Assert actual structured public keys, exactly nine tool entries, and restart gate
+   absent/non-1 variants; fill descriptive Purpose text without changing requirements.
+5. GREEN: affected tests/type check, then full locked sync/unit/contract/lint/type/build/
+   console/spec checks and fake opt-in/live-disabled checks. Record exact outcomes.
+6. Commit scoped files only; controller reviews and gates checkbox 7.1.
+
+### Task 14 focused review repair micro-plan — OpenSpec 7.1
+
+Files: active design/spec; http_client.py; test_http_client.py;
+docs/architecture/modules.md and runtime-flow.md.
+1. Verify P1 against source: restart parser lacks taint scan; discovery clears
+   context before PUT. Clarify artifacts first: release authentication envelope
+   after query, retain only per-call non-repr guard until result validation.
+2. RED: real gateway + mock HTTP/fake socket through ZeppelinToolAdapter;
+   every result string tainted by configured/session/query/response-cookie secrets
+   fails safe UNEXPECTED_RESPONSE, exactly one PUT and no secret output.
+   Add clean legacy/contextual checks and query guard isolation/lifetime coverage.
+3. GREEN: private non-repr guard passed into locked discovery, populated from its
+   existing sensitive_values, scans all restart output strings plus configured and
+   current session cookies. Clear guard in finally; no shared ticket cache.
+4. Correct gateway ownership of serialized discovery->membership->PUT in docs.
+5. Fresh HTTP/WebSocket/tools suite, changed-file Ruff, complete Pyright and strict
+   active validation using test-scoped PYTHONPATH. Commit focused reviewed batch;
+   controller remains responsible for 7.1 checkbox and final whole-suite verification.
+
+Chronology: both Task 14 scoped micro-plans were first recorded in the ignored
+`.superpowers/sdd/progress.md` before their respective edits. They were transferred
+here after the baseline repair commits and restart regression RED, before changing
+production restart handling. The recovery ledger now links to this canonical plan.
+
+Task 14 review repair scope extension (before logging source edits):
+- Supported startup RED proves FastMCP root INFO emits HTTPX URL secrets. Root
+  DEBUG regressions are retained; do not narrow captures to make them pass.
+- Add core logging and clean subprocess startup regressions; generic core helper
+  suppresses only httpx/httpcore namespaces and children with NullHandler, no
+  propagation, and levels above CRITICAL. Application setup and Zeppelin owned
+  client creation invoke it. Preserve root state; retain no global secret values.
+- Verify core logging/errors and Zeppelin HTTP/WebSocket/tools, Ruff, Pyright and
+  strict active validation. Parent performs final whole-suite/re-review gate.

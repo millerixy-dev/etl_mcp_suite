@@ -71,6 +71,21 @@ The tool SHALL return `RestartInterpreterResult` with exactly `setting_id`, `nam
 
 Notebook-mode failures SHALL follow the discovery error contract below, attributed to `restart_interpreter`; restart endpoint 404/500 and other non-authentication HTTP errors SHALL be `UPSTREAM_ERROR`. All notebook-mode restart errors SHALL set `retryable=false`. Legacy setting-only HTTP mappings SHALL remain compatible: 401/403 map to `AUTHENTICATION_FAILED`, other >=400 responses to `UPSTREAM_ERROR`, transport timeout to `TIMEOUT`, and connection failure to `CONNECTION_FAILED`, with existing retryability metadata. Neither mode SHALL automatically retry a PUT, reconnect as a restart retry, run a paragraph, or remove notebook context to recover from an error.
 
+The authentication envelope SHALL be released after the binding query. A contextual restart MAY retain only the query-scoped fail-closed secret guard through PUT result validation and SHALL clear it on every operation outcome; it SHALL NOT cache ticket or guard state across calls. Every public restart string in either mode SHALL reject available configured/session secret values, including response-installed session cookies. Contextual restart SHALL additionally reject its query-scoped principal, ticket, decoded role and cookie values.
+
+The shared logging policy SHALL suppress `httpx` and `httpcore` transport logs, including child loggers, before application startup requests or adapter-owned HTTP client use. Suppression SHALL prevent transport debug representation creation, preserve the root logger and redacting application stderr logger, and SHALL NOT attach transient authentication values to global logging state.
+
+#### Scenario: Supported startup does not emit transport authentication material
+- **GIVEN** FastMCP startup enables root INFO logging or external logging enables root DEBUG and an HTTP transport would log a request URL, header or exception containing a synthetic secret
+- **WHEN** the Zeppelin adapter performs a restart with its owned client
+- **THEN** no `httpx` or `httpcore` record or transport debug representation is emitted, application safe diagnostics remain available, and unrelated root logging is unchanged
+
+#### Scenario: Tainted restart success fields fail safely
+- **GIVEN** a legacy or contextual restart PUT returns a success body containing an available configured or session secret in a public string, or a contextual success body contains a query-scoped principal, ticket, decoded role or cookie value
+- **WHEN** the four-field restart result is validated
+- **THEN** no `RestartInterpreterResult` is returned, a secret-safe `UNEXPECTED_RESPONSE` reports `restart_interpreter` with safe identifiers and `retryable=false`, exactly one PUT was sent, and there is no retry or context-dropping fallback
+- **AND** the call-local guard is released without emitting secret values to stdout, stderr, logs or public results
+
 #### Scenario: Restart an allowlisted interpreter
 - **GIVEN** `spark` is allowlisted and no notebook context is supplied
 - **WHEN** `restart_interpreter(setting_id="spark")` succeeds upstream

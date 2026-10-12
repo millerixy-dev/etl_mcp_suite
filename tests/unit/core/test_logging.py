@@ -311,3 +311,110 @@ def test_reconfiguration_replaces_handlers_without_duplicating_output(
     assert captured.err.count("one diagnostic line") == 1
     assert captured.out == ""
     logging.getLogger("mcp_stdio").handlers.clear()
+
+
+def test_http_transport_loggers_never_format_or_emit_wire_material(
+    caplog: pytest.LogCaptureFixture, capsys: pytest.CaptureFixture[str],
+) -> None:
+    from mcp_stdio.core.logging import configure_logging
+
+    caplog.set_level(logging.DEBUG)
+    root = logging.getLogger()
+    root_level = root.level
+    root_handlers = tuple(root.handlers)
+    child = logging.getLogger("httpcore.http11")
+    child.setLevel(logging.DEBUG)
+    child.addHandler(logging.StreamHandler())
+    repr_calls: list[str] = []
+    secret = "transport-header-exception-secret-sentinel"
+
+    class WireValue:
+        def __repr__(self) -> str:
+            repr_calls.append(secret)
+            return secret
+
+    logger = configure_logging(debug=True)
+    try:
+        for name in ("httpx", "httpcore", "httpcore.http11", "httpcore.future_child"):
+            transport_logger = logging.getLogger(name)
+            if transport_logger.isEnabledFor(logging.DEBUG):
+                transport_logger.debug("trace=%s", repr(WireValue()))
+            transport_logger.error("headers=%r exception=%r", WireValue(), RuntimeError(secret))
+        logging.getLogger("unrelated.application").warning("unrelated visible diagnostic")
+        logger.info("safe application diagnostic")
+        captured = capsys.readouterr()
+        assert repr_calls == []
+        assert captured.out == ""
+        assert secret not in captured.err
+        assert secret not in caplog.text
+        assert "safe application diagnostic" in captured.err
+        assert "unrelated visible diagnostic" in caplog.text
+        assert root.level == root_level
+        assert tuple(root.handlers) == root_handlers
+    finally:
+        logger.handlers.clear()
+
+
+def test_supported_fastmcp_startup_does_not_log_restart_url_secrets() -> None:
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    project_root = Path(__file__).resolve().parents[3]
+    script = '''
+import asyncio
+import contextlib
+import io
+import logging
+import httpx
+from mcp_stdio.bootstrap import construct_runtime, parse_args
+from mcp_stdio.core.logging import configure_logging
+from mcp_stdio.core.server import StdioMcpServer
+from mcp_stdio.plugins.zeppelin.config import ZeppelinSettings, ZeppelinSecrets
+from mcp_stdio.plugins.zeppelin.http_client import ZeppelinHttpClient
+from mcp_stdio.plugins.zeppelin.gateway import ZeppelinGatewayError
+
+async def main():
+    sentinel = "startup-url-secret-sentinel"
+    captured = io.StringIO()
+    puts = []
+    def handler(request):
+        if request.url.path == "/api/login":
+            return httpx.Response(200)
+        puts.append(request)
+        return httpx.Response(200, json={"status":"OK", "body":{
+            "id":sentinel, "name":"Spark", "group":"spark", "status":"READY"}})
+    runtime = construct_runtime(parse_args(["--plugin", "zeppelin"]), environ={
+        "ZEPPELIN_BASE_URL":"https://zep.example/api"})
+    gateway = ZeppelinHttpClient(settings=ZeppelinSettings(base_url="https://zep.example/api"),
+        secrets=ZeppelinSecrets.model_validate({"username":"fake-user", "password":sentinel}),
+        transport=httpx.MockTransport(handler))
+    with contextlib.redirect_stderr(captured):
+        configure_logging(secret_values=(sentinel,))
+        StdioMcpServer(runtime)
+        assert logging.getLogger().level == logging.INFO
+        try:
+            await gateway.restart_interpreter(sentinel)
+        except ZeppelinGatewayError as error:
+            assert error.tool_error.category.value == "UNEXPECTED_RESPONSE"
+            assert error.tool_error.identifiers == {}
+            assert sentinel not in str(error)
+        else:
+            raise AssertionError("Tainted success result escaped")
+        finally:
+            await gateway.close()
+            await runtime.close()
+    assert len(puts) == 1
+    assert sentinel not in captured.getvalue()
+    assert "HTTP Request:" not in captured.getvalue()
+asyncio.run(main())
+'''
+    completed = subprocess.run(
+        [sys.executable, "-c", script], cwd=project_root,
+        env={**os.environ, "PYTHONPATH": str(project_root / "src")},
+        capture_output=True, text=True, check=False, timeout=15,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout == ""
+    assert completed.stderr == ""

@@ -20,6 +20,7 @@ from mcp_stdio.plugins.zeppelin.config import ZeppelinSecrets, ZeppelinSettings
 from mcp_stdio.plugins.zeppelin.gateway import ZeppelinGatewayError
 from mcp_stdio.plugins.zeppelin.http_client import (
     ZeppelinHttpClient,
+    _RestartSecretGuard,  # pyright: ignore[reportPrivateUsage] - verify call-local guard lifetime
     _TicketContext,  # pyright: ignore[reportPrivateUsage] - inspect ticket lifetime
 )
 from mcp_stdio.plugins.zeppelin.http_resources import HttpResources
@@ -28,6 +29,7 @@ from mcp_stdio.plugins.zeppelin.models import (
     ParagraphStatus,
     RestartInterpreterResult,
 )
+from mcp_stdio.plugins.zeppelin.tools import ZeppelinToolAdapter
 from tests.unit.plugins.zeppelin.test_websocket_client import LifecycleSocket, binding, response
 
 
@@ -2848,3 +2850,367 @@ async def test_legacy_login_errors_keep_the_initiating_operation(operation: Tool
     assert error.value.tool_error.operation == operation
     assert error.value.tool_error.category == ErrorCategory.AUTHENTICATION_FAILED
     await adapter.close()
+
+
+def _restart_tool(
+    gateway: ZeppelinHttpClient,
+    setting_id: str = "spark-prod",
+) -> ZeppelinToolAdapter:
+    from mcp_stdio.plugins.zeppelin.safety import build_default_safety_hook
+    from mcp_stdio.plugins.zeppelin.service import ZeppelinNotebookService
+
+    service = ZeppelinNotebookService(
+        gateway=gateway,
+        safety_hook=build_default_safety_hook(
+            allowed_interpreters=(),
+            sql_forbidden_keywords=(),
+            sql_write_allowed_databases=(),
+            sh_allowed_commands=(),
+        ),
+        restartable_interpreter_settings=(setting_id,),
+        max_notebook_name_chars=256,
+        max_paragraph_title_chars=256,
+        max_paragraph_body_bytes=65536,
+        max_opaque_id_chars=512,
+        max_result_bytes=65536,
+    )
+    return ZeppelinToolAdapter(service=service, secret_values=())
+
+
+@pytest.mark.parametrize("field", ["name", "group", "status"])
+@pytest.mark.parametrize("notebook_id,source", [
+    (None, "username"), (None, "password"), (None, "cookie"), (None, "response_cookie"),
+    ("note", "username"), ("note", "password"), ("note", "cookie"),
+    ("note", "response_cookie"), ("note", "principal"), ("note", "ticket"), ("note", "role"),
+])
+async def test_restart_tool_rejects_tainted_success_fields(
+    notebook_id: str | None,
+    field: str,
+    source: str,
+    caplog: pytest.LogCaptureFixture,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mcp.server.fastmcp.exceptions import ToolError as FastMCPToolError
+
+    guards = _record_restart_guards(monkeypatch)
+    secrets = {
+        name: f"unique-{name}-restart-secret-sentinel"
+        for name in (
+            "username",
+            "password",
+            "cookie",
+            "response_cookie",
+            "principal",
+            "ticket",
+            "role",
+        )
+    }
+    puts: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/login":
+            return httpx.Response(
+                200, headers={"set-cookie": f"JSESSIONID={secrets['cookie']}; Path=/"}
+            )
+        if request.url.path == "/api/notebook/note":
+            return _ok({"id": "note"})
+        if request.url.path == "/api/security/ticket":
+            return _ok(
+                _ticket(
+                    principal=secrets["principal"],
+                    ticket=secrets["ticket"],
+                    roles=json.dumps([secrets["role"]]),
+                )
+            )
+        assert request.method == "PUT"
+        puts.append(request)
+        body = {"id": "spark-prod", "name": "Spark", "group": "spark", "status": "READY"}
+        body[field] = f"prefix-{secrets[source]}-suffix"
+        return httpx.Response(
+            200,
+            json={"status": "OK", "body": body},
+            headers={"set-cookie": f"JSESSIONID={secrets['response_cookie']}; Path=/"},
+        )
+
+    socket = LifecycleSocket()
+    socket.frames = [response([binding(id="spark-prod", name="Spark", interpreters=[])])]
+    sockets = DiscoverySockets(socket)
+    gateway = ZeppelinHttpClient(
+        settings=_settings(),
+        secrets=ZeppelinSecrets.model_validate(
+            {"username": secrets["username"], "password": secrets["password"]}
+        ),
+        transport=_mock_transport(handler),
+        websocket_connector=sockets,
+    )
+    caplog.set_level(logging.DEBUG)
+    try:
+        with pytest.raises(FastMCPToolError) as error:
+            await _restart_tool(gateway).restart_interpreter("spark-prod", notebook_id)
+        payload = json.loads(str(error.value))
+        assert payload["category"] == "UNEXPECTED_RESPONSE"
+        assert payload["operation"] == "restart_interpreter"
+        assert payload["retryable"] is False
+        assert payload["identifiers"] == (
+            {"setting_id": "spark-prod", "notebook_id": "note"}
+            if notebook_id
+            else {"setting_id": "spark-prod"}
+        )
+        assert len(puts) == 1
+        assert puts[0].content == (b'{"noteId":"note"}' if notebook_id else b"")
+        assert sockets.calls == (1 if notebook_id else 0)
+        assert socket.closes == (1 if notebook_id else 0)
+    finally:
+        await gateway.close()
+    assert len(guards) == 1
+    assert guards[0].values == ()
+    captured = capsys.readouterr()
+    for secret in secrets.values():
+        assert secret not in str(error.value)
+        assert secret not in repr(error.value)
+        assert secret not in caplog.text
+        assert secret not in captured.out
+        assert secret not in captured.err
+
+
+@pytest.mark.parametrize(
+    "notebook_id,source",
+    [
+        (None, "username"),
+        (None, "password"),
+        (None, "cookie"),
+        (None, "response_cookie"),
+        ("note", "response_cookie"),
+    ],
+)
+async def test_restart_tool_rejects_secret_setting_id(
+    notebook_id: str | None,
+    source: str,
+    caplog: pytest.LogCaptureFixture,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from mcp.server.fastmcp.exceptions import ToolError as FastMCPToolError
+
+    secrets = {
+        name: f"unique-{name}-id-secret-sentinel"
+        for name in ("username", "password", "cookie", "response_cookie")
+    }
+    secret = secrets[source]
+    setting_id = f"prefix-{secret}"
+    puts: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/login":
+            return httpx.Response(
+                200, headers={"set-cookie": f"JSESSIONID={secrets['cookie']}; Path=/"}
+            )
+        if request.url.path == "/api/notebook/note":
+            return _ok({"id": "note"})
+        if request.url.path == "/api/security/ticket":
+            return _ok(_ticket(principal="private-user", ticket="private-ticket", roles="[]"))
+        puts.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "status": "OK",
+                "body": {
+                    "id": setting_id,
+                    "name": "Spark",
+                    "group": "spark",
+                    "status": "READY",
+                },
+            },
+            headers={"set-cookie": f"JSESSIONID={secrets['response_cookie']}; Path=/"},
+        )
+
+    socket = LifecycleSocket()
+    socket.frames = [response([binding(id=setting_id, name="Spark", interpreters=[])])]
+    gateway = ZeppelinHttpClient(
+        settings=_settings(),
+        secrets=ZeppelinSecrets.model_validate(
+            {"username": secrets["username"], "password": secrets["password"]}
+        ),
+        transport=_mock_transport(handler),
+        websocket_connector=DiscoverySockets(socket),
+    )
+    caplog.set_level(logging.DEBUG)
+    try:
+        with pytest.raises(FastMCPToolError) as error:
+            await _restart_tool(gateway, setting_id).restart_interpreter(setting_id, notebook_id)
+        payload = json.loads(str(error.value))
+        assert payload["category"] == "UNEXPECTED_RESPONSE"
+        assert payload["operation"] == "restart_interpreter"
+        assert payload["retryable"] is False
+        assert payload["identifiers"] == ({"notebook_id": "note"} if notebook_id else {})
+        assert len(puts) == 1
+    finally:
+        await gateway.close()
+    captured = capsys.readouterr()
+    for value in secrets.values():
+        assert value not in str(error.value)
+        assert value not in repr(error.value)
+        assert value not in caplog.text
+        assert value not in captured.out
+        assert value not in captured.err
+
+
+@pytest.mark.parametrize("notebook_id", [None, "note"])
+async def test_restart_tool_preserves_clean_result_and_call_scoped_guard(
+    notebook_id: str | None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    guards = _record_restart_guards(monkeypatch)
+    puts: list[httpx.Request] = []
+    tickets = ["first-query-secret", "second-query-secret"]
+    ticket_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal ticket_count
+        if request.url.path == "/api/login":
+            return httpx.Response(200)
+        if request.url.path == "/api/notebook/note":
+            return _ok({"id": "note"})
+        if request.url.path == "/api/security/ticket":
+            value = tickets[ticket_count]
+            ticket_count += 1
+            return _ok(_ticket(principal="private-user", ticket=value, roles='["private-role"]'))
+        puts.append(request)
+        # A prior query's ticket is not retained in the next call's secret guard.
+        return _ok(
+            {
+                "id": "spark-prod",
+                "name": "Spark" if len(puts) == 1 else tickets[0],
+                "group": "spark",
+                "status": "READY",
+            }
+        )
+
+    sockets = [LifecycleSocket(), LifecycleSocket()]
+    for connection in sockets:
+        connection.frames = [response([binding(id="spark-prod", name="Spark", interpreters=[])])]
+    connector = DiscoverySockets(*sockets)
+    gateway = ZeppelinHttpClient(
+        settings=_settings(),
+        secrets=_secrets(),
+        transport=_mock_transport(handler),
+        websocket_connector=connector,
+    )
+    try:
+        tool = _restart_tool(gateway)
+        for name in ("Spark", tickets[0]):
+            result = await tool.restart_interpreter("spark-prod", notebook_id)
+            assert result.model_dump() == {
+                "setting_id": "spark-prod",
+                "name": name,
+                "group": "spark",
+                "status": "READY",
+            }
+        assert len(puts) == 2
+        assert connector.calls == (2 if notebook_id else 0)
+        assert len(guards) == 2
+        assert all(guard.values == () for guard in guards)
+    finally:
+        await gateway.close()
+
+
+def _record_restart_guards(monkeypatch: pytest.MonkeyPatch) -> list[_RestartSecretGuard]:
+    guards: list[_RestartSecretGuard] = []
+
+    def factory() -> _RestartSecretGuard:
+        guard = _RestartSecretGuard()
+        guards.append(guard)
+        assert repr(guard) == object.__repr__(guard)
+        return guard
+
+    monkeypatch.setattr(adapter_module, "_RestartSecretGuard", factory)
+    return guards
+
+
+@pytest.mark.parametrize("failure", ["query", "put_timeout"])
+async def test_contextual_restart_errors_omit_query_tainted_identifiers(
+    failure: str, caplog: pytest.LogCaptureFixture, capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mcp.server.fastmcp.exceptions import ToolError as FastMCPToolError
+
+    secret = "query-identifier-secret-sentinel"
+    notebook_id = f"prefix-{secret}"
+    guards = _record_restart_guards(monkeypatch)
+    puts: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/login":
+            return httpx.Response(200)
+        if request.url.path.startswith("/api/notebook/"):
+            return _ok({"id": notebook_id})
+        if request.url.path == "/api/security/ticket":
+            return _ok(_ticket(principal="private-user", ticket=secret, roles="[]"))
+        puts.append(request)
+        raise asyncio.TimeoutError
+
+    connection = LifecycleSocket()
+    connection.frames = ([json.dumps({"op": "ERROR_INFO", "data": {"message": secret}})]
+                         if failure == "query" else
+                         [response([binding(id="spark-prod", name="Spark", interpreters=[])])])
+    gateway = ZeppelinHttpClient(settings=_settings(), secrets=_secrets(),
+        transport=_mock_transport(handler), websocket_connector=DiscoverySockets(connection))
+    caplog.set_level(logging.DEBUG)
+    try:
+        with pytest.raises(FastMCPToolError) as error:
+            await _restart_tool(gateway).restart_interpreter("spark-prod", notebook_id)
+        payload = json.loads(str(error.value))
+        assert payload["category"] == ("UPSTREAM_ERROR" if failure == "query" else "TIMEOUT")
+        assert payload["operation"] == "restart_interpreter"
+        assert payload["retryable"] is False
+        assert payload["identifiers"] == {"setting_id": "spark-prod"}
+        assert len(puts) == (0 if failure == "query" else 1)
+        assert guards[0].values == ()
+    finally:
+        await gateway.close()
+    captured = capsys.readouterr()
+    assert secret not in str(error.value)
+    assert secret not in repr(error.value)
+    assert secret not in caplog.text
+    assert secret not in captured.out
+    assert secret not in captured.err
+
+
+async def test_contextual_restart_cancellation_clears_call_secret_guard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    guards = _record_restart_guards(monkeypatch)
+    put_entered = asyncio.Event()
+    never_release = asyncio.Event()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/login":
+            return httpx.Response(200)
+        if request.url.path == "/api/notebook/note":
+            return _ok({"id": "note"})
+        if request.url.path == "/api/security/ticket":
+            return _ok(_ticket(principal="private-user", ticket="private-ticket", roles="[]"))
+        put_entered.set()
+        await never_release.wait()
+        raise AssertionError("Cancelled PUT must not return a result")
+
+    connection = LifecycleSocket()
+    connection.frames = [response([binding(id="spark-prod", name="Spark", interpreters=[])])]
+    gateway = ZeppelinHttpClient(
+        settings=_settings(request_timeout_seconds=0.1), secrets=_secrets(),
+        transport=_mock_transport(handler), websocket_connector=DiscoverySockets(connection),
+    )
+    task = asyncio.create_task(_restart_tool(gateway).restart_interpreter("spark-prod", "note"))
+    try:
+        await asyncio.wait_for(put_entered.wait(), 1)
+        assert "private-ticket" in guards[0].values
+        assert "private-ticket" not in repr(guards[0])
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 1)
+        assert guards[0].values == ()
+        assert connection.closes == 1
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await gateway.close()

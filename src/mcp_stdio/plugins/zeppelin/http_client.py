@@ -15,6 +15,7 @@ from urllib.parse import urlsplit, urlunsplit
 import httpx
 
 from mcp_stdio.core.errors import ErrorCategory, ToolError, ToolOperation, safe_error_identifiers
+from mcp_stdio.core.logging import suppress_http_transport_logging
 from mcp_stdio.plugins.zeppelin.config import ZeppelinSecrets, ZeppelinSettings
 from mcp_stdio.plugins.zeppelin.gateway import ZeppelinGatewayError
 from mcp_stdio.plugins.zeppelin.http_resources import HttpResources, abort_http_response
@@ -99,6 +100,13 @@ class _TicketContext:
     origin: str
     cookie_header: str | None
     sensitive_values: tuple[str, ...]
+
+
+@dataclass(slots=True, repr=False)
+class _RestartSecretGuard:
+    """Call-local taint values; never retain the query authentication envelope."""
+
+    values: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -280,6 +288,7 @@ class ZeppelinHttpClient:
         self, notebook_id: str, *, deadline: float, operation: ToolOperation,
         identifiers: dict[str, str],
         cancelled: asyncio.Event | None = None,
+        secret_guard: _RestartSecretGuard | None = None,
     ) -> tuple[InterpreterBindingRecord, ...]:
         """Use only with the discovery lock held; never acquire it recursively."""
         preparation = asyncio.create_task(
@@ -298,6 +307,8 @@ class ZeppelinHttpClient:
         try:
             if self._closed or (cancelled is not None and cancelled.is_set()):
                 raise asyncio.CancelledError
+            if secret_guard is not None:
+                secret_guard.values = context.sensitive_values
             return await query_bindings(
                 url=context.websocket_url, origin=context.origin, principal=context.principal,
                 ticket=context.ticket, roles=context.roles, cookie_header=context.cookie_header,
@@ -312,6 +323,7 @@ class ZeppelinHttpClient:
 
     async def _ensure_client(self) -> httpx.AsyncClient:
         if self._client is None:
+            suppress_http_transport_logging()
             self._client = httpx.AsyncClient(
                 base_url=self._settings.base_url,
                 timeout=self._settings.request_timeout_seconds,
@@ -628,15 +640,19 @@ class ZeppelinHttpClient:
         client = await self._ensure_authenticated(
             operation=ToolOperation.RESTART_INTERPRETER, identifiers={"setting_id": setting_id},
         )
-        body = await self._request_json(
-            client,
-            "PUT",
-            f"/interpreter/setting/restart/{encoded_id}",
-            json_payload=None,
-            operation=ToolOperation.RESTART_INTERPRETER,
-            identifiers={"setting_id": setting_id},
-        )
-        return self._parse_restart_result(body, setting_id, {"setting_id": setting_id})
+        identifiers = {"setting_id": setting_id}
+        path = f"/interpreter/setting/restart/{encoded_id}"
+        guard = _RestartSecretGuard()
+        try:
+            guard.values = self._restart_sensitive_values(client, path, identifiers)
+            body = await self._request_json(
+                client, "PUT", path, json_payload=None,
+                operation=ToolOperation.RESTART_INTERPRETER, identifiers=identifiers,
+            )
+            guard.values += self._restart_sensitive_values(client, path, identifiers)
+            return self._parse_restart_result(body, setting_id, identifiers, guard.values)
+        finally:
+            guard.values = ()
 
     async def _serialized_restart(
         self, setting_id: str, notebook_id: str, deadline: float, cancelled: asyncio.Event,
@@ -644,6 +660,7 @@ class ZeppelinHttpClient:
         operation = ToolOperation.RESTART_INTERPRETER
         identifiers = {"setting_id": setting_id, "notebook_id": notebook_id}
         acquisition = asyncio.create_task(self._discovery_lock.acquire())
+        guard = _RestartSecretGuard()
         try:
             await asyncio.wait_for(
                 asyncio.shield(acquisition),
@@ -654,6 +671,7 @@ class ZeppelinHttpClient:
             bindings = await self._discover_locked(
                 notebook_id, deadline=deadline, operation=operation, identifiers=identifiers,
                 cancelled=cancelled,
+                secret_guard=guard,
             )
             if self._closed or cancelled.is_set():
                 raise asyncio.CancelledError
@@ -663,8 +681,10 @@ class ZeppelinHttpClient:
             if remaining <= 0:
                 raise asyncio.TimeoutError
             client = await self._ensure_client()
+            path = f"/interpreter/setting/restart/{self._encode_id(setting_id)}"
+            guard.values += self._restart_sensitive_values(client, path, identifiers)
             put = asyncio.create_task(self._request(
-                client, "PUT", f"/interpreter/setting/restart/{self._encode_id(setting_id)}",
+                client, "PUT", path,
                 json_payload={"noteId": notebook_id}, operation=operation,
                 identifiers=identifiers, expect_body=True, discovery=True,
             ))
@@ -674,16 +694,20 @@ class ZeppelinHttpClient:
                 await await_cleanup(asyncio.create_task(self._finish_http_work(put)))
             if self._closed or cancelled.is_set():
                 raise asyncio.CancelledError
-            return self._parse_restart_result(body, setting_id, identifiers)
+            guard.values += self._restart_sensitive_values(client, path, identifiers)
+            return self._parse_restart_result(body, setting_id, identifiers, guard.values)
         except asyncio.TimeoutError:
             raise self._gateway_error(
-                ErrorCategory.TIMEOUT, operation, identifiers, retryable=False,
+                ErrorCategory.TIMEOUT, operation,
+                self._untainted_identifiers(identifiers, guard.values), retryable=False,
             ) from None
         except ZeppelinGatewayError as exc:
             raise self._gateway_error(
-                exc.tool_error.category, operation, identifiers, retryable=False,
+                exc.tool_error.category, operation,
+                self._untainted_identifiers(identifiers, guard.values), retryable=False,
             ) from None
         finally:
+            guard.values = ()
             await self._release_discovery_lock(acquisition)
 
     async def _finish_http_work(self, task: asyncio.Task[object]) -> None:
@@ -710,8 +734,34 @@ class ZeppelinHttpClient:
         if task.done():
             _observe_http_work(task)
 
+    @staticmethod
+    def _untainted_identifiers(
+        identifiers: dict[str, str], sensitive_values: tuple[str, ...],
+    ) -> dict[str, str]:
+        return {
+            key: value for key, value in identifiers.items()
+            if not any(secret in value for secret in sensitive_values)
+        }
+
+    def _restart_sensitive_values(
+        self, client: httpx.AsyncClient, path: str, identifiers: dict[str, str],
+    ) -> tuple[str, ...]:
+        configured = tuple(
+            secret.get_secret_value() for secret in (self._secrets.username, self._secrets.password)
+            if secret is not None and secret.get_secret_value()
+        )
+        try:
+            cookies = _cookie_values(client.build_request("PUT", path).headers.get("cookie"))
+        except ValueError:
+            raise self._gateway_error(
+                ErrorCategory.UNEXPECTED_RESPONSE, ToolOperation.RESTART_INTERPRETER,
+                self._untainted_identifiers(identifiers, configured), retryable=False,
+            ) from None
+        return (*configured, *cookies)
+
     def _parse_restart_result(
         self, body: object, setting_id: str, identifiers: dict[str, str],
+        sensitive_values: tuple[str, ...],
     ) -> RestartInterpreterResult:
         try:
             if not isinstance(body, dict):
@@ -727,6 +777,9 @@ class ZeppelinHttpClient:
             )
             if result.setting_id != setting_id:
                 raise ValueError
+            public_values = (result.setting_id, result.name, result.group, result.status)
+            if any(secret in value for secret in sensitive_values for value in public_values):
+                raise ValueError
             serialized = json.dumps(
                 result.model_dump(mode="json"), ensure_ascii=False, separators=(",", ":"),
             ).encode("utf-8")
@@ -736,7 +789,7 @@ class ZeppelinHttpClient:
         except (ValueError, UnicodeError):
             raise self._gateway_error(
                 ErrorCategory.UNEXPECTED_RESPONSE, ToolOperation.RESTART_INTERPRETER,
-                identifiers, retryable=False,
+                self._untainted_identifiers(identifiers, sensitive_values), retryable=False,
             ) from None
 
     async def close(self) -> None:

@@ -119,6 +119,24 @@ class _RedactingFormatter(logging.Formatter):
         return rendered
 
 
+def suppress_http_transport_logging() -> None:
+    """Silence wire loggers without changing application or root logging."""
+
+    namespaces = ("httpx", "httpcore")
+    names = {
+        *namespaces,
+        *(name for name in tuple(logging.Logger.manager.loggerDict)
+          if any(name.startswith(f"{namespace}.") for namespace in namespaces)),
+    }
+    for name in names:
+        logger = logging.getLogger(name)
+        # Trace helpers may build sensitive reprs before logging a DEBUG record.
+        logger.setLevel(logging.CRITICAL + 1)
+        logger.handlers.clear()
+        logger.addHandler(logging.NullHandler())
+        logger.propagate = False
+
+
 def configure_logging(
     *,
     debug: bool = False,
@@ -126,6 +144,7 @@ def configure_logging(
 ) -> logging.Logger:
     """Configure the application logger with one redacting stderr handler."""
 
+    suppress_http_transport_logging()
     logger = logging.getLogger(_LOGGER_NAME)
     for handler in logger.handlers:
         handler.close()
