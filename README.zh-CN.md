@@ -96,6 +96,23 @@ uv pip install \
 ln -sfn "$RELEASE_DIR" "$PROD_ROOT/current"
 ```
 
+这些命令将源码打包，并把程序和锁定版本的依赖安装到独立生产环境中：
+
+| 命令 | 作用及关键参数 |
+| --- | --- |
+| `uv build --project ... --wheel --out-dir ...` | 将 `--project` 指定的项目打包成 `.whl` 文件，输出到 `--out-dir`。wheel 包含项目代码，第三方依赖需要单独安装。 |
+| `uv export --project ... --locked --no-dev --no-emit-project --format requirements.txt --output-file ...` | 从 `uv.lock` 导出依赖。`--locked` 在需要更新锁文件时拒绝继续；`--no-dev` 排除开发依赖组；`--no-emit-project` 不导出项目自身。`--format` 指定 requirements 格式，`--output-file` 指定输出文件。 |
+| `uv venv --python 3.12 ...` | 使用 Python 3.12，在指定路径创建隔离的虚拟环境，每个 release 拥有自己的环境。 |
+| `uv pip install --python ... --requirement ...` | 安装导出的依赖。`--python` 指定目标环境的 Python 解释器，`--requirement` 指定依赖清单文件。 |
+| `uv pip install --python ... --no-deps "$WHEEL_PATH"` | 将项目 wheel 安装到同一个环境。`--no-deps` 跳过依赖解析和安装，因为前一步已经安装了锁定版本的依赖。 |
+
+`uv pip` 是 uv 提供的包安装接口，不是调用系统的 `pip`。安装 wheel 会把打包后的代码安装到
+release 环境中，而不像 editable 安装那样引用开发源码；后续修改源码不会改变该已安装版本。
+
+最后两条不是 uv 命令：`mcp-stdio --help` 检查命令行入口能否启动，但不会验证 Zeppelin
+连接；`ln -sfn` 更新 `current` 符号链接，使其指向新 release。已经运行的 MCP 进程仍需
+重启，才会加载新版。
+
 以下示例使用 Codex 中显式的环境变量配置，并且不传 `--config`。项目级
 `.codex/config.toml` 会保存明文凭据，因此已被 Git 忽略，并且必须使用 `chmod 600` 限制为
 当前用户可读写。三个项目 MCP 注册统一使用同一个生产入口：

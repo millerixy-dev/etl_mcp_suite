@@ -107,6 +107,26 @@ uv pip install \
 ln -sfn "$RELEASE_DIR" "$PROD_ROOT/current"
 ```
 
+The commands package the source and install it with locked dependencies in an independent
+production environment:
+
+| Command | Purpose and key options |
+| --- | --- |
+| `uv build --project ... --wheel --out-dir ...` | Build the project in `--project` into a `.whl` file under `--out-dir`. The wheel contains the project's code; third-party dependencies are installed separately. |
+| `uv export --project ... --locked --no-dev --no-emit-project --format requirements.txt --output-file ...` | Export dependencies from `uv.lock`. `--locked` rejects changes that would require updating the lockfile; `--no-dev` excludes the development dependency group; `--no-emit-project` leaves out the project itself. `--format` selects the requirements format and `--output-file` sets its destination. |
+| `uv venv --python 3.12 ...` | Create an isolated virtual environment using Python 3.12 at the specified path. Each release has its own environment. |
+| `uv pip install --python ... --requirement ...` | Install the exported dependencies. `--python` selects the target environment's interpreter; `--requirement` selects the dependency file. |
+| `uv pip install --python ... --no-deps "$WHEEL_PATH"` | Install the project wheel into the same environment. `--no-deps` skips dependency resolution and installation because the preceding step already installed the locked dependencies. |
+
+`uv pip` is uv's package installation interface; it does not invoke the system `pip`.
+Installing a wheel copies the packaged code into the release environment rather than linking
+to the development source as an editable install would. Later source edits therefore do not
+change that installed release.
+
+The final two commands are not uv commands. `mcp-stdio --help` checks that the console entry
+point starts, but does not test a Zeppelin connection. `ln -sfn` updates the `current` symlink
+to select the new release; already-running MCP processes must still be restarted to load it.
+
 The following example keeps plugin settings and credentials as explicit Codex
 environment entries and omits `--config`. The project-local `.codex/config.toml` is ignored by Git
 because it contains plain-text credentials; restrict it to the current user with `chmod 600`.
