@@ -45,3 +45,24 @@ Errors map to fixed domain categories, and finally deletes unsuccessful destinat
 3. VERIFY: same test command; `uv run --locked ruff check src/mcp_stdio/plugins/spark/http_client.py tests/unit/plugins/spark/test_http_client.py`; expected pass.
 4. COMMIT: `git add src/mcp_stdio/plugins/spark/http_client.py tests/unit/plugins/spark/test_http_client.py openspec/changes/add-spark-event-log-download`; `git commit -m "feat(spark): download bounded authenticated history archives"`.
 Self-review 2.1: HTTP has no event interpretation or persistent cache behavior.
+
+## Task 2.2 — ZIP and event validation
+
+Files: src/mcp_stdio/plugins/spark/files.py; tests/unit/plugins/spark/{test_files,fixtures}.py.
+Consumes FetchRequest validators, SparkEventLogFile and safe errors. Produces process_archive(archive, directory, application_id, attempt_id, max_bytes, deadline, secret_values=()) -> tuple[SparkEventLogFile,...].
+1. RED: synthesize ZipFile members with JSON LogStart/ApplicationStart; unsafe filenames, CRC, identity, JSON and byte-limit variants. Run `uv run --locked pytest tests/unit/plugins/spark/test_files.py -k 'archive or identity or record or limit' --tb=short -q`; expected missing processor failures.
+2. GREEN: public ZIP reads, no extractall:
+```python
+with zipfile.ZipFile(archive) as source:
+    for member in source.infolist():
+        with source.open(member) as stream:
+            raw = stream.readline(MAX_LINE_BYTES + 1)
+            event = json.loads(raw)
+            source_digest.update(raw)
+            # Validate Event, LogStart/version, ApplicationStart/app/attempt.
+            # Write one compact UTF-8 record in private staging; never publish here.
+```
+Use generated output basenames, bound actual source/output totals and line size, consume members to EOF for CRC, reject conflicting/duplicate identities. Cooperative checkpoints check deadline and cancellation.
+3. VERIFY: same selected test command and `uv run --locked ruff check src/mcp_stdio/plugins/spark/files.py tests/unit/plugins/spark/test_files.py tests/unit/plugins/spark/fixtures.py`.
+4. COMMIT: `git add src/mcp_stdio/plugins/spark/files.py tests/unit/plugins/spark/test_files.py tests/unit/plugins/spark/fixtures.py openspec/changes/add-spark-event-log-download`; `git commit -m "feat(spark): validate history archives and event identities"`.
+Self-review 2.2: malformed tails fail; no root-cause or application-state inference.
