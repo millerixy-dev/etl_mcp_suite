@@ -12,7 +12,7 @@
 ## 3. 接入 MCP
 
 - [x] 3.1 RED → GREEN → REFACTOR：用 fake gateway 先验证输入拒绝、默认 lookup 命中/未命中、refresh 跳过 lookup、原下载时间、结果/错误和总 deadline，再实现 service；验证 `uv run --locked pytest tests/unit/plugins/spark/test_service.py`，服务不得导入 HTTP、文件实现或 MCP。
-- [ ] 3.2 RED → GREEN → REFACTOR：先验证唯一工具的精确 schema、安全序列化、插件资源关闭、registry/CLI 和 import boundaries，再接入 tools/plugin、固定 spark 注册及类型/help；验证 `uv run --locked pytest tests/unit/plugins/spark/test_tools.py tests/unit/plugins/spark/test_plugin.py tests/unit/test_registry.py tests/unit/core/test_bootstrap.py tests/contract/test_architecture.py`。装配不增加网络启动行为。
+- [x] 3.2 RED → GREEN → REFACTOR：先验证唯一工具的精确 schema、安全序列化、插件资源关闭、registry/CLI 和 import boundaries，再接入 tools/plugin、固定 spark 注册及类型/help；验证 `uv run --locked pytest tests/unit/plugins/spark/test_tools.py tests/unit/plugins/spark/test_plugin.py tests/unit/test_registry.py tests/unit/core/test_bootstrap.py tests/contract/test_architecture.py`。装配不增加网络启动行为。
 - [ ] 3.3 RED → GREEN → REFACTOR：先通过 stdio/mock transport 验证一次下载→文件可读→跨会话命中、失败输出、EOF 关闭、protocol-only stdout 与 redacted stderr，再补齐调用链；另沿用现有 opt-in gate 提供一个真实下载测试，缺环境跳过；验证 `uv run --locked pytest tests/contract/test_spark_stdio.py tests/contract/test_subprocess_smoke.py tests/integration/test_opt_in.py`。传输/文件细节由上面的单元测试负责，不复制完整测试矩阵。
 
 ## 4. 文档与验收

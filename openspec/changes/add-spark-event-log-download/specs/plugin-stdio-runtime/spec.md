@@ -40,3 +40,17 @@ The system MUST NOT share memory, credentials, connections, live caches or mutab
 - **GIVEN** two active Spark instances use different dedicated cache directories
 - **WHEN** they download or look up the same application identifier
 - **THEN** their evidence and mutable runtime state remain isolated; changing a configured source does not allow reuse of another source's evidence
+## ADDED Requirements
+
+### Requirement: Validate raw MCP tool arguments safely
+The stdio boundary SHALL validate raw tool argument dictionaries against the registered callable's declared input model before FastMCP preprocessing. Unknown arguments MUST be rejected. Input schemas SHALL forbid additional properties. Explicit strict field annotations, including Spark refresh booleans, MUST be enforced without string coercion. Validation errors SHALL be fixed shared INVALID_INPUT errors and MUST NOT include argument values or raw validation exceptions.
+
+#### Scenario: Reject undeclared credential or path controls
+- **GIVEN** a caller supplies a parameter absent from the registered tool schema
+- **WHEN** a tool call reaches the stdio boundary
+- **THEN** it returns safe INVALID_INPUT without executing the tool or echoing the argument
+
+#### Scenario: Enforce a strict boolean
+- **GIVEN** Spark refresh is supplied as string "true"
+- **WHEN** raw input validation runs
+- **THEN** INVALID_INPUT is returned before SDK conversion or gateway activity

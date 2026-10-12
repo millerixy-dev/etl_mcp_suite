@@ -30,7 +30,7 @@ def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--plugin",
         required=True,
-        help="Built-in plugin name (hive, zeppelin, or dolphinscheduler).",
+        help="Built-in plugin name (hive, zeppelin, dolphinscheduler, or spark).",
     )
     parser.add_argument(
         "--config",

@@ -127,3 +127,21 @@ Public fetch strictly validates first and wraps _fetch in asyncio.wait_for with 
 3. VERIFY: repeat test command; focused ruff/pyright. Service imports no HTTP, filesystem adapter or MCP.
 4. COMMIT: `git add src/mcp_stdio/plugins/spark/service.py tests/unit/plugins/spark/test_service.py openspec/changes/add-spark-event-log-download`; `git commit -m "feat(spark): coordinate cached and refreshed log acquisition"`.
 Self-review 3.1: request orchestration uses the fixed port without backend imports.
+
+## Task 3.2 — MCP registration and explicit plugin wiring
+
+Files: plugins/spark/{tools,plugin}.py; contracts/plugin.py; registry.py; bootstrap.py; core/server.py; tests/unit/plugins/spark/{test_tools,test_plugin}.py; tests/unit/test_registry.py; tests/contract/{import_rules,test_architecture}.py.
+Consumes Spark service/gateway and PluginRuntime/ToolRegistrar. Produces one fetch_spark_event_log tool and explicit spark loader.
+1. RED: exact tool/argument schema, raw unknown/string-bool rejection, safe error/secret outputs, local startup/close and new registry/architecture contracts. Run `uv run --locked pytest tests/unit/plugins/spark/test_tools.py tests/unit/plugins/spark/test_plugin.py tests/unit/test_registry.py tests/unit/core/test_bootstrap.py tests/contract/test_architecture.py --tb=short -q`; expected missing adapter/registry and source-boundary failures.
+2. GREEN: composition follows existing plugins:
+```python
+gateway = SparkEventLogAdapter(settings=loaded.settings, secrets=loaded.secrets)
+service = SparkEventLogService(gateway=gateway,
+                              request_timeout_seconds=loaded.settings.request_timeout_seconds)
+tools = SparkToolAdapter(service=service, secret_values=redaction_values)
+registrar.add_tool(tools.fetch_spark_event_log, name="fetch_spark_event_log")
+```
+Use strict Annotated input fields; shared stdio models validate raw arguments with extra=forbid before SDK preprocessing and map failures to a fixed safe ToolError. Only registry imports Spark from shared code; service-to-files/cache imports are prohibited by AST tests.
+3. VERIFY: repeat the command, focused ruff/pyright and core server tests; no startup network.
+4. COMMIT: `git add src/mcp_stdio tests/unit/plugins/spark tests/unit/test_registry.py tests/contract/import_rules.py tests/contract/test_architecture.py openspec/changes/add-spark-event-log-download`; `git commit -m "feat(spark): expose the download tool through the stdio plugin"`.
+Self-review 3.2: input safety gap updated in OpenSpec before core changes; one fixed plugin surface only.

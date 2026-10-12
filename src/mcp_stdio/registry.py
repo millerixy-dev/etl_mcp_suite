@@ -29,11 +29,18 @@ def _load_dolphinscheduler() -> PluginDefinition:
     return PLUGIN_DEFINITION
 
 
+def _load_spark() -> PluginDefinition:
+    from mcp_stdio.plugins.spark.plugin import PLUGIN_DEFINITION
+
+    return PLUGIN_DEFINITION
+
+
 BUILTIN_PLUGIN_LOADERS: Mapping[str, PluginDefinitionLoader] = MappingProxyType(
     {
         "hive": _load_hive,
         "zeppelin": _load_zeppelin,
         "dolphinscheduler": _load_dolphinscheduler,
+        "spark": _load_spark,
     }
 )
 

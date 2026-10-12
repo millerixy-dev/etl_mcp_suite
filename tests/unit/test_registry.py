@@ -60,14 +60,15 @@ class RecordingRuntime:
         return {"ok": True}
 
 
-def test_registry_contains_only_the_three_static_builtin_loaders() -> None:
-    assert tuple(BUILTIN_PLUGIN_LOADERS) == ("hive", "zeppelin", "dolphinscheduler")
-    assert {
-        name: loader() for name, loader in BUILTIN_PLUGIN_LOADERS.items()
-    } == {
+def test_registry_contains_only_the_four_static_builtin_loaders() -> None:
+    assert tuple(BUILTIN_PLUGIN_LOADERS) == ("hive", "zeppelin", "dolphinscheduler", "spark")
+    from mcp_stdio.plugins.spark.plugin import PLUGIN_DEFINITION as SPARK_PLUGIN
+
+    assert {name: loader() for name, loader in BUILTIN_PLUGIN_LOADERS.items()} == {
         "hive": HIVE_PLUGIN,
         "zeppelin": ZEPPELIN_PLUGIN,
         "dolphinscheduler": DOLPHINSCHEDULER_PLUGIN,
+        "spark": SPARK_PLUGIN,
     }
 
 
@@ -145,6 +146,7 @@ def test_registry_and_plugin_composition_sources_prohibit_dynamic_discovery() ->
         SOURCE_ROOT / "plugins" / "hive" / "plugin.py",
         SOURCE_ROOT / "plugins" / "zeppelin" / "plugin.py",
         SOURCE_ROOT / "plugins" / "dolphinscheduler" / "plugin.py",
+        SOURCE_ROOT / "plugins" / "spark" / "plugin.py",
     ]
     prohibited_modules = {"importlib", "pkgutil"}
     prohibited_calls = {
@@ -164,16 +166,13 @@ def test_registry_and_plugin_composition_sources_prohibit_dynamic_discovery() ->
             for node in ast.walk(tree)
             if isinstance(node, (ast.Import, ast.ImportFrom))
             for alias in (
-                node.names
-                if isinstance(node, ast.Import)
-                else [ast.alias(name=node.module or "")]
+                node.names if isinstance(node, ast.Import) else [ast.alias(name=node.module or "")]
             )
         }
         called_names = {
             node.func.id if isinstance(node.func, ast.Name) else node.func.attr
             for node in ast.walk(tree)
-            if isinstance(node, ast.Call)
-            and isinstance(node.func, (ast.Name, ast.Attribute))
+            if isinstance(node, ast.Call) and isinstance(node.func, (ast.Name, ast.Attribute))
         }
 
         assert imported_modules.isdisjoint(prohibited_modules)

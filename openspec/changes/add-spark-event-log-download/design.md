@@ -177,6 +177,8 @@ refresh=true 新建一个下载目录，即使内容相同也不去重。保留�
 
 新增 ToolOperation.FETCH_SPARK_EVENT_LOG 与 application_id/attempt_id 安全白名单，沿用现有错误字段和 MCP 序列化。
 
+已核对安装的 MCP SDK：FastMCP 参数模型默认忽略 extra，且在校验前尝试 JSON 字符串转换。stdio server 使用 SDK 的 func_metadata 参数模型，在调用 FastMCP 前验证原始参数；模型 extra=forbid、hide_input_in_errors=True，Spark 参数以严格类型注解声明。tools/list 发布闭合输入 schema。失败转换为固定 INVALID_INPUT ToolError，不输出原始 ValidationError。此通用边界不引入插件 import、配置项或依赖；其他插件保留已有声明类型的校验语义。
+
 | 条件 | category | retryable |
 | --- | --- | --- |
 | 非法配置/CA/Cookie、目录锁冲突、非 POSIX | CONFIG_ERROR | false |

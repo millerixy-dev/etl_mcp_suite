@@ -22,7 +22,7 @@ Spark SQL 故障诊断需要先取得可供后续工具读取的 event log。已
 
 ## Impact
 
-- 新增 `src/mcp_stdio/plugins/spark/` 垂直切片，沿用现有配置、服务/网关和 MCP 适配器边界；共享代码只扩展固定注册表、插件类型、CLI 帮助与安全错误清单。
+- 新增 `src/mcp_stdio/plugins/spark/` 垂直切片，沿用现有配置、服务/网关和 MCP 适配器边界；共享代码扩展固定注册表、插件类型、CLI 帮助、安全错误清单和通用 MCP 原始参数校验。
 - 复用已有 `httpx` 与 Python 3.10 标准库，不增加运行时依赖。
 - 同步 README、配置示例、架构文档和 AGENTS.md 的插件范围，增加必要单元/契约测试及环境驱动的可选真实下载测试。
 - 网络访问仅为配置的 History Server GET；本地持久文件作为 L3 memory。人工下载的旧 ZIP/manifest 不自动导入。
