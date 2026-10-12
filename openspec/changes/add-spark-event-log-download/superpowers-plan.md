@@ -145,3 +145,23 @@ Use strict Annotated input fields; shared stdio models validate raw arguments wi
 3. VERIFY: repeat the command, focused ruff/pyright and core server tests; no startup network.
 4. COMMIT: `git add src/mcp_stdio tests/unit/plugins/spark tests/unit/test_registry.py tests/contract/import_rules.py tests/contract/test_architecture.py openspec/changes/add-spark-event-log-download`; `git commit -m "feat(spark): expose the download tool through the stdio plugin"`.
 Self-review 3.2: input safety gap updated in OpenSpec before core changes; one fixed plugin surface only.
+
+## Task 3.3 — Stdio chain, shutdown and opt-in integration
+
+Files: tests/contract/test_spark_stdio.py; tests/integration/{test_spark_server,test_opt_in}.py; tests/unit/plugins/spark/test_cache.py; plugins/spark/cache.py.
+Consumes full runtime. Produces verified download/restart-hit/error stdio calls, active-download shutdown cleanup and an environment-gated live test.
+1. RED: subprocess mock transport handshake/call/EOF tests; missing opt-in prerequisites must skip before constructing a gateway; active adapter.close must cancel and await owned acquisitions. Run `PYTHONPATH=src uv run --locked pytest tests/contract/test_spark_stdio.py tests/contract/test_subprocess_smoke.py tests/integration/test_opt_in.py tests/unit/plugins/spark/test_cache.py --tb=short -q`; expected missing live entry and active shutdown cleanup failures.
+2. GREEN: track owned worker tasks without background persistence:
+```python
+worker = asyncio.create_task(self._download(application_id, attempt_id, deadline))
+self._acquisitions.add(worker)
+try:
+    return await asyncio.wait_for(worker, timeout=remaining)
+finally:
+    self._acquisitions.discard(worker)
+# close marks closed; cancels/gathers the owned workers before closing client/root lock.
+```
+Live test requires explicit gate, application ID and SPARK deployment URL/cache/Cookie; it loads config only after prerequisites and always closes. No network in default suite.
+3. VERIFY: same command; focused lint/type checks. Stdio asserts protocol-only stdout, sanitized error/results, no raw ZIP and released root lock.
+4. COMMIT: `git add src/mcp_stdio/plugins/spark/cache.py tests/contract/test_spark_stdio.py tests/unit/plugins/spark/test_cache.py tests/integration openspec/changes/add-spark-event-log-download`; `git commit -m "test(spark): verify stdio acquisition and shutdown lifecycle"`.
+Self-review 3.3: transport/file matrices stay in unit tests; live download is never enabled implicitly.

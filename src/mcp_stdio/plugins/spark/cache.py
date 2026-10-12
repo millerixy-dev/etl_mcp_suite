@@ -98,6 +98,7 @@ class SparkEventLogAdapter:
         self._lock_fd: int | None = None
         self._closed = False
         self._download_lock = asyncio.Lock()
+        self._acquisitions: set[asyncio.Task[SparkEventLogFetchResult]] = set()
         cookie = secrets.gateway_cookie
         self._secret_values = credential_values(
             (cookie.get_secret_value(),) if cookie is not None else ()
@@ -207,10 +208,10 @@ class SparkEventLogAdapter:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise spark_error(ErrorCategory.TIMEOUT, retryable=True)
+        worker = asyncio.create_task(self._download(application_id, attempt_id, deadline))
+        self._acquisitions.add(worker)
         try:
-            return await asyncio.wait_for(
-                self._download(application_id, attempt_id, deadline), timeout=remaining
-            )
+            return await asyncio.wait_for(worker, timeout=remaining)
         except asyncio.TimeoutError:
             raise spark_error(ErrorCategory.TIMEOUT, retryable=True) from None
         except PermissionError:
@@ -219,6 +220,8 @@ class SparkEventLogAdapter:
             raise spark_error(ErrorCategory.UPSTREAM_ERROR) from None
         except (ValueError, ValidationError):
             raise spark_error(ErrorCategory.UNEXPECTED_RESPONSE) from None
+        finally:
+            self._acquisitions.discard(worker)
 
     async def _download(
         self, application_id: str, attempt_id: str | None, deadline: float
@@ -276,6 +279,10 @@ class SparkEventLogAdapter:
             return
         self._closed = True
         try:
+            workers = tuple(self._acquisitions)
+            for worker in workers:
+                worker.cancel()
+            await asyncio.gather(*workers, return_exceptions=True)
             await self._http.close()
         finally:
             if self._lock_fd is not None:

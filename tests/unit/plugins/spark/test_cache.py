@@ -136,3 +136,23 @@ async def test_cancelled_download_cleans_owned_staging(tmp_path: Path) -> None:
         assert stream.closed
     finally:
         await adapter.close()
+
+
+async def test_close_cancels_active_acquisition_before_releasing_root(tmp_path: Path) -> None:
+    stream = Stream([archive_bytes()], delay=1)
+    adapter = _adapter(
+        tmp_path, httpx.MockTransport(lambda request: httpx.Response(200, stream=stream))
+    )
+    task = asyncio.create_task(adapter.download(APP, "1", deadline=time.monotonic() + 5))
+    try:
+        await asyncio.sleep(0.04)
+        await adapter.close()
+        assert task.done()
+        assert stream.closed
+        assert not list((tmp_path / "l3").glob(".part-*"))
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await adapter.close()

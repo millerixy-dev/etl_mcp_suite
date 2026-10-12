@@ -122,3 +122,30 @@ async def test_opt_in_passes_exact_context_and_always_closes(monkeypatch, mode, 
         expected,
         ("close",),
     ]
+
+
+@pytest.mark.parametrize(
+    "missing",
+    [
+        "MCP_STDIO_SPARK_INTEGRATION",
+        "MCP_STDIO_SPARK_APPLICATION_ID",
+        "SPARK_HISTORY_SERVER_URL",
+        "SPARK_CACHE_DIR",
+        "SPARK_GATEWAY_COOKIE",
+    ],
+)
+async def test_spark_missing_opt_in_constructs_no_gateway(monkeypatch, missing):
+    from tests.integration import test_spark_server as live
+
+    for key, value in {
+        "MCP_STDIO_SPARK_INTEGRATION": "1",
+        "MCP_STDIO_SPARK_APPLICATION_ID": "application_1_42",
+        "SPARK_HISTORY_SERVER_URL": "https://history.example.invalid",
+        "SPARK_CACHE_DIR": "/tmp/spark-test-integration",
+        "SPARK_GATEWAY_COOKIE": "session=synthetic-cookie",
+    }.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.delenv(missing)
+    monkeypatch.setattr(live, "SparkEventLogAdapter", _forbidden_gateway, raising=False)
+    with pytest.raises(pytest.skip.Exception):
+        await live.test_spark_download()
