@@ -2,18 +2,32 @@
 
 from __future__ import annotations
 
+import heapq
+from array import array
 from dataclasses import dataclass, field
 from typing import cast
 
 from mcp_stdio.plugins.spark.files import checkpoint
-from mcp_stdio.plugins.spark.inspection_models import SparkEventRef
+from mcp_stdio.plugins.spark.inspection_events import direct_ids
+from mcp_stdio.plugins.spark.inspection_models import SparkEventIds, SparkEventRef
 from mcp_stdio.plugins.spark.inspection_reader import VerifiedEventLogReader
-from mcp_stdio.plugins.spark.metrics_events import metric_integer, task_metric_values, task_outcome
+from mcp_stdio.plugins.spark.metrics_events import (
+    METRIC_NAMES,
+    metric_distribution,
+    metric_integer,
+    task_metric_values,
+    task_outcome,
+)
 from mcp_stdio.plugins.spark.metrics_models import (
     MetricTotal,
+    SparkRankedTask,
     SparkStageMetrics,
     SparkStageMetricsResult,
+    SparkTaskDistributionResult,
     StageMetricsRequest,
+    TaskDistributionRequest,
+    TaskMetricDistributions,
+    TaskMetricValues,
 )
 
 
@@ -133,3 +147,80 @@ async def scan_stage_metrics(
         matched_stage_attempt_count=len(groups), unassigned_task_end_count=unassigned,
         stages=tuple(stages), stages_omitted=len(groups) - len(stages),
     )
+
+
+async def scan_task_distribution(
+    reader: VerifiedEventLogReader, request: TaskDistributionRequest, *, deadline: float
+) -> SparkTaskDistributionResult:
+    samples = {name: array("Q") for name in METRIC_NAMES}
+    candidates: list[tuple[int, int, TaskMetricValues, SparkEventIds]] = []
+    successful = non_success = unknown = ranked = 0
+
+    def visit(line: int, event: dict[str, object]) -> None:
+        nonlocal successful, non_success, unknown, ranked
+        if event["Event"] != "SparkListenerTaskEnd" or (
+            metric_integer(event.get("Stage ID")),
+            metric_integer(event.get("Stage Attempt ID")),
+        ) != (request.stage_id, request.stage_attempt_id):
+            return
+        outcome = task_outcome(event)
+        if outcome == "non_success":
+            non_success += 1
+            return
+        if outcome == "unknown":
+            unknown += 1
+            return
+        successful += 1
+        values = task_metric_values(event)
+        for name in METRIC_NAMES:
+            value = getattr(values, name)
+            if value is not None:
+                samples[name].append(value)
+        score = getattr(values, request.order_by)
+        if score is not None:
+            ranked += 1
+            key = (score, -line)
+            if len(candidates) < request.limit:
+                heapq.heappush(candidates, (*key, values, direct_ids(event)))
+            elif key > candidates[0][:2]:
+                heapq.heapreplace(candidates, (*key, values, direct_ids(event)))
+
+    scan = await reader.read(request, visit, deadline=deadline)
+    await checkpoint(deadline)
+    distributions = {}
+    for name in METRIC_NAMES:
+        await checkpoint(deadline)
+        distributions[name] = metric_distribution(samples[name], successful)
+        await checkpoint(deadline)
+    await checkpoint(deadline)
+    ordered = sorted(candidates, key=lambda item: (-item[0], -item[1]))
+    await checkpoint(deadline)
+    top_tasks: list[SparkRankedTask] = []
+    for _, negative_line, values, ids in ordered:
+        await checkpoint(deadline)
+        top_tasks.append(
+            SparkRankedTask(
+                **values.model_dump(),
+                task_id=ids.task_id,
+                executor_id=ids.executor_id,
+                ref=SparkEventRef(sha256=scan.snapshot.sha256, line=-negative_line),
+            )
+        )
+    await checkpoint(deadline)
+    result = SparkTaskDistributionResult(
+        snapshot=scan.snapshot,
+        coverage=scan.coverage,
+        stage_id=request.stage_id,
+        stage_attempt_id=request.stage_attempt_id,
+        task_end_count=successful + non_success + unknown,
+        successful_task_end_count=successful,
+        non_success_task_end_count=non_success,
+        unknown_reason_task_end_count=unknown,
+        distributions=TaskMetricDistributions.model_validate(distributions),
+        order_by=request.order_by,
+        ranked_task_count=ranked,
+        top_tasks=tuple(top_tasks),
+        tasks_omitted=ranked - len(top_tasks),
+    )
+    await checkpoint(deadline)
+    return result

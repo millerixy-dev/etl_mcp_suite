@@ -22,8 +22,13 @@ from mcp_stdio.plugins.spark.inspection_models import (
     TaskReasonCount,
 )
 from mcp_stdio.plugins.spark.inspection_reader import VerifiedEventLogReader
-from mcp_stdio.plugins.spark.metrics import scan_stage_metrics
-from mcp_stdio.plugins.spark.metrics_models import SparkStageMetricsResult, StageMetricsRequest
+from mcp_stdio.plugins.spark.metrics import scan_stage_metrics, scan_task_distribution
+from mcp_stdio.plugins.spark.metrics_models import (
+    SparkStageMetricsResult,
+    SparkTaskDistributionResult,
+    StageMetricsRequest,
+    TaskDistributionRequest,
+)
 
 
 def _reason_counts(reasons: Counter[str]) -> tuple[TaskReasonCount, ...]:
@@ -41,6 +46,7 @@ class SparkInspectionAdapter:
             asyncio.Task[SparkEventLogInspectionResult]
             | asyncio.Task[SparkEventQueryResult]
             | asyncio.Task[SparkStageMetricsResult]
+            | asyncio.Task[SparkTaskDistributionResult]
         ] = set()
         self._closed = False
 
@@ -72,6 +78,20 @@ class SparkInspectionAdapter:
         if self._closed:
             raise asyncio.CancelledError
         worker = asyncio.create_task(scan_stage_metrics(self._reader, request, deadline=deadline))
+        self._active.add(worker)
+        try:
+            return await worker
+        finally:
+            self._active.discard(worker)
+
+    async def task_distribution(
+        self, request: TaskDistributionRequest, *, deadline: float
+    ) -> SparkTaskDistributionResult:
+        if self._closed:
+            raise asyncio.CancelledError
+        worker = asyncio.create_task(
+            scan_task_distribution(self._reader, request, deadline=deadline)
+        )
         self._active.add(worker)
         try:
             return await worker

@@ -7,6 +7,7 @@ import hashlib
 import json
 import socket
 import time
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
@@ -313,3 +314,326 @@ async def test_stage_is_offline_with_invalid_lifecycle_identity(
     assert stage.input_bytes.model_dump() == {"total": None, "valid_count": 0, "missing_count": 0}
     assert stage.shuffle_read_bytes == stage.input_bytes
     await adapter.close()
+
+
+def distribution_request(request: InspectRequest, **filters: object):
+    from mcp_stdio.plugins.spark.metrics_models import TaskDistributionRequest
+
+    return TaskDistributionRequest.model_validate(
+        {
+            **stage_request(request).model_dump(),
+            "stage_id": 17,
+            "stage_attempt_id": 0,
+            **filters,
+        }
+    )
+
+
+def complete_task(value: int, *, reason: object = "Success") -> dict[str, object]:
+    return {
+        **measured_task(17, 0, reason, value),
+        "Task Info": {
+            "Launch Time": 1,
+            "Finish Time": value + 1,
+            "Task ID": value,
+            "Executor ID": "2",
+            "Index": 0,
+            "Speculative": True,
+        },
+        "Task Metrics": {
+            "Executor Run Time": value,
+            "JVM GC Time": value,
+            "Input Metrics": {"Bytes Read": value},
+            "Shuffle Read Metrics": {
+                "Remote Bytes Read": value,
+                "Local Bytes Read": 0,
+                "Fetch Wait Time": value,
+            },
+        },
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "order_by",
+    [
+        "duration_ms",
+        "executor_run_time_ms",
+        "jvm_gc_time_ms",
+        "input_bytes",
+        "shuffle_read_bytes",
+        "shuffle_fetch_wait_ms",
+    ],
+)
+async def test_distribution_full_samples_ties_and_refs(tmp_path: Path, order_by: str) -> None:
+    adapter, request = snapshot(
+        tmp_path,
+        [
+            complete_task(3),
+            complete_task(3),
+            complete_task(1),
+            complete_task(0),
+            complete_task(900),
+            complete_task(999, reason="FetchFailed"),
+            complete_task(999, reason=None),
+            measured_task(18, 0, value=999),
+            {**complete_task(999), "Stage ID": True},
+            {
+                **complete_task(999),
+                "Stage ID": None,
+                "Stage Info": {
+                    "Stage ID": 17,
+                    "Stage Attempt ID": 0,
+                },
+            },
+        ],
+    )
+    result = await adapter.task_distribution(
+        distribution_request(request, order_by=order_by, limit=2), deadline=time.monotonic() + 10
+    )
+    assert (
+        result.task_end_count,
+        result.successful_task_end_count,
+        result.non_success_task_end_count,
+        result.unknown_reason_task_end_count,
+    ) == (7, 5, 1, 1)
+    assert result.ranked_task_count == 5 and result.tasks_omitted == 3
+    assert [row.ref.line for row in result.top_tasks] == [7, 3]
+    for distribution in result.distributions.model_dump().values():
+        assert distribution == {
+            "valid_count": 5,
+            "missing_count": 0,
+            "min": 0,
+            "p50": 3,
+            "p95": 900,
+            "max": 900,
+        }
+    reread = await adapter.query(query_request(request, lines=[7]), deadline=time.monotonic() + 10)
+    assert reread.events[0].ref == result.top_tasks[0].ref
+    assert reread.events[0].ids.task_id == result.top_tasks[0].task_id == 900
+    unlimited = await adapter.task_distribution(
+        distribution_request(request, order_by=order_by), deadline=time.monotonic() + 10
+    )
+    assert unlimited.distributions == result.distributions
+    assert [row.ref.line for row in unlimited.top_tasks] == [7, 3, 4, 5, 6]
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_distribution_independent_missing_unknown_ids_and_large_shuffle(
+    tmp_path: Path,
+) -> None:
+    large = complete_task(1)
+    large["Task Info"] = {
+        "Launch Time": 0,
+        "Finish Time": 1,
+        "Task ID": True,
+        "Executor ID": "invalid id",
+    }
+    large["Task Metrics"] = {
+        "Shuffle Read Metrics": {
+            "Remote Bytes Read": 2**63 - 1,
+            "Local Bytes Read": 2**63 - 1,
+        }
+    }
+    partial = measured_task(17, 0, value=0)
+    partial["Task Info"] = {"Launch Time": 1, "Finish Time": 1}
+    adapter, request = snapshot(tmp_path, [large, partial, complete_task(2)])
+    result = await adapter.task_distribution(
+        distribution_request(request, order_by="shuffle_read_bytes", limit=1),
+        deadline=time.monotonic() + 10,
+    )
+    assert result.top_tasks[0].shuffle_read_bytes == 2**64 - 2
+    assert result.top_tasks[0].task_id is None and result.top_tasks[0].executor_id is None
+    assert result.distributions.shuffle_read_bytes.valid_count == 3
+    assert result.distributions.executor_run_time_ms.missing_count == 2
+    assert result.distributions.input_bytes.missing_count == 1
+    by_gc = await adapter.task_distribution(
+        distribution_request(request, order_by="jvm_gc_time_ms"), deadline=time.monotonic() + 10
+    )
+    assert by_gc.ranked_task_count == 1 and by_gc.tasks_omitted == 0
+    assert by_gc.distributions == result.distributions
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("records", [[], [complete_task(2, reason="FetchFailed")]])
+async def test_distribution_empty_success_population(
+    tmp_path: Path, records: list[dict[str, object]]
+) -> None:
+    adapter, request = snapshot(tmp_path, records)
+    result = await adapter.task_distribution(
+        distribution_request(request), deadline=time.monotonic() + 10
+    )
+    assert result.task_end_count == len(records)
+    assert result.top_tasks == () and result.ranked_task_count == result.tasks_omitted == 0
+    assert all(
+        value
+        == {
+            "valid_count": 0,
+            "missing_count": 0,
+            "min": None,
+            "p50": None,
+            "p95": None,
+            "max": None,
+        }
+        for value in result.distributions.model_dump().values()
+    )
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("corruption", ["expected_hash", "digest", "tail"])
+async def test_distribution_validates_full_tail_before_publication(
+    tmp_path: Path, corruption: str
+) -> None:
+    adapter, request = snapshot(tmp_path, [complete_task(900), complete_task(1)])
+    metrics_request = distribution_request(request, limit=1)
+    manifest = Path(request.manifest_path)
+    body = json.loads(manifest.read_text())
+    path = Path(body["files"][0]["local_path"])
+    if corruption == "expected_hash":
+        metrics_request = metrics_request.model_copy(update={"expected_sha256": "0" * 64})
+    elif corruption == "digest":
+        path.write_bytes(path.read_bytes().replace(b'"Finish Time":2', b'"Finish Time":3'))
+    else:
+        raw = path.read_bytes() + b"{broken\n"
+        path.write_bytes(raw)
+        body["files"][0].update(
+            size_bytes=len(raw), event_count=6, sha256=hashlib.sha256(raw).hexdigest()
+        )
+        manifest.write_text(json.dumps(body))
+        metrics_request = distribution_request(request, limit=1)
+    with pytest.raises(SparkGatewayError):
+        await adapter.task_distribution(metrics_request, deadline=time.monotonic() + 10)
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_distribution_cancel_timeout_and_close(tmp_path: Path) -> None:
+    adapter, request = snapshot(tmp_path, [complete_task(1) for _ in range(1000)])
+    metrics_request = distribution_request(request)
+    with pytest.raises(SparkGatewayError):
+        await adapter.task_distribution(metrics_request, deadline=time.monotonic() - 1)
+    worker = asyncio.create_task(
+        adapter.task_distribution(metrics_request, deadline=time.monotonic() + 10)
+    )
+    await asyncio.sleep(0)
+    worker.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await worker
+    worker = asyncio.create_task(
+        adapter.task_distribution(metrics_request, deadline=time.monotonic() + 10)
+    )
+    await asyncio.sleep(0)
+    await adapter.close()
+    assert worker.cancelled()
+    with pytest.raises(asyncio.CancelledError):
+        await adapter.task_distribution(metrics_request, deadline=time.monotonic() + 10)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["statistics", "top_projection", "result_validation"])
+async def test_distribution_original_deadline_after_computation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str
+) -> None:
+    from mcp_stdio.plugins.spark import metrics
+    from mcp_stdio.plugins.spark.files import checkpoint as real_checkpoint
+
+    adapter, request = snapshot(tmp_path, [complete_task(1)])
+    expired = False
+    target = {
+        "statistics": "metric_distribution",
+        "top_projection": "SparkRankedTask",
+        "result_validation": "SparkTaskDistributionResult",
+    }[phase]
+    original = getattr(metrics, target)
+
+    def expire_after_call(*args: object, **kwargs: object):
+        nonlocal expired
+        result = original(*args, **kwargs)
+        expired = True
+        return result
+
+    async def checked(deadline: float) -> None:
+        await real_checkpoint(time.monotonic() - 1 if expired else deadline)
+
+    monkeypatch.setattr(metrics, target, expire_after_call)
+    monkeypatch.setattr(metrics, "checkpoint", checked)
+    with pytest.raises(SparkGatewayError):
+        await adapter.task_distribution(
+            distribution_request(request), deadline=time.monotonic() + 10
+        )
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_distribution_each_metric_selects_its_own_task(tmp_path: Path) -> None:
+    from mcp_stdio.plugins.spark.metrics_events import METRIC_NAMES
+
+    records: list[dict[str, object]] = []
+    for index, name in enumerate(METRIC_NAMES):
+        event = complete_task(1)
+        info = {
+            "Launch Time": 1,
+            "Finish Time": 101 if name == "duration_ms" else 2,
+            "Task ID": index,
+        }
+        metrics = {
+            "Executor Run Time": 100 if name == "executor_run_time_ms" else 1,
+            "JVM GC Time": 100 if name == "jvm_gc_time_ms" else 1,
+            "Input Metrics": {"Bytes Read": 100 if name == "input_bytes" else 1},
+            "Shuffle Read Metrics": {
+                "Remote Bytes Read": 100 if name == "shuffle_read_bytes" else 1,
+                "Local Bytes Read": 0,
+                "Fetch Wait Time": 100 if name == "shuffle_fetch_wait_ms" else 1,
+            },
+        }
+        event.update({"Task Info": info, "Task Metrics": metrics})
+        records.append(event)
+    adapter, request = snapshot(tmp_path, records)
+    for index, name in enumerate(METRIC_NAMES):
+        result = await adapter.task_distribution(
+            distribution_request(request, order_by=name, limit=1), deadline=time.monotonic() + 10
+        )
+        assert result.top_tasks[0].task_id == index
+        assert result.ranked_task_count == 6 and result.tasks_omitted == 5
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_distribution_close_waits_for_post_scan_computation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from mcp_stdio.plugins.spark import metrics
+    from mcp_stdio.plugins.spark.files import checkpoint as real_checkpoint
+
+    adapter, request = snapshot(tmp_path, [complete_task(1)])
+    computing = asyncio.Event()
+    released = asyncio.Event()
+    original = metrics.metric_distribution
+    calculated = False
+
+    def calculate(samples: Sequence[int], successes: int):
+        nonlocal calculated
+        result = original(samples, successes)
+        calculated = True
+        return result
+
+    async def pause_after_calculation(deadline: float) -> None:
+        if calculated:
+            computing.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                released.set()
+        await real_checkpoint(deadline)
+
+    monkeypatch.setattr(metrics, "metric_distribution", calculate)
+    monkeypatch.setattr(metrics, "checkpoint", pause_after_calculation)
+    worker = asyncio.create_task(
+        adapter.task_distribution(distribution_request(request), deadline=time.monotonic() + 10)
+    )
+    await asyncio.wait_for(computing.wait(), timeout=2)
+    await adapter.close()
+    assert released.is_set() and worker.cancelled()
