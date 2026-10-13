@@ -22,6 +22,8 @@ from mcp_stdio.plugins.spark.inspection_models import (
     TaskReasonCount,
 )
 from mcp_stdio.plugins.spark.inspection_reader import VerifiedEventLogReader
+from mcp_stdio.plugins.spark.metrics import scan_stage_metrics
+from mcp_stdio.plugins.spark.metrics_models import SparkStageMetricsResult, StageMetricsRequest
 
 
 def _reason_counts(reasons: Counter[str]) -> tuple[TaskReasonCount, ...]:
@@ -36,7 +38,9 @@ class SparkInspectionAdapter:
         self._reader = VerifiedEventLogReader(settings, secret_values)
         self._secrets = credential_values(secret_values)
         self._active: set[
-            asyncio.Task[SparkEventLogInspectionResult] | asyncio.Task[SparkEventQueryResult]
+            asyncio.Task[SparkEventLogInspectionResult]
+            | asyncio.Task[SparkEventQueryResult]
+            | asyncio.Task[SparkStageMetricsResult]
         ] = set()
         self._closed = False
 
@@ -56,6 +60,18 @@ class SparkInspectionAdapter:
         if self._closed:
             raise asyncio.CancelledError
         worker = asyncio.create_task(self._query(request, deadline=deadline))
+        self._active.add(worker)
+        try:
+            return await worker
+        finally:
+            self._active.discard(worker)
+
+    async def stage_metrics(
+        self, request: StageMetricsRequest, *, deadline: float
+    ) -> SparkStageMetricsResult:
+        if self._closed:
+            raise asyncio.CancelledError
+        worker = asyncio.create_task(scan_stage_metrics(self._reader, request, deadline=deadline))
         self._active.add(worker)
         try:
             return await worker

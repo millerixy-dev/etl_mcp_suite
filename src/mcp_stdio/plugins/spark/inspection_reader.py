@@ -31,6 +31,7 @@ from mcp_stdio.plugins.spark.inspection_models import (
     SparkEventCoverage,
     SparkSnapshot,
 )
+from mcp_stdio.plugins.spark.metrics_models import MetricsSnapshotRequest
 from mcp_stdio.plugins.spark.models import SparkEventLogFetchResult
 
 MAX_MANIFEST_BYTES = 131072
@@ -146,7 +147,10 @@ class VerifiedEventLogReader:
                     r"eventlog-[0-9]{4}\.jsonl", path.name
                 ):
                     raise ValueError("unsafe event path")
-                if isinstance(request, QueryRequest) and request.expected_sha256 != selected.sha256:
+                if (
+                    isinstance(request, (QueryRequest, MetricsSnapshotRequest))
+                    and request.expected_sha256 != selected.sha256
+                ):
                     raise ValueError("snapshot conflict")
                 stream = _stream(stack, directory, path.name)
                 before = os.fstat(stream.fileno())
