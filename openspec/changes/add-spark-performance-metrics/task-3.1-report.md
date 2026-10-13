@@ -57,3 +57,7 @@ The restart session forbids HTTP and receives the same readable snapshot/numeric
 No known task 3.1 gap. Results whose redacted IDs no longer satisfy the closed ID contract intentionally fail closed; they are not silently altered to invented valid IDs. Computation tests continue to cover scanner cancellation, deadline and workers; composition tests prove both ports share the existing single lifecycle owner and its close ordering even on failure.
 
 This is synthetic unit/contract evidence, not a live backend, real private sample or 100 MB performance acceptance. Those final change-wide checks and docs/Skill work remain for tasks 3.2/4.1 and parent review. Unrelated event-log-download spec edits and executor-log artifacts were preserved.
+
+## Controller gate
+
+Fresh controller exact scoped command (core errors, full Spark, stdio, architecture, registry; uv locked forced regular reinstall) passed548 tests in19.28s. Independent task review spec compliant/quality Approved with no findings, including same four-worker close ownership and runtime Stage pair validator. Previous numeric/snapshot gates confirmed; docs/Skill and final whole-change suite/scale/review remain tasks3.2/4.1.

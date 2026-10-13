@@ -10,7 +10,7 @@
 
 ## 3. MCP 接线与 Agent 工作流
 
-- [ ] 3.1 RED：扩展现有 service/tools/plugin、公共 operation 名和 stdio/架构合同失败测试；GREEN：接入两个工具并保持旧三项兼容、单一目录 owner 和安全公有结果边界；REFACTOR：遵守 service→port 依赖方向。用 `uv run --locked pytest tests/unit/core/test_errors.py tests/unit/plugins/spark tests/contract/test_spark_stdio.py tests/contract/test_architecture.py tests/unit/test_registry.py` 验证已实现工具精确并集、schema、离线调用、错误/脱敏、清理以及 fetch/inspect/query 回归。
+- [x] 3.1 RED：扩展现有 service/tools/plugin、公共 operation 名和 stdio/架构合同失败测试；GREEN：接入两个工具并保持旧三项兼容、单一目录 owner 和安全公有结果边界；REFACTOR：遵守 service→port 依赖方向。用 `uv run --locked pytest tests/unit/core/test_errors.py tests/unit/plugins/spark tests/contract/test_spark_stdio.py tests/contract/test_architecture.py tests/unit/test_registry.py` 验证已实现工具精确并集、schema、离线调用、错误/脱敏、清理以及 fetch/inspect/query 回归。
 - [ ] 3.2 RED：定义三组合成慢作业取证材料及预期事实/候选原因边界，补现有 Skill 发现/合同测试；GREEN：扩展 `skills/spark-diagnosis/SKILL.md`、README 和架构文档；REFACTOR：流程保持简短，无固定诊断轮数或新状态。用 `uv run --locked pytest tests/unit/test_agent_skills.py` 验证工具名与工作流，并通过实际 MCP 演练“大 Shuffle 与长尾同现”“数据量相近而 Fetch Wait 高”“重试且部分指标缺失”；在本任务下记录真实调用输入/数值/计数/refs/结论核对，不能仅凭关键词测试声明诊断有效。
 
 ## 4. 整体验证
