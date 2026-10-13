@@ -12,7 +12,7 @@
 
 任务 2.2 的接口验证通过后，3.1 的接线与 3.2 的 Skill/文档可以并行：源码和接线测试由 3.1 负责，Skill、安装脚本、文档和五场景取证演练由 3.2 负责。任务 4.1 等两项均验收后执行。
 
-- [ ] 3.1 RED：扩展 Spark service/tools/plugin 和 stdio 合同失败测试；GREEN：接入两个工具、安全操作名及关闭/时限处理；REFACTOR：保持既有分层和单一目录所有权。用 `uv run --locked pytest tests/unit/plugins/spark tests/contract/test_spark_stdio.py tests/contract/test_architecture.py` 验证精确工具集、schema、安全错误、离线读取、取消/关闭以及旧 fetch 回归。
+- [x] 3.1 RED：扩展 Spark service/tools/plugin 和 stdio 合同失败测试；GREEN：接入两个工具、安全操作名及关闭/时限处理；REFACTOR：保持既有分层和单一目录所有权。用 `uv run --locked pytest tests/unit/plugins/spark tests/contract/test_spark_stdio.py tests/contract/test_architecture.py` 验证精确工具集、schema、安全错误、离线读取、取消/关闭以及旧 fetch 回归。
 - [ ] 3.2 RED：先定义五类合成诊断场景的预期结论/证据，补 Skill 分发/发现测试；GREEN：新增 `skills/spark-diagnosis/SKILL.md`，同步既有 Skill 分发入口（如需）、README、`docs/architecture/runtime-flow.md` 与 `docs/architecture/modules.md`；REFACTOR：保持步骤简短，不加入固定轮数门槛。用 `uv run --locked pytest tests/unit/test_agent_skills.py` 验证工具名/分发；逐案演练“明确异常、重试恢复、executor 丢失原因未知、不完整、全成功”，在本任务下记录实际查询、refs 与结论核对，不能只凭关键词测试声明诊断有效。
 
 ## 4. 整体验证
