@@ -27,9 +27,23 @@ from mcp_stdio.core.logging import configure_logging
 from mcp_stdio.core.server import StdioMcpServer
 from mcp_stdio.plugins.spark.cache import SparkEventLogAdapter
 from mcp_stdio.plugins.spark.plugin import PLUGIN_DEFINITION
-from tests.unit.plugins.spark.fixtures import archive_bytes
+from tests.unit.plugins.spark.fixtures import archive_bytes, encode, events
 from tests.unit.plugins.spark.test_http_client import Stream
 calls = []
+records = events() + [
+    {"Event": "SparkListenerStageCompleted", "Stage Info": {
+        "Stage ID": 17, "Stage Attempt ID": 0, "Submission Time": 1000,
+        "Completion Time": 901000}},
+]
+for task_id, duration, data in [(7, 100, 100), (8, 900, 200)]:
+    records.append({"Event": "SparkListenerTaskEnd", "Stage ID": 17,
+        "Stage Attempt ID": 0, "Task End Reason": {"Reason": "Success"},
+        "Task Info": {"Task ID": task_id, "Executor ID": "2",
+                      "Launch Time": 10, "Finish Time": 10 + duration},
+        "Task Metrics": {"Executor Run Time": duration - 20, "JVM GC Time": 0,
+            "Input Metrics": {"Bytes Read": data},
+            "Shuffle Read Metrics": {"Remote Bytes Read": duration,
+                                     "Local Bytes Read": 0, "Fetch Wait Time": 10}}})
 def handler(request):
     calls.append(request.url.path)
     if sys.argv[2] == "cache":
@@ -42,7 +56,7 @@ def handler(request):
     if sys.argv[3] == "basic":
         assert request.headers["Cookie"] == "hadoop-jwt=synthetic-issued"
     return httpx.Response(404 if sys.argv[2] == "error" else 200,
-                         stream=Stream([archive_bytes()]))
+                         stream=Stream([archive_bytes({"application_1_42_1": encode(records)})]))
 def factory(**kwargs):
     return SparkEventLogAdapter(**kwargs, transport=httpx.MockTransport(handler))
 with patch("mcp_stdio.plugins.spark.plugin.SparkEventLogAdapter", side_effect=factory):
@@ -86,6 +100,8 @@ def _session(root: Path, outcome: str, auth: str = "cookie") -> dict[str, Any]:
             "fetch_spark_event_log",
             "inspect_spark_event_log",
             "query_spark_events",
+            "get_spark_stage_metrics",
+            "get_spark_task_distribution",
         ]
         _send(
             process,
@@ -125,6 +141,28 @@ def _session(root: Path, outcome: str, auth: str = "cookie") -> dict[str, Any]:
                 ),
                 (6, "query_spark_events", {**common, "expected_sha256": "a" * 64}),
                 (7, "inspect_spark_event_log", {**common, "unknown": "forbidden-secret"}),
+                (
+                    8,
+                    "get_spark_stage_metrics",
+                    {**common, "expected_sha256": fetched["files"][0]["sha256"]},
+                ),
+                (
+                    9,
+                    "get_spark_task_distribution",
+                    {
+                        **common,
+                        "expected_sha256": fetched["files"][0]["sha256"],
+                        "stage_id": 17,
+                        "stage_attempt_id": 0,
+                        "limit": 1,
+                    },
+                ),
+                (10, "get_spark_stage_metrics", {**common, "expected_sha256": "a" * 64}),
+                (
+                    11,
+                    "get_spark_task_distribution",
+                    {**common, "expected_sha256": "a" * 64, "stage_id": 17, "stage_attempt_id": 0},
+                ),
             ]:
                 _send(
                     process,
@@ -165,7 +203,43 @@ def _session(root: Path, outcome: str, auth: str = "cookie") -> dict[str, Any]:
                 "next_after_line",
                 "coverage",
             }
-            assert overview["event_count"] == 3
+            assert overview["event_count"] == 6
+            stages = json.loads(responses[4]["content"][0]["text"])
+            distribution = json.loads(responses[5]["content"][0]["text"])
+            assert set(stages) == {
+                "snapshot",
+                "coverage",
+                "matched_stage_attempt_count",
+                "unassigned_task_end_count",
+                "stages",
+                "stages_omitted",
+            }
+            assert stages["matched_stage_attempt_count"] == 1
+            assert stages["stages"][0]["duration_ms"] == 900000
+            assert stages["stages"][0]["input_bytes"] == {
+                "total": 300,
+                "valid_count": 2,
+                "missing_count": 0,
+            }
+            assert stages["stages"][0]["shuffle_read_bytes"]["total"] == 1000
+            assert distribution["distributions"]["duration_ms"] == {
+                "valid_count": 2,
+                "missing_count": 0,
+                "min": 100,
+                "p50": 100,
+                "p95": 900,
+                "max": 900,
+            }
+            assert distribution["ranked_task_count"] == 2
+            assert distribution["tasks_omitted"] == 1
+            assert distribution["top_tasks"][0]["task_id"] == 8
+            assert distribution["top_tasks"][0]["ref"] == {
+                "sha256": overview["snapshot"]["sha256"],
+                "line": 6,
+            }
+            for index, name in [(6, "get_spark_stage_metrics"), (7, "get_spark_task_distribution")]:
+                assert "UNEXPECTED_RESPONSE" in responses[index]["content"][0]["text"]
+                assert name in responses[index]["content"][0]["text"]
             assert query["events"][0]["ref"] == {
                 "sha256": overview["snapshot"]["sha256"],
                 "line": 3,

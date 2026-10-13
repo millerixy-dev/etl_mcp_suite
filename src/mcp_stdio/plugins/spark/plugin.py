@@ -17,7 +17,11 @@ from mcp_stdio.plugins.spark.config import SparkSecrets, SparkSettings
 from mcp_stdio.plugins.spark.files import credential_values
 from mcp_stdio.plugins.spark.gateway import SparkEventLogGateway, SparkInspectionGateway
 from mcp_stdio.plugins.spark.inspection import SparkInspectionAdapter
-from mcp_stdio.plugins.spark.service import SparkEventLogService, SparkInspectionService
+from mcp_stdio.plugins.spark.service import (
+    SparkEventLogService,
+    SparkInspectionService,
+    SparkMetricsService,
+)
 from mcp_stdio.plugins.spark.tools import SparkToolAdapter
 
 
@@ -76,9 +80,15 @@ def _create_runtime(config_path: Path | None, environ: Mapping[str, str] | None)
     inspection_service = SparkInspectionService(
         gateway=inspector, request_timeout_seconds=loaded.settings.request_timeout_seconds
     )
+    metrics_service = SparkMetricsService(
+        gateway=inspector, request_timeout_seconds=loaded.settings.request_timeout_seconds
+    )
     return SparkRuntime(
         SparkToolAdapter(
-            service=service, inspection_service=inspection_service, secret_values=values
+            service=service,
+            inspection_service=inspection_service,
+            metrics_service=metrics_service,
+            secret_values=values,
         ),
         gateway,
         values,

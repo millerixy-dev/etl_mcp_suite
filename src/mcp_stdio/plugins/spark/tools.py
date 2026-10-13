@@ -17,8 +17,24 @@ from mcp_stdio.plugins.spark.inspection_models import (
     SparkEventLogInspectionResult,
     SparkEventQueryResult,
 )
+from mcp_stdio.plugins.spark.metrics_models import (
+    MetricName,
+    SparkStageMetricsResult,
+    SparkTaskDistributionResult,
+)
 from mcp_stdio.plugins.spark.models import SparkEventLogFetchResult
-from mcp_stdio.plugins.spark.service import SparkEventLogService, SparkInspectionService
+from mcp_stdio.plugins.spark.service import (
+    SparkEventLogService,
+    SparkInspectionService,
+    SparkMetricsService,
+)
+
+InspectionResult = (
+    SparkEventLogInspectionResult
+    | SparkEventQueryResult
+    | SparkStageMetricsResult
+    | SparkTaskDistributionResult
+)
 
 ApplicationId = Annotated[
     str, Field(strict=True, pattern=r"^application_[0-9]+_[0-9]+$", max_length=128)
@@ -44,15 +60,19 @@ class SparkToolAdapter:
         service: SparkEventLogService,
         secret_values: Iterable[str],
         inspection_service: SparkInspectionService | None = None,
+        metrics_service: SparkMetricsService | None = None,
     ) -> None:
         self._service = service
         self._inspection_service = inspection_service
+        self._metrics_service = metrics_service
         self._secrets = tuple(value for value in secret_values if value)
 
     def register_tools(self, registrar: ToolRegistrar) -> None:
         registrar.add_tool(self.fetch_spark_event_log, name="fetch_spark_event_log")
         registrar.add_tool(self.inspect_spark_event_log, name="inspect_spark_event_log")
         registrar.add_tool(self.query_spark_events, name="query_spark_events")
+        registrar.add_tool(self.get_spark_stage_metrics, name="get_spark_stage_metrics")
+        registrar.add_tool(self.get_spark_task_distribution, name="get_spark_task_distribution")
 
     async def fetch_spark_event_log(
         self,
@@ -141,16 +161,86 @@ class SparkToolAdapter:
         assert isinstance(result, SparkEventQueryResult)
         return result
 
+    async def get_spark_stage_metrics(
+        self,
+        manifest_path: ManifestPath,
+        attempt_id: AttemptId | None,
+        expected_sha256: Sha256,
+        stage_id: SparkId | None = None,
+        stage_attempt_id: SparkId | None = None,
+        limit: Limit = 20,
+    ) -> SparkStageMetricsResult:
+        """Rank Stage attempts from one verified local snapshot, without downloading."""
+        operation = ToolOperation.GET_SPARK_STAGE_METRICS
+        if self._metrics_service is None:
+            self._raise_error(
+                ToolError.create(
+                    category=ErrorCategory.UNEXPECTED_RESPONSE, operation=operation, retryable=False
+                )
+            )
+        result = await self._inspection_result(
+            self._metrics_service.stage_metrics(
+                manifest_path,
+                attempt_id,
+                expected_sha256,
+                stage_id=stage_id,
+                stage_attempt_id=stage_attempt_id,
+                limit=limit,
+            ),
+            operation,
+        )
+        assert isinstance(result, SparkStageMetricsResult)
+        return result
+
+    async def get_spark_task_distribution(
+        self,
+        manifest_path: ManifestPath,
+        attempt_id: AttemptId | None,
+        expected_sha256: Sha256,
+        stage_id: SparkId,
+        stage_attempt_id: SparkId,
+        order_by: MetricName = "duration_ms",
+        limit: Limit = 20,
+    ) -> SparkTaskDistributionResult:
+        """Measure successful TaskEnd attempts in an explicit Stage attempt and snapshot."""
+        operation = ToolOperation.GET_SPARK_TASK_DISTRIBUTION
+        if self._metrics_service is None:
+            self._raise_error(
+                ToolError.create(
+                    category=ErrorCategory.UNEXPECTED_RESPONSE, operation=operation, retryable=False
+                )
+            )
+        result = await self._inspection_result(
+            self._metrics_service.task_distribution(
+                manifest_path,
+                attempt_id,
+                expected_sha256,
+                stage_id=stage_id,
+                stage_attempt_id=stage_attempt_id,
+                order_by=order_by,
+                limit=limit,
+            ),
+            operation,
+        )
+        assert isinstance(result, SparkTaskDistributionResult)
+        return result
+
     async def _inspection_result(
         self,
-        call: Awaitable[SparkEventLogInspectionResult | SparkEventQueryResult],
+        call: Awaitable[InspectionResult],
         operation: ToolOperation,
-    ) -> SparkEventLogInspectionResult | SparkEventQueryResult:
+    ) -> InspectionResult:
         try:
             result = await call
             # Metadata can carry vendor labels too; redact only the public copy.
             redacted = redact_event(result.model_dump(mode="json"), self._secrets)
-            public = type(result).model_validate_json(json.dumps(redacted, ensure_ascii=False))
+            result_type = {
+                ToolOperation.INSPECT_SPARK_EVENT_LOG: SparkEventLogInspectionResult,
+                ToolOperation.QUERY_SPARK_EVENTS: SparkEventQueryResult,
+                ToolOperation.GET_SPARK_STAGE_METRICS: SparkStageMetricsResult,
+                ToolOperation.GET_SPARK_TASK_DISTRIBUTION: SparkTaskDistributionResult,
+            }[operation]
+            public = result_type.model_validate_json(json.dumps(redacted, ensure_ascii=False))
             if any(secret in public.model_dump_json() for secret in self._secrets):
                 raise SparkGatewayError(
                     ToolError.create(

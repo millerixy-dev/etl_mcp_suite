@@ -50,6 +50,8 @@ async def test_strict_mcp_schema_and_unknown_parameters(tmp_path: Path) -> None:
             "fetch_spark_event_log",
             "inspect_spark_event_log",
             "query_spark_events",
+            "get_spark_stage_metrics",
+            "get_spark_task_distribution",
         ]
         schema = tools[0].inputSchema
         assert set(schema["properties"]) == {"application_id", "attempt_id", "refresh"}
@@ -147,6 +149,142 @@ async def test_inspection_schemas_strict_inputs_and_safe_operations(tmp_path: Pa
         assert "inspect_spark_event_log" in str(error.value)
     finally:
         await runtime.close()
+
+
+async def test_metrics_schemas_and_strict_inputs(tmp_path: Path) -> None:
+    from mcp_stdio.plugins.spark.plugin import PLUGIN_DEFINITION
+
+    runtime = PLUGIN_DEFINITION.create_runtime(
+        None,
+        environ={
+            "SPARK_HISTORY_SERVER_URL": "https://history.example",
+            "SPARK_CACHE_DIR": str(tmp_path),
+        },
+    )
+    server = StdioMcpServer(runtime)
+    common = {"manifest_path": "/l3/manifest.json", "attempt_id": None, "expected_sha256": "a" * 64}
+    try:
+        listed = {tool.name: tool for tool in await server._fastmcp.list_tools()}
+        for name in ["get_spark_stage_metrics", "get_spark_task_distribution"]:
+            schema = listed[name].inputSchema
+            required = {"manifest_path", "attempt_id", "expected_sha256"}
+            properties = required | {"stage_id", "stage_attempt_id", "limit"}
+            if name == "get_spark_task_distribution":
+                required |= {"stage_id", "stage_attempt_id"}
+                properties |= {"order_by"}
+                assert schema["properties"]["order_by"]["enum"] == [
+                    "duration_ms",
+                    "executor_run_time_ms",
+                    "jvm_gc_time_ms",
+                    "input_bytes",
+                    "shuffle_read_bytes",
+                    "shuffle_fetch_wait_ms",
+                ]
+                assert schema["properties"]["order_by"]["default"] == "duration_ms"
+            assert set(schema["required"]) == required
+            assert set(schema["properties"]) == properties
+            assert schema["additionalProperties"] is False
+            assert schema["properties"]["limit"]["default"] == 20
+            valid = {**common, "stage_id": 1, "stage_attempt_id": 0}
+            for extra in [
+                {"stage_id": True},
+                {"stage_id": "1"},
+                {"limit": 0},
+                {"limit": 21},
+                {"unknown": "forbidden-secret"},
+                {"attempt_id": "../1"},
+                {"expected_sha256": "bad"},
+            ]:
+                with pytest.raises(ToolError) as error:
+                    await server._fastmcp.call_tool(name, {**valid, **extra})
+                assert "INVALID_INPUT" in str(error.value) and name in str(error.value)
+                assert "forbidden-secret" not in str(error.value)
+            missing_attempt = {key: value for key, value in valid.items() if key != "attempt_id"}
+            with pytest.raises(ToolError):
+                await server._fastmcp.call_tool(name, missing_attempt)
+        with pytest.raises(ToolError) as error:
+            await server._fastmcp.call_tool("get_spark_stage_metrics", {**common, "stage_id": 1})
+        assert "INVALID_INPUT" in str(error.value)
+        with pytest.raises(ToolError) as error:
+            await server._fastmcp.call_tool(
+                "get_spark_task_distribution",
+                {**common, "stage_id": 1, "stage_attempt_id": 0, "order_by": "average"},
+            )
+        assert "INVALID_INPUT" in str(error.value)
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.parametrize("name", ["get_spark_stage_metrics", "get_spark_task_distribution"])
+async def test_metrics_public_boundary_redacts_and_revalidates_named_results(
+    name: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from unittest.mock import AsyncMock
+
+    from mcp_stdio.plugins.spark.service import SparkMetricsService
+    from mcp_stdio.plugins.spark.tools import SparkToolAdapter
+    from tests.unit.plugins.spark.test_service import (
+        SuccessfulMetricsGateway,
+        distribution_result,
+        stage_result,
+    )
+
+    gateway = SuccessfulMetricsGateway()
+    service = SparkMetricsService(gateway=gateway, request_timeout_seconds=2)
+    method = "stage_metrics" if name == "get_spark_stage_metrics" else "task_distribution"
+    internal = stage_result() if method == "stage_metrics" else distribution_result()
+    selected = {"stage_id": 1, "stage_attempt_id": 0}
+    monkeypatch.setattr(service, method, AsyncMock(return_value=internal))
+    adapter = SparkToolAdapter(
+        service=SparkEventLogService(gateway=FakeGateway(), request_timeout_seconds=2),
+        metrics_service=service,
+        secret_values=(),
+    )
+    public = await getattr(adapter, name)("/l3/manifest.json", None, "a" * 64, **selected)
+    assert public == internal and public is not internal
+    assert public.model_dump() == internal.model_dump()
+    blocked = SparkToolAdapter(
+        service=SparkEventLogService(gateway=FakeGateway(), request_timeout_seconds=2),
+        metrics_service=service,
+        secret_values=("application_1_42",),
+    )
+    with pytest.raises(ToolError) as error:
+        await getattr(blocked, name)("/l3/manifest.json", None, "a" * 64, **selected)
+    assert "UNEXPECTED_RESPONSE" in str(error.value) and name in str(error.value)
+    assert "application_1_42" not in str(error.value)
+    assert internal.snapshot.application_id == "application_1_42"
+    if method == "task_distribution":
+        payload = distribution_result().model_dump()
+        payload["top_tasks"] = (
+            {
+                "task_id": 1,
+                "executor_id": "synthetic-current",
+                "ref": {"sha256": "a" * 64, "line": 1},
+                "duration_ms": 1,
+                "executor_run_time_ms": None,
+                "jvm_gc_time_ms": None,
+                "input_bytes": None,
+                "shuffle_read_bytes": None,
+                "shuffle_fetch_wait_ms": None,
+            },
+        )
+        internal = type(internal).model_validate(payload)
+        monkeypatch.setattr(service, method, AsyncMock(return_value=internal))
+        executor_blocked = SparkToolAdapter(
+            service=SparkEventLogService(gateway=FakeGateway(), request_timeout_seconds=2),
+            metrics_service=service,
+            secret_values=("synthetic-current",),
+        )
+        with pytest.raises(ToolError) as error:
+            await executor_blocked.get_spark_task_distribution(
+                "/l3/manifest.json", None, "a" * 64, 1, 0
+            )
+        assert "UNEXPECTED_RESPONSE" in str(error.value)
+        assert "synthetic-current" not in str(error.value)
+    monkeypatch.setattr(service, method, AsyncMock(return_value=result(True)))
+    with pytest.raises(ToolError) as error:
+        await getattr(adapter, name)("/l3/manifest.json", None, "a" * 64, **selected)
+    assert "UNEXPECTED_RESPONSE" in str(error.value) and name in str(error.value)
 
 
 async def test_full_result_redaction_preserves_raw_counting_labels(tmp_path: Path) -> None:

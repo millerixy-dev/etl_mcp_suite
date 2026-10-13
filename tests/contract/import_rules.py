@@ -58,6 +58,8 @@ def _imports(tree: ast.AST, package: str) -> list[tuple[str, int]]:
                         "inspection",
                         "inspection_reader",
                         "inspection_events",
+                        "metrics",
+                        "metrics_events",
                     }
                 )
     return imports
@@ -85,6 +87,8 @@ def _is_service_infrastructure_import(module: str, imported: str) -> bool:
         "inspection",
         "inspection_reader",
         "inspection_events",
+        "metrics",
+        "metrics_events",
     }
     return (
         imported.split(".")[-1] in infrastructure_modules

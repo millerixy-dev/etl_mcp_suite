@@ -12,6 +12,7 @@ from mcp_stdio.plugins.spark.gateway import (
     SparkEventLogGateway,
     SparkGatewayError,
     SparkInspectionGateway,
+    SparkMetricsGateway,
     spark_error,
 )
 from mcp_stdio.plugins.spark.inspection_models import (
@@ -19,6 +20,12 @@ from mcp_stdio.plugins.spark.inspection_models import (
     QueryRequest,
     SparkEventLogInspectionResult,
     SparkEventQueryResult,
+)
+from mcp_stdio.plugins.spark.metrics_models import (
+    SparkStageMetricsResult,
+    SparkTaskDistributionResult,
+    StageMetricsRequest,
+    TaskDistributionRequest,
 )
 from mcp_stdio.plugins.spark.models import FetchRequest, SparkEventLogFetchResult
 
@@ -80,7 +87,7 @@ class SparkInspectionService:
                 {"manifest_path": manifest_path, "attempt_id": attempt_id}
             )
         except ValidationError:
-            raise self._error(ErrorCategory.INVALID_INPUT, operation) from None
+            raise _error(ErrorCategory.INVALID_INPUT, operation) from None
         deadline = time.monotonic() + self._timeout
         try:
             return await asyncio.wait_for(
@@ -88,9 +95,9 @@ class SparkInspectionService:
                 timeout=max(0, deadline - time.monotonic()),
             )
         except asyncio.TimeoutError:
-            raise self._error(ErrorCategory.TIMEOUT, operation, retryable=True) from None
+            raise _error(ErrorCategory.TIMEOUT, operation, retryable=True) from None
         except SparkGatewayError as error:
-            raise self._remap(error, operation) from None
+            raise _remap(error, operation) from None
 
     async def query(
         self,
@@ -110,7 +117,7 @@ class SparkInspectionService:
                 }
             )
         except ValidationError:
-            raise self._error(ErrorCategory.INVALID_INPUT, operation) from None
+            raise _error(ErrorCategory.INVALID_INPUT, operation) from None
         deadline = time.monotonic() + self._timeout
         try:
             return await asyncio.wait_for(
@@ -118,26 +125,94 @@ class SparkInspectionService:
                 timeout=max(0, deadline - time.monotonic()),
             )
         except asyncio.TimeoutError:
-            raise self._error(ErrorCategory.TIMEOUT, operation, retryable=True) from None
+            raise _error(ErrorCategory.TIMEOUT, operation, retryable=True) from None
         except SparkGatewayError as error:
-            raise self._remap(error, operation) from None
+            raise _remap(error, operation) from None
 
-    @staticmethod
-    def _error(
-        category: ErrorCategory, operation: ToolOperation, *, retryable: bool = False
-    ) -> SparkGatewayError:
-        return SparkGatewayError(
-            ToolError.create(category=category, operation=operation, retryable=retryable)
+
+def _error(
+    category: ErrorCategory, operation: ToolOperation, *, retryable: bool = False
+) -> SparkGatewayError:
+    return SparkGatewayError(
+        ToolError.create(category=category, operation=operation, retryable=retryable)
+    )
+
+
+def _remap(error: SparkGatewayError, operation: ToolOperation) -> SparkGatewayError:
+    value = error.tool_error
+    return SparkGatewayError(
+        ToolError.create(
+            category=value.category,
+            operation=operation,
+            retryable=value.retryable,
+            identifiers=safe_error_identifiers(operation, value.identifiers),
         )
+    )
 
-    @staticmethod
-    def _remap(error: SparkGatewayError, operation: ToolOperation) -> SparkGatewayError:
-        value = error.tool_error
-        return SparkGatewayError(
-            ToolError.create(
-                category=value.category,
-                operation=operation,
-                retryable=value.retryable,
-                identifiers=safe_error_identifiers(operation, value.identifiers),
+
+class SparkMetricsService:
+    """Validate fixed-snapshot metrics through the read-only domain port."""
+
+    def __init__(self, *, gateway: SparkMetricsGateway, request_timeout_seconds: float) -> None:
+        self._gateway = gateway
+        self._timeout = request_timeout_seconds
+
+    async def stage_metrics(
+        self,
+        manifest_path: object,
+        attempt_id: object,
+        expected_sha256: object,
+        **selection: object,
+    ) -> SparkStageMetricsResult:
+        operation = ToolOperation.GET_SPARK_STAGE_METRICS
+        try:
+            request = StageMetricsRequest.model_validate(
+                {
+                    "manifest_path": manifest_path,
+                    "attempt_id": attempt_id,
+                    "expected_sha256": expected_sha256,
+                    **selection,
+                }
             )
-        )
+        except ValidationError:
+            raise _error(ErrorCategory.INVALID_INPUT, operation) from None
+        deadline = time.monotonic() + self._timeout
+        try:
+            return await asyncio.wait_for(
+                self._gateway.stage_metrics(request, deadline=deadline),
+                timeout=max(0, deadline - time.monotonic()),
+            )
+        except asyncio.TimeoutError:
+            raise _error(ErrorCategory.TIMEOUT, operation, retryable=True) from None
+        except SparkGatewayError as error:
+            raise _remap(error, operation) from None
+
+    async def task_distribution(
+        self,
+        manifest_path: object,
+        attempt_id: object,
+        expected_sha256: object,
+        **selection: object,
+    ) -> SparkTaskDistributionResult:
+        operation = ToolOperation.GET_SPARK_TASK_DISTRIBUTION
+        try:
+            request = TaskDistributionRequest.model_validate(
+                {
+                    "manifest_path": manifest_path,
+                    "attempt_id": attempt_id,
+                    "expected_sha256": expected_sha256,
+                    **selection,
+                }
+            )
+        except ValidationError:
+            raise _error(ErrorCategory.INVALID_INPUT, operation) from None
+        deadline = time.monotonic() + self._timeout
+        try:
+            return await asyncio.wait_for(
+                self._gateway.task_distribution(request, deadline=deadline),
+                timeout=max(0, deadline - time.monotonic()),
+            )
+        except asyncio.TimeoutError:
+            raise _error(ErrorCategory.TIMEOUT, operation, retryable=True) from None
+        except SparkGatewayError as error:
+            raise _remap(error, operation) from None

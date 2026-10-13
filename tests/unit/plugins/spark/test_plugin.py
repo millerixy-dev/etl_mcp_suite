@@ -1,4 +1,5 @@
 """Composition uses only local resources at startup."""
+# pyright: reportPrivateUsage=false
 
 from __future__ import annotations
 
@@ -33,6 +34,8 @@ async def test_lazy_startup_and_idempotent_close(
         "fetch_spark_event_log",
         "inspect_spark_event_log",
         "query_spark_events",
+        "get_spark_stage_metrics",
+        "get_spark_task_distribution",
     ]
     await runtime.close()
     await runtime.close()
@@ -71,5 +74,26 @@ async def test_runtime_closes_inspector_before_gateway_even_on_failure() -> None
     with pytest.raises(RuntimeError):
         await runtime.close()
     assert order == ["inspection", "download"]
+
     await runtime.close()
     assert order == ["inspection", "download"]
+
+
+async def test_metrics_and_inspection_share_one_lifecycle_owner(tmp_path: Path) -> None:
+    from mcp_stdio.plugins.spark.plugin import PLUGIN_DEFINITION, SparkRuntime
+
+    runtime = PLUGIN_DEFINITION.create_runtime(
+        None,
+        environ={
+            "SPARK_HISTORY_SERVER_URL": "https://history.example",
+            "SPARK_CACHE_DIR": str(tmp_path),
+        },
+    )
+    assert isinstance(runtime, SparkRuntime)
+    try:
+        tools = runtime._tools
+        assert tools._inspection_service is not None and tools._metrics_service is not None
+        assert tools._inspection_service._gateway is runtime._inspection_gateway
+        assert tools._metrics_service._gateway is runtime._inspection_gateway
+    finally:
+        await runtime.close()

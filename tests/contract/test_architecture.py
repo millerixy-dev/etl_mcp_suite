@@ -135,12 +135,15 @@ def test_spark_service_file_adapters_are_rejected(
     ]
 
 
-@pytest.mark.parametrize("module", ["inspection", "inspection_reader", "inspection_events"])
+@pytest.mark.parametrize(
+    "module", ["inspection", "inspection_reader", "inspection_events", "metrics", "metrics_events"]
+)
 @pytest.mark.parametrize(
     "form",
     [
         "from .{module} import Value\n",
-        "from mcp_stdio.plugins.spark import {module}\n",
+        "from mcp_stdio.plugins.spark import {module} as implementation\n",
+        "from . import {module} as implementation\n",
         "import mcp_stdio.plugins.spark.{module}\n",
     ],
 )
