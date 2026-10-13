@@ -334,3 +334,216 @@ def test_other_fixed_fields_and_environment_redaction():
     ]
     for event, expected in records:
         assert event_details(event, ()) == (expected, False)
+
+
+def query_request(request: InspectRequest, **filters: object):
+    from mcp_stdio.plugins.spark.inspection_models import QueryRequest
+
+    body = json.loads(Path(request.manifest_path).read_text())
+    return QueryRequest.model_validate(
+        {**request.model_dump(), "expected_sha256": body["files"][0]["sha256"], **filters}
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("filters", "lines"),
+    [
+        ({"execution_id": 0}, [3, 7]),
+        ({"job_id": 0}, [3, 4]),
+        ({"stage_id": 0}, [5, 6, 8]),
+        ({"stage_id": 0, "stage_attempt_id": 0}, [5, 6]),
+        ({"task_id": 0}, [6]),
+        ({"executor_id": "e0"}, [6, 9]),
+        ({"stage_id": 0, "task_end_reason": "FetchFailed"}, [6]),
+        ({"task_end_reason": "UNKNOWN"}, [8]),
+        ({"event_types": ["Vendor", "SparkListenerTaskEnd"], "lines": [6, 8, 10]}, [6, 8, 10]),
+        ({"event_types": ["SparkListenerSQLExecutionStart"]}, []),
+        ({"job_id": 99}, []),
+        ({"execution_id": 0, "job_id": 0, "lines": [3, 4]}, [3]),
+        (
+            {
+                "stage_id": 0,
+                "stage_attempt_id": 0,
+                "task_id": 0,
+                "executor_id": "e0",
+                "task_end_reason": "FetchFailed",
+                "event_types": ["SparkListenerTaskEnd"],
+                "lines": [6],
+            },
+            [6],
+        ),
+    ],
+)
+async def test_query_direct_filters_without_relation_expansion(
+    tmp_path: Path, filters: dict[str, object], lines: list[int]
+):
+    adapter, request = snapshot(
+        tmp_path,
+        [
+            {
+                "Event": "SparkListenerJobStart",
+                "Job ID": 0,
+                "Stage IDs": [0],
+                "Properties": {"spark.sql.execution.id": "0"},
+            },
+            {"Event": "SparkListenerJobEnd", "Job ID": 0},
+            {
+                "Event": "SparkListenerStageSubmitted",
+                "Stage Info": {"Stage ID": 0, "Stage Attempt ID": 0},
+            },
+            {
+                **task("FetchFailed"),
+                "Stage ID": 0,
+                "Stage Attempt ID": 0,
+                "Task Info": {"Task ID": 0, "Executor ID": "e0"},
+            },
+            {
+                "Event": "org.apache.spark.sql.execution.ui.SparkListenerSQLExecutionStart",
+                "executionId": 0,
+            },
+            {"Event": "SparkListenerTaskEnd", "Stage ID": 0, "Stage Attempt ID": 1},
+            {"Event": "SparkListenerBlockUpdated", "Block Manager ID": {"Executor ID": "e0"}},
+            {"Event": "Vendor", "Task End Reason": {"Reason": "UNKNOWN"}},
+        ],
+    )
+    result = await adapter.query(query_request(request, **filters), deadline=time.monotonic() + 10)
+    assert [event.ref.line for event in result.events] == lines
+    assert result.matched_count == len(lines)
+    assert result.returned_count == len(lines) and result.next_after_line is None
+    assert set(result.model_dump()) == {
+        "snapshot",
+        "matched_count",
+        "task_end_count",
+        "task_end_reasons",
+        "reasons_omitted",
+        "events",
+        "returned_count",
+        "next_after_line",
+        "coverage",
+    }
+
+
+@pytest.mark.asyncio
+async def test_query_all_matches_counted_before_pages_and_rare_reason(tmp_path: Path):
+    adapter, request = snapshot(
+        tmp_path, [task("Success") for _ in range(45)] + [task("FetchFailed")]
+    )
+    refs: list[int] = []
+    after = 0
+    while True:
+        result = await adapter.query(
+            query_request(request, event_types=["SparkListenerTaskEnd"], after_line=after),
+            deadline=time.monotonic() + 10,
+        )
+        assert result.matched_count == result.task_end_count == 46
+        assert {item.reason: item.count for item in result.task_end_reasons} == {
+            "Success": 45,
+            "FetchFailed": 1,
+        }
+        assert result.returned_count == len(result.events)
+        refs.extend(item.ref.line for item in result.events)
+        assert all(item.ref.sha256 == result.snapshot.sha256 for item in result.events)
+        if result.next_after_line is None:
+            break
+        assert result.next_after_line == result.events[-1].ref.line
+        after = result.next_after_line
+    assert refs == list(range(3, 49))
+    empty = await adapter.query(
+        query_request(request, after_line=100), deadline=time.monotonic() + 10
+    )
+    assert empty.events == () and empty.next_after_line is None and empty.matched_count == 49
+    rare = await adapter.query(
+        query_request(request, task_end_reason="FetchFailed"), deadline=time.monotonic() + 10
+    )
+    assert [event.ref.line for event in rare.events] == [48]
+    selected = await adapter.query(
+        query_request(request, lines=[3, 48], after_line=3, limit=1), deadline=time.monotonic() + 10
+    )
+    assert selected.matched_count == selected.task_end_count == 2
+    assert selected.next_after_line is None
+
+
+@pytest.mark.asyncio
+async def test_query_reason_category_bound_and_missing_field(tmp_path: Path):
+    adapter, request = snapshot(
+        tmp_path,
+        [task(f"R{i:02}") for i in reversed(range(40))]
+        + [{"Event": "SparkListenerTaskEnd", "Task Info": {"Task ID": "0"}}],
+    )
+    result = await adapter.query(
+        query_request(request, event_types=["SparkListenerTaskEnd"]), deadline=time.monotonic() + 10
+    )
+    assert result.task_end_count == 41 and result.reasons_omitted == 9
+    assert [item.reason for item in result.task_end_reasons] == [f"R{i:02}" for i in range(32)]
+    missing = await adapter.query(query_request(request, task_id=0), deadline=time.monotonic() + 10)
+    assert missing.matched_count == missing.task_end_count == 0 and missing.task_end_reasons == ()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("length", [4000, 40000])
+async def test_query_ref_reread_and_single_text_bound(tmp_path: Path, length: int):
+    adapter, request = snapshot(
+        tmp_path,
+        [
+            {
+                **task("ExceptionFailure"),
+                "Task End Reason": {"Reason": "ExceptionFailure", "Description": "x" * length},
+            }
+        ],
+    )
+    first = await adapter.query(query_request(request, lines=[3]), deadline=time.monotonic() + 10)
+    expanded = await adapter.query(
+        query_request(request, lines=[3], limit=1, max_detail_chars=32768),
+        deadline=time.monotonic() + 10,
+    )
+    assert first.events[0].ref == expanded.events[0].ref
+    assert first.events[0].details_truncated and len(first.events[0].details) == 2048
+    assert expanded.events[0].details_truncated == (length > 32768)
+    assert len(expanded.events[0].details) <= 32768
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("corruption", ["expected_hash", "digest", "tail"])
+async def test_query_rejects_corruption_after_page_fills(tmp_path: Path, corruption: str):
+    from mcp_stdio.plugins.spark.gateway import SparkGatewayError
+
+    adapter, request = snapshot(tmp_path, [task("Success") for _ in range(25)])
+    query = query_request(request, limit=1)
+    body = json.loads(Path(request.manifest_path).read_text())
+    if corruption == "expected_hash":
+        query = query.model_copy(update={"expected_sha256": "0" * 64})
+    else:
+        path = Path(body["files"][0]["local_path"])
+        raw = path.read_bytes()
+        if corruption == "digest":
+            raw = raw.replace(b"Success", b"Failure", 1)
+        else:
+            raw = raw.rsplit(b"\n", 2)[0] + b"\n{broken\n"
+            body["files"][0].update(size_bytes=len(raw), sha256=hashlib.sha256(raw).hexdigest())
+            Path(request.manifest_path).write_text(json.dumps(body))
+            query = query_request(request, limit=1)
+        path.write_bytes(raw)
+    with pytest.raises(SparkGatewayError):
+        await adapter.query(query, deadline=time.monotonic() + 10)
+
+
+@pytest.mark.asyncio
+async def test_query_cancel_and_shared_close_wait_for_both_scans(tmp_path: Path):
+    adapter, request = snapshot(tmp_path, [task("Success") for _ in range(1000)])
+    cancelled = asyncio.create_task(
+        adapter.query(query_request(request), deadline=time.monotonic() + 10)
+    )
+    await asyncio.sleep(0)
+    cancelled.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled
+    inspect = asyncio.create_task(adapter.inspect(request, deadline=time.monotonic() + 10))
+    query = asyncio.create_task(
+        adapter.query(query_request(request), deadline=time.monotonic() + 10)
+    )
+    await asyncio.sleep(0)
+    await adapter.close()
+    assert inspect.cancelled() and query.cancelled()
+    with pytest.raises(asyncio.CancelledError):
+        await adapter.query(query_request(request), deadline=time.monotonic() + 10)

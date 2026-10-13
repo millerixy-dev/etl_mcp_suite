@@ -165,3 +165,111 @@ reason and direct IDs use `direct_ids` independent of truncated projection.
 `chflags nohidden .venv/lib/python3.12/site-packages/_editable_impl_hive_cli_mcp_stdio.pth`
 in the same shell before uv to repair runtime path discovery. Commit only scoped
 implementation/tests/plan/report and report RED/GREEN evidence; no checkbox ledger.
+
+## Task 2.2 — direct query micro-plan (delegated inline execution)
+
+Scope: modify `src/mcp_stdio/plugins/spark/inspection.py` and
+`tests/unit/plugins/spark/test_inspection.py`; retain shared helpers and reader.
+Produces `query(request: QueryRequest, *, deadline: float) -> SparkEventQueryResult`.
+Consumes `reader.read(request, visitor, deadline=deadline) -> VerifiedScan`,
+`direct_ids`, `task_reason`, `event_details`. No source/DSL/index or task ledger edits.
+
+1. RED: add parametrized direct zero IDs, stage-attempt, SQL JobStart properties,
+list OR / field AND, missing IDs, UNKNOWN/vendor types, complete pagination counts,
+rare FetchFailed, reason top-32, bounded ref rereads, corrupt digest/tail and shared
+cancellation tests. The concrete test body is committed in `test_inspection.py`.
+Run `uv run --locked pytest tests/unit/plugins/spark/test_inspection.py`;
+expected missing query AttributeError (observed 21 failures / 15 existing passes).
+2. GREEN: implement only the query below. Match all semantic filters before counters;
+keep a bounded projection page, count later eligible matches for the cursor, bind
+verified digest after EOF. Track both result task types in shared close.
+
+```python
+    async def query(self, request: QueryRequest, *, deadline: float) -> SparkEventQueryResult:
+        if self._closed:
+            raise asyncio.CancelledError
+        worker = asyncio.create_task(self._query(request, deadline=deadline))
+        self._active.add(worker)
+        try:
+            return await worker
+        finally:
+            self._active.discard(worker)
+
+    async def _query(self, request: QueryRequest, *, deadline: float) -> SparkEventQueryResult:
+        reasons: Counter[str] = Counter()
+        entries: list[SparkEventEvidence] = []
+        matched = eligible = 0
+        id_filters = {
+            field: value
+            for field in (
+                "execution_id",
+                "job_id",
+                "stage_id",
+                "stage_attempt_id",
+                "task_id",
+                "executor_id",
+            )
+            if (value := getattr(request, field)) is not None
+        }
+
+        def visit(line: int, event: dict[str, object]) -> None:
+            nonlocal matched, eligible
+            name = str(event["Event"])
+            if request.event_types is not None and name not in request.event_types:
+                return
+            if request.lines is not None and line not in request.lines:
+                return
+            ids = direct_ids(event)
+            if any(getattr(ids, field) != value for field, value in id_filters.items()):
+                return
+            reason = task_reason(event)[0] if name == "SparkListenerTaskEnd" else None
+            if request.task_end_reason is not None and reason != request.task_end_reason:
+                return
+            matched += 1
+            if reason is not None:
+                reasons[reason] += 1
+            if line <= request.after_line:
+                return
+            eligible += 1
+            if len(entries) >= request.limit:
+                return
+            details, truncated = event_details(event, self._secrets, request.max_detail_chars)
+            entries.append(
+                SparkEventEvidence(
+                    ref=SparkEventRef(sha256="0" * 64, line=line),
+                    event_type=name,
+                    ids=ids,
+                    details=details,
+                    details_truncated=truncated,
+                )
+            )
+
+        scan = await self._reader.read(request, visit, deadline=deadline)
+        events = tuple(
+            entry.model_copy(
+                update={"ref": SparkEventRef(sha256=scan.snapshot.sha256, line=entry.ref.line)}
+            )
+            for entry in entries
+        )
+        return SparkEventQueryResult(
+            snapshot=scan.snapshot,
+            matched_count=matched,
+            task_end_count=sum(reasons.values()),
+            task_end_reasons=_reason_counts(reasons),
+            reasons_omitted=max(0, len(reasons) - 32),
+            events=events,
+            returned_count=len(events),
+            next_after_line=events[-1].ref.line if eligible > len(events) and events else None,
+            coverage=scan.coverage,
+        )
+
+```
+
+3. REFACTOR: preserve direct ID helper; share `_reason_counts(Counter[str])`
+for inspect/query top-32 sorting without generic aggregation; use typed Awaitable
+cast only at shared gather boundary. Format touched files without unrelated edits.
+4. Verify (precede uv calls with `chflags nohidden .venv/lib/python3.12/site-packages/_editable_impl_hive_cli_mcp_stdio.pth`):
+`uv run --locked pytest tests/unit/plugins/spark/test_inspection.py`;
+`uv run --locked ruff check src/mcp_stdio/plugins/spark/inspection.py tests/unit/plugins/spark/test_inspection.py`;
+`uv run --locked pyright src/mcp_stdio/plugins/spark/inspection.py tests/unit/plugins/spark/test_inspection.py`.
+Expected 36 passing tests and zero static diagnostics. Record report and scoped commit.
