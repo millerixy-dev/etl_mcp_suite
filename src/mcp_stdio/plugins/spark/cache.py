@@ -21,7 +21,7 @@ from pydantic import ValidationError
 
 from mcp_stdio.core.config import ConfigError
 from mcp_stdio.core.errors import ErrorCategory
-from mcp_stdio.plugins.spark.config import SparkSecrets, SparkSettings
+from mcp_stdio.plugins.spark.config import SparkSecrets, SparkSettings, validate_auth
 from mcp_stdio.plugins.spark.files import checkpoint, credential_values, process_archive
 from mcp_stdio.plugins.spark.gateway import SparkGatewayError, spark_error
 from mcp_stdio.plugins.spark.http_client import SparkHttpClient
@@ -93,16 +93,14 @@ class SparkEventLogAdapter:
         secrets: SparkSecrets,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
+        validate_auth(settings, secrets)
         self._settings = settings
         self._root = Path(settings.cache_dir)
         self._lock_fd: int | None = None
         self._closed = False
         self._download_lock = asyncio.Lock()
         self._acquisitions: set[asyncio.Task[SparkEventLogFetchResult]] = set()
-        cookie = secrets.gateway_cookie
-        self._secret_values = credential_values(
-            (cookie.get_secret_value(),) if cookie is not None else ()
-        )
+        self._secret_values = credential_values(secrets.redaction_values)
         try:
             if os.name != "posix":
                 raise ValueError("POSIX required")
@@ -235,7 +233,10 @@ class SparkEventLogAdapter:
             staging = Path(tempfile.mkdtemp(prefix=".part-", dir=self._root))
             try:
                 archive = staging / "archive.zip"
-                await self._http.receive(application_id, attempt_id, archive, deadline=deadline)
+                acquired = await self._http.receive(
+                    application_id, attempt_id, archive, deadline=deadline
+                )
+                secret_values = credential_values(self._secret_values + acquired)
                 files = await process_archive(
                     archive,
                     staging,
@@ -243,7 +244,7 @@ class SparkEventLogAdapter:
                     attempt_id=attempt_id,
                     max_bytes=self._settings.max_bytes,
                     deadline=deadline,
-                    secret_values=self._secret_values,
+                    secret_values=secret_values,
                 )
                 result = SparkEventLogFetchResult(
                     application_id=application_id,
@@ -266,7 +267,7 @@ class SparkEventLogAdapter:
                     staging / "manifest.json",
                     result,
                     self._settings.history_server_url,
-                    self._secret_values,
+                    secret_values,
                 )
                 os.unlink(archive)
                 os.rename(staging, final)

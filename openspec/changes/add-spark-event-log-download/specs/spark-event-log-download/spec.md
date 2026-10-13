@@ -23,7 +23,7 @@ The Spark plugin SHALL expose exactly `fetch_spark_event_log(application_id: str
 - **THEN** it rejects the request before network/file mutation, using shared ToolError category INVALID_INPUT for application-level failures
 
 ### Requirement: Download only from the configured trusted HTTPS endpoint
-The tool SHALL use only the documented Spark History Server GET paths in design.md, preserving the configured mount. Existing optional gateway Cookie credentials SHALL come from environment variables. TLS verification SHALL default to enabled with default trust or a configured trusted CA. Deployment settings MAY explicitly set strict boolean verify_tls=false (SPARK_VERIFY_TLS=false) to disable certificate and hostname verification; this MUST NOT be a tool argument. A configured CA file SHALL still be locally validated but SHALL NOT be used for connections when verification is disabled. The client MUST NOT follow redirects, inherit ambient proxy/CA overrides, extract browser credentials, log in, refresh cookies or automatically retry. HTTP 200 HTML login responses, 401 and redirects SHALL map to AUTHENTICATION_FAILED without exposing bodies or headers.
+The tool SHALL use only the documented Spark History Server GET paths in design.md, preserving the configured mount. Existing optional gateway Cookie credentials SHALL come from environment variables. TLS verification SHALL default to enabled with default trust or a configured trusted CA. Deployment settings MAY explicitly set strict boolean verify_tls=false (SPARK_VERIFY_TLS=false) to disable certificate and hostname verification; this MUST NOT be a tool argument. A configured CA file SHALL still be locally validated but SHALL NOT be used for connections when verification is disabled. The client MUST NOT follow redirects, inherit ambient proxy/CA overrides, extract browser credentials, perform unconfigured login, automatically refresh credentials or retry. For the download GET, HTTP 200 HTML login responses, 401 and redirects SHALL map to AUTHENTICATION_FAILED without exposing bodies or headers.
 
 #### Scenario: Use the gateway mount and environment Cookie
 - **GIVEN** a configured HTTPS gateway prefix and an environment-provided Cookie
@@ -129,3 +129,32 @@ Failures SHALL use the shared ToolError fields/categories and operation fetch_sp
 - **GIVEN** a locally configured Spark process
 - **WHEN** tools are listed and success/cache/error calls are made
 - **THEN** only fetch_spark_event_log is exposed and stdout remains protocol-only with redacted stderr diagnostics
+
+
+### Requirement: Authenticate through configured Knox Basic login
+The plugin SHALL support optional paired environment secrets username/password and a same-origin HTTPS knox_sso_url, mutually exclusive with gateway_cookie. Invalid combinations SHALL fail locally with CONFIG_ERROR. Before each actual download it SHALL POST an empty body to the configured SSO endpoint, passing encoded originalUrl and HTTP Basic credentials, and use only applicable response cookies for the download GET. Basic Authorization MUST NOT reach download or redirected endpoints. Login and download SHALL share the deadline and TLS settings; no redirects, retries, or persistent cookie storage are allowed. Login status/cookie checks and safe errors SHALL follow design.md; a valid event-log archive is required for final success. Response cookies SHALL be cleared on all receive exits; credential and acquired cookie values SHALL be excluded from saved evidence, results and diagnostics.
+
+#### Scenario: Exchange Basic credentials and download
+- **GIVEN** valid paired credentials and same-origin SSO configuration
+- **WHEN** a network download is needed
+- **THEN** one Basic-authenticated POST obtains cookies, followed by one cookie-authenticated GET without Basic Authorization, producing SparkEventLogFetchResult only after archive validation
+
+#### Scenario: Reject invalid authentication configuration locally
+- **GIVEN** partial credentials, both authentication modes, missing SSO endpoint or a foreign-origin endpoint
+- **WHEN** plugin startup validates configuration
+- **THEN** CONFIG_ERROR occurs without network access or leaked credentials
+
+#### Scenario: Reject unsuccessful login without retry
+- **GIVEN** login returns 401, or lacks a cookie applicable to the download URL
+- **WHEN** login validation runs
+- **THEN** AUTHENTICATION_FAILED is returned, no download or redirect occurs and temporary cookies are cleared
+
+#### Scenario: Keep acquired credentials out of evidence
+- **GIVEN** event text contains the configured password, Basic encoding or acquired cookie values
+- **WHEN** downloaded events are processed
+- **THEN** saved JSONL, manifest and SparkEventLogFetchResult omit those values
+
+#### Scenario: Cache reuse avoids authentication
+- **GIVEN** matching valid local evidence and Basic credentials
+- **WHEN** refresh=false produces a cache hit
+- **THEN** SparkEventLogFetchResult is returned without login or download requests

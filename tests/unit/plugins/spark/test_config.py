@@ -151,3 +151,21 @@ def test_explicit_env_disables_tls_verification(tmp_path: Path) -> None:
         },
     )
     assert loaded.settings.verify_tls is False
+
+
+@pytest.mark.parametrize("suffix", ["yaml", "json"])
+def test_documented_basic_example(tmp_path: Path, suffix: str) -> None:
+    path = Path(__file__).parents[4] / "docs" / "examples" / f"spark-basic.{suffix}"
+    loaded = _load(
+        path,
+        {
+            "SPARK_CACHE_DIR": str(tmp_path),
+            "SPARK_USERNAME": "synthetic-user",
+            "SPARK_PASSWORD": "synthetic-password",
+        },
+    )
+    assert loaded.settings.knox_sso_url is not None
+    assert loaded.secrets.gateway_cookie is None
+    assert loaded.secrets.username is not None
+    assert loaded.secrets.password is not None
+    assert "synthetic-password" not in repr(loaded)

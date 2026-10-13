@@ -34,25 +34,37 @@ def handler(request):
     calls.append(request.url.path)
     if sys.argv[2] == "cache":
         raise AssertionError("cache hit made an HTTP request")
+    if request.method == "POST":
+        assert request.headers.get("Authorization", "").startswith("Basic ")
+        return httpx.Response(200, headers={
+            "Set-Cookie": "hadoop-jwt=synthetic-issued; Path=/; Secure"})
+    assert "Authorization" not in request.headers
+    if sys.argv[3] == "basic":
+        assert request.headers["Cookie"] == "hadoop-jwt=synthetic-issued"
     return httpx.Response(404 if sys.argv[2] == "error" else 200,
                          stream=Stream([archive_bytes()]))
 def factory(**kwargs):
     return SparkEventLogAdapter(**kwargs, transport=httpx.MockTransport(handler))
 with patch("mcp_stdio.plugins.spark.plugin.SparkEventLogAdapter", side_effect=factory):
-    runtime = PLUGIN_DEFINITION.create_runtime(None, environ={
+    env = {
         "SPARK_HISTORY_SERVER_URL": "https://history.example",
         "SPARK_CACHE_DIR": sys.argv[1],
         "SPARK_GATEWAY_COOKIE": "session=synthetic-cookie",
-    })
+    }
+    if sys.argv[3] == "basic":
+        del env["SPARK_GATEWAY_COOKIE"]
+        env.update(SPARK_USERNAME="synthetic-user", SPARK_PASSWORD="synthetic-password",
+                   SPARK_KNOX_SSO_URL="https://history.example/gateway/knoxsso/api/v1/websso")
+    runtime = PLUGIN_DEFINITION.create_runtime(None, environ=env)
 configure_logging(debug=True, secret_values=runtime.redaction_values)
 StdioMcpServer(runtime).run()
 print("CLEANUP " + json.dumps({"requests": len(calls)}), file=sys.stderr)
 """
 
 
-def _session(root: Path, outcome: str) -> dict[str, Any]:
+def _session(root: Path, outcome: str, auth: str = "cookie") -> dict[str, Any]:
     process = subprocess.Popen(
-        [sys.executable, "-c", _DRIVER, str(root), outcome],
+        [sys.executable, "-c", _DRIVER, str(root), outcome, auth],
         cwd=PROJECT_ROOT,
         env={
             **os.environ,
@@ -91,13 +103,14 @@ def _session(root: Path, outcome: str) -> dict[str, Any]:
         stdout, stderr = process.communicate(timeout=10)
         assert process.returncode == 0, stderr
         assert stdout == ""
-        assert "synthetic-cookie" not in json.dumps(messages) + stderr
+        for value in ("synthetic-cookie", "synthetic-password", "synthetic-issued"):
+            assert value not in json.dumps(messages) + stderr
         cleanup = [
             json.loads(line.removeprefix("CLEANUP "))
             for line in stderr.splitlines()
             if line.startswith("CLEANUP ")
         ]
-        assert cleanup == [{"requests": 0 if outcome == "cache" else 1}]
+        assert cleanup == [{"requests": 0 if outcome == "cache" else (2 if auth == "basic" else 1)}]
         return reply["result"]
     finally:
         if process.poll() is None:
@@ -127,3 +140,12 @@ def test_stdio_failure_is_safe_and_leaves_no_staging(tmp_path: Path) -> None:
     assert "NOT_FOUND" in failed["content"][0]["text"]
     assert not list(root.glob(".part-*"))
     assert not list(root.rglob("manifest.json"))
+
+
+def test_basic_stdio_exchange_then_cross_process_cache(tmp_path: Path) -> None:
+    root = tmp_path / "l3"
+    first = _session(root, "success", "basic")
+    assert not first.get("isError", False)
+    hit = _session(root, "cache", "basic")
+    assert not hit.get("isError", False)
+    assert json.loads(hit["content"][0]["text"])["cache_hit"]

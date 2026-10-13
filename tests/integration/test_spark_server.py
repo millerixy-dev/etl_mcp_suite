@@ -16,14 +16,18 @@ _REQUIRED = (
     "MCP_STDIO_SPARK_APPLICATION_ID",
     "SPARK_HISTORY_SERVER_URL",
     "SPARK_CACHE_DIR",
-    "SPARK_GATEWAY_COOKIE",
 )
 
 
 @pytest.mark.integration
 async def test_spark_download() -> None:
-    if os.environ.get("MCP_STDIO_SPARK_INTEGRATION") != "1" or not all(
-        os.environ.get(name) for name in _REQUIRED
+    has_auth = bool(os.environ.get("SPARK_GATEWAY_COOKIE")) or all(
+        os.environ.get(name) for name in ("SPARK_USERNAME", "SPARK_PASSWORD", "SPARK_KNOX_SSO_URL")
+    )
+    if (
+        os.environ.get("MCP_STDIO_SPARK_INTEGRATION") != "1"
+        or not all(os.environ.get(name) for name in _REQUIRED)
+        or not has_auth
     ):
         pytest.skip("requires explicit Spark integration opt-in and deployment settings")
     loaded = load_config(

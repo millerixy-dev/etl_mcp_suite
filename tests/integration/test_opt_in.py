@@ -149,3 +149,34 @@ async def test_spark_missing_opt_in_constructs_no_gateway(monkeypatch, missing):
     monkeypatch.setattr(live, "SparkEventLogAdapter", _forbidden_gateway, raising=False)
     with pytest.raises(pytest.skip.Exception):
         await live.test_spark_download()
+
+
+async def test_spark_basic_opt_in_reaches_gateway(monkeypatch, tmp_path):
+    from tests.integration import test_spark_server as live
+
+    for key in ("SPARK_GATEWAY_COOKIE", "SPARK_CA_BUNDLE_PATH"):
+        monkeypatch.delenv(key, raising=False)
+    for key, value in {
+        "MCP_STDIO_SPARK_INTEGRATION": "1",
+        "MCP_STDIO_SPARK_APPLICATION_ID": "application_1_42",
+        "SPARK_HISTORY_SERVER_URL": "https://history.example.invalid",
+        "SPARK_KNOX_SSO_URL": "https://history.example.invalid/gateway/knoxsso/api/v1/websso",
+        "SPARK_CACHE_DIR": str(tmp_path),
+        "SPARK_USERNAME": "synthetic-user",
+        "SPARK_PASSWORD": "synthetic-password",
+    }.items():
+        monkeypatch.setenv(key, value)
+
+    class ReachedGateway(Exception):
+        pass
+
+    def capture(**kwargs):
+        assert kwargs["secrets"].password.get_secret_value() == "synthetic-password"
+        raise ReachedGateway()
+
+    monkeypatch.setattr(live, "SparkEventLogAdapter", capture)
+    with pytest.raises(ReachedGateway):
+        try:
+            await live.test_spark_download()
+        except pytest.skip.Exception:
+            pytest.fail("complete Basic configuration must pass the opt-in gate")

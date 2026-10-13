@@ -617,6 +617,7 @@ Tool arguments cannot specify URLs, output paths, credentials or TLS settings.
 | history_server_url | required | HTTPS root including the gateway mount, without `/api/v1`, credentials or query |
 | cache_dir | required | Absolute dedicated local directory; POSIX macOS/Linux |
 | verify_tls | true | Set false explicitly to skip certificate and hostname verification |
+| knox_sso_url | null | Same-origin HTTPS Knox SSO endpoint, required with username/password |
 | ca_bundle_path | null | Optional readable trusted PEM CA for private certificates |
 | request_timeout_seconds | 300 | Whole-call budget, including lookup, queueing and processing (maximum 900) |
 | max_bytes | 268435456 | Independently bounds ZIP bytes, expanded input and output JSONL totals |
@@ -627,7 +628,7 @@ only its environment-variable name. Anonymous deployments may omit the secret re
 Verification is enabled by default. For an explicitly trusted self-signed deployment, set
 `SPARK_VERIFY_TLS=false` (or YAML `verify_tls: false`) and restart the MCP process.
 This disables server identity verification; HTTPS encryption remains. A configured CA is
-still validated locally but is not used when verification is disabled. The tool does not log in.
+still validated locally but is not used when verification is disabled. Cookie mode does not log in.
 
 ```sh
 uv run --locked mcp-stdio --plugin spark --config docs/examples/spark.yaml
@@ -644,8 +645,30 @@ export SPARK_CA_BUNDLE_PATH='/etc/mcp/spark-ca.pem'
 uv run --locked mcp-stdio --plugin spark
 ```
 
+For Knox username/password authentication, use [spark-basic.yaml](docs/examples/spark-basic.yaml)
+or [spark-basic.json](docs/examples/spark-basic.json). Inject `SPARK_USERNAME` and
+`SPARK_PASSWORD` through the host's protected environment; do not set `SPARK_GATEWAY_COOKIE`
+at the same time. Credentials must be paired, and `SPARK_KNOX_SSO_URL` is required:
+
+```sh
+export SPARK_HISTORY_SERVER_URL='https://history.example.invalid:8443/gateway/analytics/sparkhistory'
+export SPARK_KNOX_SSO_URL='https://history.example.invalid:8443/gateway/knoxsso/api/v1/websso'
+export SPARK_CACHE_DIR='/var/tmp/mcp-spark-l3'
+# SPARK_USERNAME and SPARK_PASSWORD are already securely injected.
+uv run --locked mcp-stdio --plugin spark
+# Or use --config docs/examples/spark-basic.yaml.
+```
+
+Before each network download, the adapter sends one empty POST with Basic Authorization to
+the configured SSO endpoint and obtains scoped cookies. Only that POST receives the password;
+the download GET uses cookies. It never follows redirects or retries failed logins. Both
+requests share the call deadline. Cookies stay in memory for that acquisition, are cleared
+on all receive exits, and are included in credential redaction before publishing evidence.
+Cache hits make no login request. The plugin does not automatically read personal credential
+files. This exchange follows [Knox SSO](https://apache.github.io/knox/config_knox_sso/).
+
 For an MCP host, point to the installed release entry point described above and pass the
-Cookie through the host's protected environment:
+selected credentials through the host's protected environment:
 
 ```json
 {
@@ -690,7 +713,7 @@ a force-killed process may leave ignored `.part-*` directories for manual cleanu
 
 Live download is opt-in: supply `MCP_STDIO_SPARK_INTEGRATION=1`,
 `MCP_STDIO_SPARK_APPLICATION_ID`, optional `MCP_STDIO_SPARK_ATTEMPT_ID`, and the SPARK
-URL/cache/Cookie/CA deployment environment, then run:
+URL/cache/CA deployment environment plus either Cookie or paired username/password and SSO URL, then run:
 
 ```sh
 uv run --locked pytest -m integration tests/integration/test_spark_server.py

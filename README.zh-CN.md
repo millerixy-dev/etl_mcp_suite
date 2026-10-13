@@ -551,6 +551,7 @@ Spark 只暴露 `fetch_spark_event_log(application_id, attempt_id=None, refresh=
 | history_server_url | 必填 | HTTPS 根地址，保留网关路径，不带 `/api/v1`、凭据或 query |
 | cache_dir | 必填 | 绝对专用本地目录；支持 POSIX macOS/Linux |
 | verify_tls | true | 显式设为 false 时跳过证书和主机名校验 |
+| knox_sso_url | null | 同域 HTTPS Knox SSO 地址，使用用户名密码时必填 |
 | ca_bundle_path | null | 私有证书所需的可信可读 PEM CA |
 | request_timeout_seconds | 300 | 整个调用含查缓存、排队和处理的时间预算，最多 900 秒 |
 | max_bytes | 268435456 | 分别限制 ZIP、展开源文件总量和输出 JSONL 总量 |
@@ -560,11 +561,30 @@ Spark 只暴露 `fetch_spark_event_log(application_id, attempt_id=None, refresh=
 匿名部署可以省略 secret 引用。默认校验证书；如明确需要跳过，可设置
 `export SPARK_VERIFY_TLS=false`（或 YAML `verify_tls: false`），然后重启 MCP 进程。
 此时 HTTPS 仍加密，但不验证服务器身份；已配置的 CA 仍须通过本地校验，连接时不使用。
-工具不会自动登录。
+Cookie 模式不发起登录。
 
 ```sh
 uv run --locked mcp-stdio --plugin spark --config docs/examples/spark.yaml
 ```
+
+用户名密码方式使用 [spark-basic.yaml](docs/examples/spark-basic.yaml) 或
+[spark-basic.json](docs/examples/spark-basic.json)。通过环境注入 `SPARK_USERNAME` 和
+`SPARK_PASSWORD`，同时配置 `SPARK_KNOX_SSO_URL`；不能再设置 `SPARK_GATEWAY_COOKIE`。
+SSO 地址必须与 History Server 同域、同协议、同端口。
+
+```sh
+export SPARK_HISTORY_SERVER_URL='https://history.example.invalid:8443/gateway/analytics/sparkhistory'
+export SPARK_KNOX_SSO_URL='https://history.example.invalid:8443/gateway/knoxsso/api/v1/websso'
+export SPARK_CACHE_DIR='/var/tmp/mcp-spark-l3'
+# SPARK_USERNAME / SPARK_PASSWORD 已通过安全环境注入。
+uv run --locked mcp-stdio --plugin spark
+# 文件模式：uv run --locked mcp-stdio --plugin spark --config docs/examples/spark-basic.yaml
+```
+
+每次实际下载前发一次携带 Basic Authorization 的空 body POST，换取 Cookie；下载 GET
+只携带 Cookie。登录和下载共享超时预算，不跟随重定向、不重试失败密码。Cookie 只在
+内存中使用，接收结束即清空 Cookie jar，并将本次 Cookie 值纳入落盘前脱敏。
+缓存命中不登录，插件不自动读取个人凭据文件。协议依据：[Knox SSO](https://apache.github.io/knox/config_knox_sso/)。
 
 只用环境变量启动：
 
@@ -618,7 +638,7 @@ JSONL 在下载后的校验/脱敏阶段生成于私有暂存目录。全部成�
 
 真实下载测试需要显式设置 `MCP_STDIO_SPARK_INTEGRATION=1`、
 `MCP_STDIO_SPARK_APPLICATION_ID`、可选 `MCP_STDIO_SPARK_ATTEMPT_ID` 和
-SPARK URL/cache/Cookie/CA 部署环境，再运行：
+SPARK URL/cache/CA 部署环境，以及 Cookie 或用户名密码和 SSO 地址，再运行：
 
 ```sh
 uv run --locked pytest -m integration tests/integration/test_spark_server.py

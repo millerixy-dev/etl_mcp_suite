@@ -211,3 +211,19 @@ Produces: strict boolean `verify_tls: bool = True`, env SPARK_VERIFY_TLS; no too
 4. Fresh verification: `uv sync --locked`; `PYTHONPATH=src uv run --locked pytest`; `uv run --locked ruff check .`; `uv run --locked pyright`; `uv build`; `PYTHONPATH=src uv run --locked mcp-stdio --help`; strict OpenSpec change/changes/specs validation. Real MCP stdio call with deployment env SPARK_VERIFY_TLS=false, refresh=true; report authentication result without exposing raw response or credentials.
 5. Gate task only after required checks and docs pass; record real download outcome separately in verification.md. Commit scoped files with `git commit -m "feat(spark): allow explicit TLS verification opt-out"`.
 Self-review: default verification, opt-out, file/env validation, unchanged MCP input and redirection covered. No unresolved design gaps.
+
+
+## Task 6.1 — Knox Basic credential exchange
+
+Mode: serial inline executing-plans; shared auth/redaction contract requires coupled work.
+Files: src/mcp_stdio/plugins/spark/{config,http_client,cache,plugin}.py; tests/unit/plugins/spark/{test_config,test_knox_auth}.py; tests/contract/test_spark_stdio.py; tests/integration/{test_spark_server,test_opt_in}.py; README.md, README.zh-CN.md, docs/examples/spark-basic.{yaml,json}, docs/architecture/{modules,runtime-flow}.md.
+Consumes: existing receive(app, attempt, destination, deadline) and process_archive(secret_values).
+Produces: settings.knox_sso_url; secrets.username/password and redaction_values; receive returns tuple of acquired cookie secrets for per-download redaction.
+
+1. Add failing tests with synthetic Basic credentials: partial/mixed/foreign-origin config rejection; one empty POST with Basic then GET with scoped cookie and no Authorization; login rejection/timeout/cancel cleanup; acquired token redaction and cache hit no login. Run `PYTHONPATH=src uv run --locked pytest tests/unit/plugins/spark -q`; expect absent fields/behavior failures before production edits.
+2. Config: `knox_sso_url: str | None = None`, `username: SecretStr | None = None`, `password: SecretStr | None = None`; validators enforce spec and `validate_auth(settings,secrets)` is called before root lock acquisition. Include username/password and base64(username:password) in redaction_values.
+3. HTTP: before GET, `async with client.stream("POST", sso_url, params={"originalUrl": history_url + "/"}, auth=httpx.BasicAuth(username,password), content=b"", timeout=remaining)`; check status and scoped Cookie header through client.build_request, close unread response. GET uses client Cookie jar, never Basic. In finally clear cookies. Return cookie-value tuple to cache processing; no token persistence or retries. Run focused tests; expect PASS.
+4. Cache/plugin: reuse secrets.redaction_values, merge receive tuple into local per-download redaction values for process_archive and manifest, without accumulating credentials across calls. Add stdio contract path and gate Basic opt-in. Run affected tests, then full suite.
+5. Sync docs with both auth modes. Run `uv sync --locked`, `PYTHONPATH=src uv run --locked pytest -q`, `uv run --locked ruff check .`, `uv run --locked pyright`, `uv build`, console smoke, `openspec validate add-spark-event-log-download --strict`, `openspec validate --changes --strict`, `openspec validate --specs --strict`. Read-only task review; final fresh verification after fixes. Live authentication uses user-authorized file only via private memory/env and prints safe metadata.
+6. Record verification, gate task, scoped commit `feat(spark): authenticate through Knox Basic login`.
+Self-review: one tool, no new dependency, no generic login framework, no personal path in production, no credential output, bounded lifecycle with existing deadline.

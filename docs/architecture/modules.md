@@ -292,7 +292,7 @@ The configured status path is deployment input, not MCP caller input.
 
 ## Spark Module Responsibilities
 
-- config.py owns six settings (including default-on verify_tls) and the optional environment Cookie reference.
+- config.py owns seven settings (including default-on verify_tls and same-origin knox_sso_url) and environment Cookie or paired username/password references.
 - models.py owns strict FetchRequest and immutable file/fetch results; gateway.py owns lookup/download/close and safe errors.
 - service.py validates requests and decides reuse versus refresh under one deadline.
 - http_client.py performs one lazy, bounded verified HTTPS GET; files.py validates ZIP/JSONL identities, redacts records and computes digests.
@@ -353,3 +353,7 @@ Required structural checks include:
 ## Adding Future Behavior
 
 New tools, authentication modes, transports, third-party plugins, or generic endpoint/query features require a new or updated OpenSpec change before code is modified. The change must update capability specs first, then this document if module boundaries or dependency direction change.
+
+Spark HTTP owns the optional Knox Basic-to-Cookie exchange. Only the SSO POST receives
+Basic Authorization; the download GET receives scoped cookies. Acquired cookie values
+are returned as private per-acquisition redaction context to the cache adapter, not as MCP data.

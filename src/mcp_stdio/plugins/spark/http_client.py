@@ -12,7 +12,7 @@ import httpx
 
 from mcp_stdio.core.errors import ErrorCategory
 from mcp_stdio.core.logging import suppress_http_transport_logging
-from mcp_stdio.plugins.spark.config import SparkSecrets, SparkSettings
+from mcp_stdio.plugins.spark.config import SparkSecrets, SparkSettings, validate_auth
 from mcp_stdio.plugins.spark.gateway import spark_error
 from mcp_stdio.plugins.spark.models import FetchRequest
 
@@ -25,6 +25,7 @@ class SparkHttpClient:
         secrets: SparkSecrets,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
+        validate_auth(settings, secrets)
         self._settings = settings
         self._secrets = secrets
         self._transport = transport
@@ -51,13 +52,13 @@ class SparkHttpClient:
 
     async def receive(
         self, application_id: str, attempt_id: str | None, destination: Path, *, deadline: float
-    ) -> None:
+    ) -> tuple[str, ...]:
         FetchRequest(application_id=application_id, attempt_id=attempt_id)
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise spark_error(ErrorCategory.TIMEOUT, retryable=True)
         try:
-            await asyncio.wait_for(
+            return await asyncio.wait_for(
                 self._receive(application_id, attempt_id, destination, deadline),
                 timeout=remaining,
             )
@@ -83,7 +84,7 @@ class SparkHttpClient:
 
     async def _receive(
         self, application_id: str, attempt_id: str | None, destination: Path, deadline: float
-    ) -> None:
+    ) -> tuple[str, ...]:
         client = self._ensure_client()
         suffix = f"/{attempt_id}/logs" if attempt_id is not None else "/logs"
         url = self._settings.history_server_url + f"/api/v1/applications/{application_id}" + suffix
@@ -93,6 +94,8 @@ class SparkHttpClient:
         created = False
         complete = False
         try:
+            await self._login(client, url, deadline)
+            acquired = tuple(cookie.value for cookie in client.cookies.jar if cookie.value)
             async with client.stream(
                 "GET", url, headers=headers, timeout=max(0.001, deadline - time.monotonic())
             ) as response:
@@ -145,6 +148,9 @@ class SparkHttpClient:
                 if not prefix.startswith(b"PK\x03\x04"):
                     raise spark_error(ErrorCategory.UNEXPECTED_RESPONSE)
                 complete = True
+                return acquired + tuple(
+                    cookie.value for cookie in client.cookies.jar if cookie.value
+                )
         finally:
             client.cookies.clear()
             if created and not complete:
@@ -153,9 +159,35 @@ class SparkHttpClient:
                 except FileNotFoundError:
                     pass
 
+    async def _login(self, client: httpx.AsyncClient, download_url: str, deadline: float) -> None:
+        username, password = self._secrets.username, self._secrets.password
+        if username is None or password is None or self._settings.knox_sso_url is None:
+            return
+        client.cookies.clear()
+        async with client.stream(
+            "POST",
+            self._settings.knox_sso_url,
+            params={"originalUrl": self._settings.history_server_url + "/"},
+            auth=httpx.BasicAuth(username.get_secret_value(), password.get_secret_value()),
+            content=b"",
+            timeout=max(0.001, deadline - time.monotonic()),
+        ) as response:
+            status = response.status_code
+            if status not in {200, 204, 302, 303, 307, 308}:
+                if status == 401 or 300 <= status < 400:
+                    category = ErrorCategory.AUTHENTICATION_FAILED
+                elif status == 403:
+                    category = ErrorCategory.PERMISSION_DENIED
+                else:
+                    category = ErrorCategory.UPSTREAM_ERROR
+                raise spark_error(category, retryable=status == 429 or status >= 500)
+            if not client.build_request("GET", download_url).headers.get("Cookie"):
+                raise spark_error(ErrorCategory.AUTHENTICATION_FAILED)
+
     async def close(self) -> None:
         if self._closed:
             return
         self._closed = True
         if self._client is not None:
+            self._client.cookies.clear()
             await self._client.aclose()

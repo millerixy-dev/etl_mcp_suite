@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
+import base64
 import os
 import ssl
 from pathlib import Path
 from typing import Annotated
 from urllib.parse import unquote, urlsplit
 
-from pydantic import ConfigDict, Field, SecretStr, field_validator
+from pydantic import ConfigDict, Field, SecretStr, field_validator, model_validator
 
-from mcp_stdio.core.config import SecretConfigModel, StrictConfigModel
+from mcp_stdio.core.config import ConfigError, SecretConfigModel, StrictConfigModel
 
 
 class SparkSettings(StrictConfigModel):
@@ -18,6 +19,7 @@ class SparkSettings(StrictConfigModel):
     history_server_url: str
     cache_dir: str
     verify_tls: bool = True
+    knox_sso_url: str | None = None
     ca_bundle_path: str | None = None
     request_timeout_seconds: Annotated[float, Field(gt=0, le=900)] = 300.0
     max_bytes: Annotated[int, Field(ge=1, le=1_073_741_824)] = 268_435_456
@@ -79,9 +81,52 @@ class SparkSettings(StrictConfigModel):
                 raise ValueError("trusted CA bundle could not be loaded") from None
         return value
 
+    @field_validator("knox_sso_url")
+    @classmethod
+    def validate_sso_url(cls, value: str | None) -> str | None:
+        return cls.validate_url(value) if value is not None else None
+
+    @model_validator(mode="after")
+    def same_origin(self) -> SparkSettings:
+        if self.knox_sso_url is not None:
+            source, login = urlsplit(self.history_server_url), urlsplit(self.knox_sso_url)
+            if (source.hostname, source.port or 443) != (login.hostname, login.port or 443):
+                raise ValueError("Knox SSO must share the History Server origin")
+        return self
+
 
 class SparkSecrets(SecretConfigModel):
     gateway_cookie: SecretStr | None = None
+    username: SecretStr | None = None
+    password: SecretStr | None = None
+
+    @model_validator(mode="after")
+    def validate_basic(self) -> SparkSecrets:
+        if (self.username is None) != (self.password is None):
+            raise ValueError("username and password must be supplied together")
+        if self.username is not None:
+            if self.gateway_cookie is not None:
+                raise ValueError("Cookie and Basic credentials are mutually exclusive")
+            for value in (self.username, self.password):
+                if value is not None:
+                    raw = value.get_secret_value()
+                    if not raw.strip() or any(ord(c) < 32 or ord(c) == 127 for c in raw):
+                        raise ValueError("invalid Basic credentials")
+            if ":" in self.username.get_secret_value():
+                raise ValueError("Basic username cannot contain a colon")
+        return self
+
+    @property
+    def redaction_values(self) -> tuple[str, ...]:
+        values = tuple(
+            value.get_secret_value()
+            for value in (self.gateway_cookie, self.username, self.password)
+            if value is not None
+        )
+        if self.username is not None and self.password is not None:
+            pair = f"{self.username.get_secret_value()}:{self.password.get_secret_value()}"
+            values += (base64.b64encode(pair.encode("utf-8")).decode("ascii"),)
+        return values
 
     @field_validator("gateway_cookie")
     @classmethod
@@ -91,3 +136,8 @@ class SparkSecrets(SecretConfigModel):
             if not raw.strip() or any(c in raw for c in "\r\n\x00"):
                 raise ValueError("invalid gateway Cookie")
         return value
+
+
+def validate_auth(settings: SparkSettings, secrets: SparkSecrets) -> None:
+    if (settings.knox_sso_url is None) != (secrets.username is None):
+        raise ConfigError("Knox SSO URL and paired Basic credentials must be configured together")

@@ -63,8 +63,7 @@ def _create_runtime(config_path: Path | None, environ: Mapping[str, str] | None)
     service = SparkEventLogService(
         gateway=gateway, request_timeout_seconds=loaded.settings.request_timeout_seconds
     )
-    cookie = loaded.secrets.gateway_cookie
-    values = credential_values((cookie.get_secret_value(),) if cookie is not None else ())
+    values = credential_values(loaded.secrets.redaction_values)
     return SparkRuntime(SparkToolAdapter(service=service, secret_values=values), gateway, values)
 
 

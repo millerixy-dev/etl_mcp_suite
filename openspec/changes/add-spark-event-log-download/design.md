@@ -1,6 +1,6 @@
 ## Context
 
-动机见 proposal.md。现有运行器采用固定插件、严格配置、环境秘密引用与共享 ToolError。实际样例 ZIP 约 88 KB，展开约 1.2 MB、584 条事件，Spark 版本为 `2.4.7.7.1.7.1000-141`；用户的日志通常小于 100 MB。未登录客户端会收到 HTTP 200 HTML 登录页。自动工具消费环境注入的已有 Cookie，真实网关认证兼容性仍需 opt-in 验证。
+动机见 proposal.md。现有运行器采用固定插件、严格配置、环境秘密引用与共享 ToolError。实际样例 ZIP 约 88 KB，展开约 1.2 MB、584 条事件，Spark 版本为 `2.4.7.7.1.7.1000-141`；用户的日志通常小于 100 MB。未登录客户端会收到 HTTP 200 HTML 登录页。自动工具消费环境注入的 Cookie 或 Basic 凭据；2026-10-13 已通过实际 MCP 调用验证 Knox 登录、下载与缓存复用，详见 verification.md。
 
 ## Goals / Non-Goals
 
@@ -26,7 +26,7 @@ service 校验输入并通过 gateway 决定复用或下载，不依赖 HTTP、�
 | ApplicationStart/End | 身份来自 App ID / App Attempt ID；ApplicationEnd 不代表 YARN 最终状态 | [JsonProtocol](https://github.com/apache/spark/blob/v2.4.7/core/src/main/scala/org/apache/spark/util/JsonProtocol.scala) |
 | ZIP 与 HTTP | 公开 zipfile API 的成员读取/CRC；HTTPX streaming 与 TLS | [Python zipfile](https://docs.python.org/3.10/library/zipfile.html)、[HTTPX API](https://www.python-httpx.org/api/)、[HTTPX TLS](https://www.python-httpx.org/advanced/ssl/) |
 
-不实现私有网关登录 endpoint。只调用上述 GET，不额外查询 application listing 或猜测 latest attempt。
+支持用户确认的 Knox SSO Basic 登录协议（实际 login.html 的 knoxauth.js，2026-10-13 已检查）；[Knox 官方 SSO 文档](https://apache.github.io/knox/config_knox_sso/)描述 Basic 认证后签发 SSO Cookie。不查询 application listing 或猜测 latest attempt。
 
 ### 3. 配置与环境秘密
 
@@ -37,12 +37,15 @@ service 校验输入并通过 gateway 决定复用或下载，不依赖 HTTP、�
 | settings.history_server_url | string | — | HTTPS 绝对 URL，最多 2048 字符，无 userinfo/query/fragment；保留网关 mount | 是 |
 | settings.cache_dir | string | — | 最多 4096 字符的绝对专用本地目录，无控制字符，拒绝 symlink 根 | 是 |
 | settings.verify_tls | bool | true | false 显式跳过证书及主机名校验，仅部署配置 | 否 |
+| settings.knox_sso_url | string or null | null | 同 History Server origin 的 HTTPS SSO endpoint，无 query/fragment/userinfo，最多 2048 字符 | Basic 登录时是 |
 | settings.ca_bundle_path | string or null | null | 绝对可读可信 PEM CA 文件 | 否 |
 | settings.request_timeout_seconds | float | 300.0 | 大于 0 且至多 900 | 否 |
 | settings.max_bytes | int | 268435456 | 1–1073741824；分别限制 ZIP、展开源总量、输出 JSONL 总量 | 否 |
+| secrets.username | env reference / SecretStr or null | null | 与 password 成对，非空，无冒号/控制字符 | Basic 登录时是 |
+| secrets.password | env reference / SecretStr or null | null | 与 username 成对，非空，无控制字符 | Basic 登录时是 |
 | secrets.gateway_cookie | env reference / SecretStr or null | null | 文件只填环境变量名；解析出的 Cookie 非空且不含 CR/LF/NUL | 否 |
 
-这里包含六项 settings 加一项可选 secret，version/plugin 沿用运行器。无 instance_id、独立连接超时、TTL、总缓存容量或可调 ZIP 元数据参数。沿用未知字段拒绝和文件/env 验证；配置检查不访问网络。无 Cookie 时允许匿名部署，有网关认证的部署需注入 Cookie。
+这里包含七项 settings 和三项可选 secret，version/plugin 沿用运行器。无 instance_id、独立连接超时、TTL、总缓存容量或可调 ZIP 元数据参数。沿用未知字段拒绝和文件/env 验证；配置检查不访问网络。未配置认证时允许匿名部署；网关认证可注入 Cookie，或使用下面的 Basic 配置。
 
 文件示例：
 
@@ -74,10 +77,12 @@ uv run --locked mcp-stdio --plugin spark --config docs/examples/spark.yaml
 | SPARK_HISTORY_SERVER_URL | settings.history_server_url |
 | SPARK_CACHE_DIR | settings.cache_dir |
 | SPARK_VERIFY_TLS | settings.verify_tls |
-| SPARK_CA_BUNDLE_PATH | settings.verify_tls | bool | true | false 显式跳过证书及主机名校验，仅部署配置 | 否 |
-| settings.ca_bundle_path |
+| SPARK_CA_BUNDLE_PATH | settings.ca_bundle_path |
 | SPARK_REQUEST_TIMEOUT_SECONDS | settings.request_timeout_seconds |
 | SPARK_MAX_BYTES | settings.max_bytes |
+| SPARK_KNOX_SSO_URL | settings.knox_sso_url |
+| SPARK_USERNAME | secrets.username 的秘密值 |
+| SPARK_PASSWORD | secrets.password 的秘密值 |
 | SPARK_GATEWAY_COOKIE | secrets.gateway_cookie 的秘密值 |
 
 ```sh
@@ -90,6 +95,38 @@ uv run --locked mcp-stdio --plugin spark
 ```
 
 沿用 core 的优先级：文件值 → 通用 MCP_STDIO 覆盖 → SPARK 前缀覆盖；secret 始终保持私有。TLS 默认验证，私有 CA 用显式 SSLContext；固定 trust_env=False、follow_redirects=False，不消费环境代理或隐式 CA override。部署可通过 verify_tls=false / SPARK_VERIFY_TLS=false 显式关闭证书与主机名校验；此时 HTTPX verify=False，ca_bundle_path 不参与连接（如配置仍须通过本地 PEM 验证）。HTTPS、固定 origin、无跳转保持不变。无调用者 headers、URL、TLS 或 output-path 控制。
+
+### 3a. Knox Basic 登录
+
+匿名、显式 gateway_cookie、Basic 三种模式由配置确定：username/password 必须成对；不能与 gateway_cookie 同时设置；knox_sso_url 与 Basic 凭据同时存在，否则本地 CONFIG_ERROR。SSO URL 必须与 history_server_url 同 origin（scheme/host/effective port），沿用严格 URL 校验。无新依赖，无认证 MCP 工具，无磁盘 Cookie 文件，不自动读取个人凭据路径。
+
+每次实际下载前向 knox_sso_url POST 空 body，query originalUrl 为配置的 History Server 根地址（末尾 /），通过 HTTPX BasicAuth 发送 Authorization。登录和下载共享原总 deadline、TLS 配置，trust_env=False、follow_redirects=False。仅登录请求包含 Basic header；下载 GET 使用 Cookie jar 的域/路径匹配。缓存命中不登录。
+
+登录接受 200/204/302/303/307/308 且必须得到适用于下载 URL 的 Cookie，绝不跟随 Location。401/缺 Cookie/其他 3xx 为 AUTHENTICATION_FAILED；403 为 PERMISSION_DENIED；429/5xx 为可重试 UPSTREAM_ERROR；其他状态为不可重试 UPSTREAM_ERROR。登录正文不读取、不记录。登录成功只表示可继续下载，最终仍需有效 ZIP/身份校验，不凭状态码判定端到端成功。每次下载只登录一次，不做重试、自动续期或失败密码重试。
+
+登录和下载的响应 Cookie 在 receive finally 清空；本次取得的 Cookie 值仅作为临时脱敏上下文传给 ZIP/JSONL/manifest 处理，处理结束丢弃。用户名、密码及 Basic 编码值加入已有脱敏集合，不得进入结果/普通日志/L3 文件。客户端关闭时清空 Cookie。
+
+文件模式（secrets 是环境变量名）：
+```yaml
+version: 1
+plugin: spark
+settings:
+  history_server_url: https://history.example.invalid:8443/gateway/analytics/sparkhistory
+  cache_dir: /var/tmp/mcp-spark-l3
+  knox_sso_url: https://history.example.invalid:8443/gateway/knoxsso/api/v1/websso
+secrets:
+  username: SPARK_USERNAME
+  password: SPARK_PASSWORD
+```
+启动：`uv run --locked mcp-stdio --plugin spark --config /absolute/path/to/spark.yaml`。
+环境模式：
+```sh
+export SPARK_HISTORY_SERVER_URL='https://history.example.invalid:8443/gateway/analytics/sparkhistory'
+export SPARK_KNOX_SSO_URL='https://history.example.invalid:8443/gateway/knoxsso/api/v1/websso'
+export SPARK_CACHE_DIR='/var/tmp/mcp-spark-l3'
+# SPARK_USERNAME/SPARK_PASSWORD 从秘密管理环境注入；不能同时设置 SPARK_GATEWAY_COOKIE。
+uv run --locked mcp-stdio --plugin spark
+```
 
 ### 4. 一个工具，直接返回文件位置
 
@@ -139,7 +176,7 @@ lookup/download 的输入 JSON 例为 `{"application_id":"application_1700000000
 
 ### 5. 下载与标准库校验
 
-一次 GET 流式写入本次私有 .part。按实际响应字节计数，不仅信 Content-Length；拒绝非 identity HTTP Content-Encoding。总 deadline 覆盖排队、缓存检查、HTTP、逐成员/逐行处理和发布；每个受限处理块设取消检查点，HTTP 各阶段超时不得超过剩余预算。配置的 Cookie 只发送给固定 origin，不跟随 redirect，不刷新或复用响应 Cookie。建立 HTTP client 前启用现有 wire-log suppression。
+一次 GET 流式写入本次私有 .part。按实际响应字节计数，不仅信 Content-Length；拒绝非 identity HTTP Content-Encoding。总 deadline 覆盖排队、缓存检查、HTTP、逐成员/逐行处理和发布；每个受限处理块设取消检查点，HTTP 各阶段超时不得超过剩余预算。配置的 Cookie 只发送给固定 origin，不跟随 redirect；显式 Cookie 模式不刷新或复用响应 Cookie，Basic 模式按下述一次调用生命周期处理。建立 HTTP client 前启用现有 wire-log suppression。
 
 使用 ZipFile 的公开 API，不写 EOCD/central-directory 解析器，不调用 extractall。首版固定最多 16 个成员、每行最多 8 MiB（读取与输出均限制）；ZIP 元数据内存由已接收 ZIP 上限间接约束，承认不提供独立 metadata 内存上限。逐成员实际展开量计数，读到 EOF 触发 CRC 检查。只接受 stored/deflate ZIP 普通文件，拒绝加密、symlink、目录、绝对/嵌套/穿越路径与重复成员/attempt。输出使用工具生成的文件名，不使用成员名作为落盘路径。
 

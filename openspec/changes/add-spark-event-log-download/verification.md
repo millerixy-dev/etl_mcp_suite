@@ -143,3 +143,62 @@ No application manifest or staging directory remained. Authenticated download is
 still unverified and requires the user to inject an existing login Cookie; no
 credentials or response bodies were recorded. The TLS switch was set only for this
 subprocess, not persistently in personal MCP configuration.
+
+
+## Knox Basic authentication follow-up (task 6.1, 2026-10-13)
+
+Implemented paired SPARK_USERNAME/SPARK_PASSWORD plus same-origin SPARK_KNOX_SSO_URL.
+Cookie mode remains available and is mutually exclusive. No new dependency or MCP argument.
+Login is one empty Basic-auth POST; GET carries only scoped cookies. No redirect/retry;
+login/download share deadline. Cookie jar clears on receive exit; issued values are used
+only in current acquisition redaction. Static credentials and Basic encoding are redacted.
+
+TDD evidence: 25 new synthetic auth tests initially failed before implementation; the
+Spark suite then passed 123 tests. Basic opt-in gate regression failed with a skipped
+valid configuration, then passed after accepting complete Basic credentials. Final
+stdio contract includes Basic exchange plus cross-process reuse. Example config tests
+cover both YAML and JSON Basic files. Initial test type annotation failures were fixed;
+production type checking passes.
+
+Fresh checks:
+
+| Command | Result |
+| --- | --- |
+| `uv sync --locked` | exit 0; 57 resolved, 51 checked |
+| `PYTHONPATH=src uv run --locked pytest -q` | 1615 passed, 6 skipped, 6 deselected; 15.66s |
+| `uv run --locked ruff check .` | all checks passed |
+| `uv run --locked pyright` | 0 errors, 0 warnings |
+| `uv build` | sdist and wheel built |
+| `PYTHONPATH=src uv run --locked mcp-stdio --help` | exit 0 |
+| Basic-configured console EOF smoke with unreachable localhost | exit 0, empty stdout, no login, clean local lock lifecycle |
+| `openspec validate add-spark-event-log-download --strict` | valid |
+| `openspec validate --changes --strict` | 14 passed, 0 failed |
+| `openspec validate --specs --strict` | 2 passed, 0 failed |
+| `git diff --check` | exit 0 |
+
+Independent read-only review found no Critical or Important issues, and independently
+ran the affected suite: 155 passed, 1 deselected. Its minor environment-mapping table
+finding was verified and corrected before commit. No private credentials or real cache
+files were supplied to the reviewer. Existing unrelated OpenSpec informational notices
+and this host's previously documented PYTHONPATH editable-install workaround remain.
+
+### Real MCP validation
+
+Read the user-designated credential file only in process memory, parsed its named fields
+without shell execution and injected the username/password into the MCP child environment.
+Used the authorized TLS opt-out only for the live request. No credential/config copies or
+cookie files were written to the project. The actual MCP SDK launched mcp-stdio --plugin
+spark and invoked fetch_spark_event_log(application_id=application_1783000588461_681757,
+attempt_id="1", refresh=true).
+
+Result: successful login and download. Generated 4,008,504-byte sanitized JSONL with 2,094
+events; observed Spark 2.4.7.7.1.7.1000-141 and ApplicationEnd. Local SHA-256 and event count
+were independently checked, and configured credential strings were absent from saved
+JSONL and the returned result. No staging directories remained. Both a second call and
+a newly launched unauthenticated process returned cache_hit=true for the same evidence.
+
+Evidence remains only in the user's local L3 directory under:
+`application_1783000588461_681757/attempt-1/70b5d44ff317466c83b155477d615621/`
+with eventlog-0001.jsonl and manifest.json. Original ZIP is removed after successful processing.
+The normal suite still deselects marked live integration tests; the authenticated live
+result above comes from an actual MCP end-to-end invocation, not a mock or skipped test.

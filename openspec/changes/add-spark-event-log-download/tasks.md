@@ -26,3 +26,7 @@
 ## 5. 显式 TLS 例外
 
 - [x] 5.1 RED → GREEN → REFACTOR：增加严格布尔配置 verify_tls（默认 true）及 SPARK_VERIFY_TLS 环境映射；显式 false 时 HTTPX verify=False，保持 HTTPS、无跳转和认证校验。测试配置默认/文件/env 覆盖/非法类型与 HTTP 客户端参数，同步双语 README、配置示例和架构文档。执行 Spark 单元/契约、全套测试、lint、类型、构建、console smoke 与 strict OpenSpec 验证；按用户授权重试指定 application 的 attempt 1 并记录真实结果，缺少 Cookie 时如实报告认证阻塞。
+
+## 6. Knox Basic 登录
+
+- [x] 6.1 RED → GREEN → REFACTOR：补齐七项 settings/三项 secret 的严格配置、Basic→Cookie POST/GET 与仅内存生命周期、登录 deadline/错误清理/无跳转、静态和动态凭据脱敏；扩展 HTTP/配置/插件/缓存与 stdio/opt-in 测试，保持单工具契约。同步 README、示例、架构与设计；运行全套测试、lint/types/build/console、strict OpenSpec 验证，并使用用户指定本地文件仅在内存注入账号密码进行真实下载与缓存复用验证。验证通过后记录 verification.md 并完成任务。
