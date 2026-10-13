@@ -5,6 +5,12 @@ from __future__ import annotations
 from typing import Protocol
 
 from mcp_stdio.core.errors import ErrorCategory, ToolError, ToolOperation, safe_error_identifiers
+from mcp_stdio.plugins.spark.inspection_models import (
+    InspectRequest,
+    QueryRequest,
+    SparkEventLogInspectionResult,
+    SparkEventQueryResult,
+)
 from mcp_stdio.plugins.spark.models import SparkEventLogFetchResult
 
 
@@ -47,4 +53,12 @@ class SparkEventLogGateway(Protocol):
     async def download(
         self, application_id: str, attempt_id: str | None, *, deadline: float
     ) -> SparkEventLogFetchResult: ...
+    async def close(self) -> None: ...
+
+
+class SparkInspectionGateway(Protocol):
+    async def inspect(
+        self, request: InspectRequest, *, deadline: float
+    ) -> SparkEventLogInspectionResult: ...
+    async def query(self, request: QueryRequest, *, deadline: float) -> SparkEventQueryResult: ...
     async def close(self) -> None: ...
