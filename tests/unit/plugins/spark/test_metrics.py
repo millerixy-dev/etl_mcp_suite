@@ -637,3 +637,30 @@ async def test_distribution_close_waits_for_post_scan_computation(
     await asyncio.wait_for(computing.wait(), timeout=2)
     await adapter.close()
     assert released.is_set() and worker.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_stage_original_deadline_after_result_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from mcp_stdio.plugins.spark import metrics
+    from mcp_stdio.plugins.spark.files import checkpoint as real_checkpoint
+
+    adapter, request = snapshot(tmp_path, [lifecycle(17, 0, 1, 2)])
+    expired = False
+    original = metrics.SparkStageMetricsResult
+
+    def expire_after_validation(*args: object, **kwargs: object):
+        nonlocal expired
+        result = original(*args, **kwargs)
+        expired = True
+        return result
+
+    async def checked(deadline: float) -> None:
+        await real_checkpoint(time.monotonic() - 1 if expired else deadline)
+
+    monkeypatch.setattr(metrics, "SparkStageMetricsResult", expire_after_validation)
+    monkeypatch.setattr(metrics, "checkpoint", checked)
+    with pytest.raises(SparkGatewayError):
+        await adapter.stage_metrics(stage_request(request), deadline=time.monotonic() + 10)
+    await adapter.close()

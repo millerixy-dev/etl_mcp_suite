@@ -142,11 +142,14 @@ async def scan_stage_metrics(
             input_bytes=group.inputs.result(group.successful),
             shuffle_read_bytes=group.shuffle.result(group.successful),
         ))
-    return SparkStageMetricsResult(
+    result = SparkStageMetricsResult(
         snapshot=scan.snapshot, coverage=scan.coverage,
         matched_stage_attempt_count=len(groups), unassigned_task_end_count=unassigned,
         stages=tuple(stages), stages_omitted=len(groups) - len(stages),
     )
+
+    await checkpoint(deadline)
+    return result
 
 
 async def scan_task_distribution(

@@ -47,3 +47,26 @@ No new dependency, credential, configuration, network call or resource ownership
 Final fresh test command:
 `UV_NO_EDITABLE=1 uv run --locked --reinstall-package hive-cli-mcp-stdio pytest tests/unit/plugins/spark/test_metrics.py tests/unit/plugins/spark/test_cache.py tests/unit/plugins/spark/test_inspection.py`
 Result: 169 passed in 14.69s; executed after final annotations. Ruff, Pyright and tests completed sequentially for final verification.
+
+## Controller review follow-up: Stage publication boundary
+
+Controller identified the same original-deadline gap in `scan_stage_metrics`. Systematic-debugging investigation confirmed that Stage row checkpoints precede `SparkStageMetricsResult` validation, but validation was followed immediately by return. The working Task pattern has a checkpoint after result construction. Smallest RED monkeypatches Stage result validation to mark the deadline expired and verifies no successful result can publish afterward.
+
+RED command:
+`UV_NO_EDITABLE=1 uv run --locked --reinstall-package hive-cli-mcp-stdio pytest tests/unit/plugins/spark/test_metrics.py -k stage_original_deadline_after_result_validation`
+Result: 1 failed / 86 deselected; expected SparkGatewayError was not raised. This reproduces the concern deterministically without wall-clock sleeps.
+
+Minimal fix: store `SparkStageMetricsResult` in `result`, await `checkpoint(deadline)`, then return it. No ranking, extraction, shape or lifecycle changes.
+
+GREEN command:
+`UV_NO_EDITABLE=1 uv run --locked --reinstall-package hive-cli-mcp-stdio pytest tests/unit/plugins/spark/test_metrics.py tests/unit/plugins/spark/test_cache.py tests/unit/plugins/spark/test_inspection.py`
+Result: 170 passed in 14.50s.
+
+Sequential follow-up checks:
+`UV_NO_EDITABLE=1 uv run --locked --reinstall-package hive-cli-mcp-stdio ruff check src/mcp_stdio/plugins/spark/metrics.py src/mcp_stdio/plugins/spark/inspection.py tests/unit/plugins/spark/test_metrics.py`
+Result: All checks passed.
+`UV_NO_EDITABLE=1 uv run --locked --reinstall-package hive-cli-mcp-stdio pyright`
+Result: 0 errors, 0 warnings, 0 informations.
+`git diff --check`: passed.
+
+Only metrics.py, test_metrics.py and this report changed in the follow-up. No task checkbox, unrelated change, dependency/config/network or architecture adjustment.
