@@ -533,7 +533,7 @@ uv run mcp-stdio --plugin dolphinscheduler \
 
 ## Spark event log 下载
 
-Spark 暴露 `fetch_spark_event_log`、`inspect_spark_event_log` 和 `query_spark_events`。
+Spark 暴露 `fetch_spark_event_log`、`inspect_spark_event_log`、`query_spark_events`、`get_spark_stage_metrics` 和 `get_spark_task_distribution`。
 获取接口为 `fetch_spark_event_log(application_id, attempt_id=None, refresh=False)`。
 它下载配置的 Spark History Server ZIP，校验身份、CRC 和 JSONL，脱敏后保存 JSONL 与一份
 清单，后续诊断工具直接读取本地路径。首版格式以已验证的 Spark 2.4.7 单文件 JSONL 为依据。
@@ -699,6 +699,25 @@ inspect 只接受前两项；query 接受所有参数。数字严格为整数（
 不同筛选 AND；只匹配事件自身字段。job_id 不自动带回 task/stage；execution_id 不自动带回 JobEnd。先读 JobStart 的 Stage IDs / SQL 属性，再分别查询实体。`matched_count` 和原因分布在分页前统计全部匹配；翻页只改变 after_line，保持筛选和摘要固定。
 
 默认最多 20 条、每条 details 最多 2048 字符；类型/原因前 32 类和概览证据前 20 条均有 omitted 字段。details_truncated 表示中段省略，外层结果合法 JSON，但正文不保证合法 JSON。关键文本用原 hash 和 `lines=[ref.line], limit=1, max_detail_chars=32768` 扩大回读；仍截断须报告缺口。ref 绑定脱敏文件 SHA-256 与物理行号。coverage 只表示 ApplicationStart/End 是否可见，不证明上游完整、YARN 或 SQL 成功。
+
+### 离线性能事实
+
+`get_spark_stage_metrics` 返回 `SparkStageMetricsResult`，`get_spark_task_distribution` 返回 `SparkTaskDistributionResult`。两者必填 manifest_path、显式可空 application attempt_id、inspect 返回的脱敏 expected_sha256；同一私有快照本地完整扫描，无 HTTP、刷新、凭证或持久聚合，沿用来源/大小/时限/所有权验证。
+
+| 工具 | 额外输入 | 范围与结果 |
+| --- | --- | --- |
+| get_spark_stage_metrics | 可选成对 stage_id / stage_attempt_id；limit=20（1–20） | Stage attempt 按有效 duration 降序；全组 TaskEnd 分类、成功 Input/Shuffle 总量及有效/缺失数、生命周期 refs；matched_stage_attempt_count、unassigned_task_end_count、stages_omitted 披露范围 |
+| get_spark_task_distribution | 必填 stage_id / stage_attempt_id；order_by=duration_ms；limit=20（1–20） | 全成功尝试样本 min/p50/p95/max、独立 valid_count/missing_count；ranked_task_count、含全部指标和 refs 的 top_tasks、tasks_omitted |
+
+固定指标/排序：duration_ms、executor_run_time_ms、jvm_gc_time_ms、input_bytes、shuffle_read_bytes、shuffle_fetch_wait_ms。时间单位 ms，数据量 bytes；Shuffle 两个合法 Remote/Local 分量才求和，缺失不补零。分位数 nearest-rank、不插值；重试/推测 Success 各计一次，不做逻辑去重。limit/order_by 不改变全样本分布；排序指标缺失不进入排名。
+
+inspect 后的调用示例（路径/摘要为合成占位，使用真实返回值替换）：
+
+```json
+{"manifest_path":"/var/tmp/mcp-spark-l3/evidence/manifest.json","attempt_id":null,"expected_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","stage_id":17,"stage_attempt_id":1,"order_by":"shuffle_fetch_wait_ms","limit":1}
+```
+
+慢作业先 query 应用起止时间，再排名 Stage、明确 attempt、比较同任务指标、回读 refs，检查重试/executor 反证。成功 JobEnd 不结束性能调查；无可比基准不称耗时异常。长尾与大 Shuffle 同现形成工作量不均衡候选，数据量相近而 Fetch Wait 高形成等待候选，均不直接证明倾斜/网络/OOM。Stage 重叠、阶段外时间保留为缺口，Stage/GC/等待/运行时间不相加为应用耗时。无失败也需报告性能事实、完整样本/缺失数、排名遗漏和因果限制。
 
 [spark-diagnosis Skill](skills/spark-diagnosis/SKILL.md) 指导假设、反证、重试恢复与引用，输出 supported / inconclusive / no_observed_failure；不自动分类根因。FetchFailed 加 executor 丢失不能证明 OOM。现有安装脚本会复制这份 Skill；`--with-mcp` 仍只配置 Hive、Zeppelin 和 DolphinScheduler，Spark 实例按上文独立配置，不自动修改用户 MCP 配置。
 

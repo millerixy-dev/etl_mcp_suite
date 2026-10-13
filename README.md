@@ -598,7 +598,7 @@ operations.
 
 ## Spark event log download
 
-Spark exposes `fetch_spark_event_log`, `inspect_spark_event_log` and `query_spark_events`.
+Spark exposes `fetch_spark_event_log`, `inspect_spark_event_log`, `query_spark_events`, `get_spark_stage_metrics` and `get_spark_task_distribution`.
 Acquisition uses `fetch_spark_event_log(application_id, attempt_id=None, refresh=False)`.
 It downloads the configured Spark History Server logs ZIP, validates identities/CRC/JSONL,
 redacts credentials and saves local JSONL files plus one manifest for later diagnosis tools.
@@ -774,6 +774,25 @@ inspect accepts only the first two parameters; query accepts all. Numeric inputs
 Filters are ANDed and match each event's own fields. job_id does not expand to stages/tasks; execution_id does not expand to JobEnd. Read JobStart Stage IDs / SQL properties and query each entity separately. matched_count and reason distribution cover all matches before pagination; keep filters/hash fixed while changing after_line.
 
 Outputs default to 20 records and 2048 characters per details. Type/reason lists contain at most 32 categories and overview evidence at most 20 entries, with omitted counts. details_truncated marks omitted middle text: the outer result is valid JSON, but details need not be. Expand critical text using the same hash and `lines=[ref.line], limit=1, max_detail_chars=32768`; report a gap if still truncated. References bind sanitized-file SHA-256 and physical line. coverage describes observed ApplicationStart/End only, not upstream completeness or YARN/SQL success.
+
+### Offline performance facts
+
+`get_spark_stage_metrics` returns `SparkStageMetricsResult`; `get_spark_task_distribution` returns `SparkTaskDistributionResult`. Both require `manifest_path`, explicit nullable application `attempt_id`, and the sanitized `expected_sha256` from inspect. They scan the same private snapshot locally without HTTP, refresh, credentials or persisted analysis; existing source/size/deadline/ownership checks apply.
+
+| Tool | Additional inputs | Scope and result |
+| --- | --- | --- |
+| get_spark_stage_metrics | Optional paired stage_id / stage_attempt_id; limit=20 (1–20) | Stage attempts ranked by valid duration descending; full group TaskEnd classification, successful input/Shuffle totals with valid/missing counts, lifecycle refs; matched_stage_attempt_count, unassigned_task_end_count, stages_omitted disclose scope |
+| get_spark_task_distribution | Required stage_id / stage_attempt_id; order_by=duration_ms; limit=20 (1–20) | Full successful-attempt min/p50/p95/max and independent valid_count/missing_count per metric; ranked_task_count, top_tasks with all metrics and refs, tasks_omitted |
+
+Fixed metrics/orderings: duration_ms, executor_run_time_ms, jvm_gc_time_ms, input_bytes, shuffle_read_bytes, shuffle_fetch_wait_ms. Times are milliseconds and quantities bytes. Shuffle sums valid Remote/Local Bytes Read; absent components remain unknown. Quantiles use nearest-rank without interpolation. Retry/speculative Success events remain separate samples; changing limit or ordering never changes distributions. Missing ordering values do not enter rankings.
+
+Example after inspect (synthetic path/hash; replace with returned evidence):
+
+```json
+{"manifest_path":"/var/tmp/mcp-spark-l3/evidence/manifest.json","attempt_id":null,"expected_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","stage_id":17,"stage_attempt_id":1,"order_by":"shuffle_fetch_wait_ms","limit":1}
+```
+
+For slow applications, query ApplicationStart/End timestamps, rank Stage attempts, select an explicit attempt, compare metrics on the same tasks and reread refs via query. Check retries/executor counterevidence. Successful JobEnd does not end performance investigation. Without a comparable baseline, do not call runtime abnormal. Large Shuffle and a duration tail suggest a workload-imbalance candidate; high Fetch Wait with similar bytes suggests a waiting candidate, neither proves skew/network/OOM. Stage overlap and time outside Stage remain gaps; Stage/GC/wait/runtime values cannot be added into application elapsed time. Reports retain full sample counts, missing metrics, omitted rankings and causal limits even with no observed failure.
 
 The [spark-diagnosis Skill](skills/spark-diagnosis/SKILL.md) guides hypotheses, counterevidence, recovery checks and citations with supported / inconclusive / no_observed_failure conclusions; it adds no backend classifier. FetchFailed plus executor loss does not prove OOM. Existing installers copy this Skill; `--with-mcp` continues to configure Hive, Zeppelin, and DolphinScheduler only. Configure the Spark instance separately as above; installation does not automatically alter user Spark MCP configuration.
 

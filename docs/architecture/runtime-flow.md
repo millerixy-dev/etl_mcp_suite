@@ -221,6 +221,20 @@ Both calls reuse configured byte/time limits, redaction and directory ownership.
 
 The portable spark-diagnosis Skill discovers capabilities, pins manifest/attempt/hash, checks full-match distributions, direct entity evidence and recovery, and returns supported/inconclusive/no_observed_failure with supporting/opposing refs and gaps. Driver/Executor/YARN evidence is optional only through already available tools and its actual contract; no inferred uniform snapshot field, ad-hoc endpoint or backend classifier is introduced.
 
+### Offline performance metrics
+
+```text
+get_spark_stage_metrics(manifest_path, attempt_id, expected_sha256, ...paired Stage selector)
+get_spark_task_distribution(manifest_path, attempt_id, expected_sha256, stage_id, stage_attempt_id, ...)
+  -> tools.py -> SparkMetricsService -> SparkInspectionGateway
+  -> same SparkInspectionAdapter worker lifecycle -> metrics.py / VerifiedEventLogReader
+  -> verify complete snapshot before publishing SparkStageMetricsResult / SparkTaskDistributionResult
+```
+
+Stage aggregation retains counters/totals and lifecycle refs per explicit Stage attempt. Task distributions retain only six groups of numeric values for the selected group and at most limit ranked projections; nearest-rank sorting uses temporary O(n) sample space, released after return/cancellation. Full Success-event statistics precede ranking and do not deduplicate logical work. No HTTP, new directory owner, persisted index or diagnosis state is introduced. Runtime closes the shared inspector's inspection/metrics workers before acquisition releases directory ownership.
+
+The Skill's slow-job branch queries application timestamps, selects explicit Stage attempts, compares same-task metrics and rereads refs with retry/executor counterevidence. Successful JobEnd alone cannot resolve a performance question; unavailable baselines, missing metrics, ranking omissions, Stage overlap and unaccounted application time remain explicit limits. Metric signals generate candidate causes, not server-certified root causes.
+
 ## Error Flow
 
 ```mermaid

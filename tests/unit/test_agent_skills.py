@@ -12,7 +12,10 @@ import yaml
 
 PROJECT_ROOT = Path(__file__).parents[2]
 CANONICAL_SKILLS = {
-    "spark-diagnosis": {"fetch_spark_event_log", "inspect_spark_event_log", "query_spark_events"},
+    "spark-diagnosis": {
+        "fetch_spark_event_log", "inspect_spark_event_log", "query_spark_events",
+        "get_spark_stage_metrics", "get_spark_task_distribution",
+    },
     "hive": {"list_databases", "list_tables", "get_table_schema"},
     "zeppelin": {
         "get_interpreter_bindings",
@@ -612,3 +615,15 @@ def test_simplified_chinese_readme_is_linked_and_covers_core_usage() -> None:
         "env_vars",
     ):
         assert required_content in chinese_readme
+
+
+def test_spark_skill_discovers_successful_slow_applications() -> None:
+    frontmatter, body = load_skill(PROJECT_ROOT / "skills/spark-diagnosis/SKILL.md")
+    assert "performance" in str(frontmatter["description"])
+    assert "long runtime" in str(frontmatter["description"])
+    for marker in (
+        "SparkListenerApplicationStart", "SparkListenerApplicationEnd",
+        "nearest-rank", "missing_count", "tasks_omitted", "stages_omitted",
+        "stage_attempt_id", "shuffle_fetch_wait_ms",
+    ):
+        assert marker in body
