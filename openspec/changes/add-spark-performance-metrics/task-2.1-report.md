@@ -28,3 +28,7 @@ All uv package reinstalls/checks ran sequentially.
 Compared implementation to design 1/2/3/5 and Stage capability requirements. No full event arrays or metadata bodies retained; no aggregate persistence, network or partial success. MetricTotal null/zero and independent valid/missing counts match success samples. Reader digest enforcement and private evidence checks are reused. Deadline checkpoints cover scan plus before/after ranking and each returned projection. Ranking uses temporary group-reference sorting (O(groups log groups)); retained per-group aggregates are O(groups), without per-task arrays.
 
 Task 2.2 must extend metrics.py and the same adapter owned-task type union with task_distribution, not create a second lifecycle. Full suite/build/MCP contracts and whole-change strict validation remain controller final gates; no live integration run or claimed. Unrelated download/executor artifacts preserved.
+
+## Controller gate
+
+Fresh controller command `UV_NO_EDITABLE=1 uv run --locked --reinstall-package hive-cli-mcp-stdio pytest tests/unit/plugins/spark/test_metrics.py tests/unit/plugins/spark/test_inspection.py tests/unit/plugins/spark/test_cache.py` passed: 151 tests in14.47s. Independent spec/quality review Approved with no findings; service/MCP/runtime composition and final suite remain later gates.
