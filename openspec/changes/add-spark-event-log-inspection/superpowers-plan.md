@@ -1,10 +1,10 @@
-# Spark inspection contracts implementation plan
+# Spark local inspection implementation micro-plans
 
 > Use superpowers:executing-plans for this shared-contract task. OpenSpec tasks.md remains the only milestone checklist; this plan has no independent completion checkboxes.
 
-**Goal:** Implement only OpenSpec task 1.1: strict offline inspection DTOs and read-only gateway signatures, while synchronizing capability-scoped tool-set wording.
+**Goal:** Record task-scoped execution details for the minimal local inspection capability; OpenSpec tasks.md owns completion status.
 
-**Architecture:** Reuse SparkModel and existing application/attempt/path validators. Keep analysis DTOs in inspection_models.py and the Protocol in gateway.py; add no scanner, I/O, service or tool wiring.
+**Architecture:** Reuse Spark models/validators; keep deterministic local scanning in adapters and DTO/operation handling in services. Each section is scoped to one OpenSpec task.
 
 **Tech Stack:** Python >=3.10, uv, Pydantic, pytest; no new dependencies.
 

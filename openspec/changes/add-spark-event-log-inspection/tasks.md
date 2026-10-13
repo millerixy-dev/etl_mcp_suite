@@ -1,7 +1,7 @@
 ## 1. 合同与安全快照
 
 - [x] 1.1 同步 inspection 与并行 download/executor-log 的排他工具集表述，只处理合同衔接，不等待另一能力全部完成；RED：添加严格输入/结果/ref 测试，确认失败；GREEN：定义最小 DTO 和只读 port；REFACTOR：复用现有校验。用 `uv run --locked pytest tests/unit/plugins/spark/test_models.py` 验证 nullable attempt、摘要、直接筛选、扩大文本仅限单行、空列表与类型拒绝；合同同步后运行 `openspec validate --changes --strict`。
-- [ ] 1.2 RED：补充多 attempt、来源/路径/symlink、缺文件、大小/摘要/身份冲突及取消测试；GREEN：实现同一遍读取中的快照验证和最小直接字段提取；REFACTOR：复用 cache 私有路径和脱敏函数，不加关系表。用 `uv run --locked pytest tests/unit/plugins/spark/test_cache.py` 验证无写入/网络回退、文件关闭和错误，不为校验再读整份文件。
+- [x] 1.2 RED：补充多 attempt、来源/路径/symlink、缺文件、大小/摘要/身份冲突及取消测试；GREEN：实现同一遍读取中的快照验证和最小直接字段提取；REFACTOR：复用 cache 私有路径和脱敏函数，不加关系表。用 `uv run --locked pytest tests/unit/plugins/spark/test_cache.py` 验证无写入/网络回退、文件关闭和错误，不为校验再读整份文件。
 
 ## 2. 概览与精确事件查询
 
