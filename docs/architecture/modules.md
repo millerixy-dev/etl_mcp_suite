@@ -309,7 +309,7 @@ The configured status path is deployment input, not MCP caller input.
 - inspection_reader.py verifies one explicitly selected manifest/attempt in a single scan; inspection_events.py projects direct IDs, selected redacted text and bounded head/tail details.
 - inspection.py implements SparkInspectionAdapter, full-file counters, bounded evidence selection and own-field query pagination without relation propagation or a persistent index.
 - metrics_models.py owns strict Stage/Task requests and named metric results; metrics_events.py extracts six fixed metrics, success-attempt samples and nearest-rank statistics; metrics.py performs transient Stage aggregation and selected-group distributions with bounded rankings.
-- service.py owns SparkMetricsService, depending on SparkInspectionGateway stage_metrics/task_distribution ports, not file adapters. plugin.py supplies the same SparkInspectionAdapter to inspection and metrics services; its existing worker set and close owns all local scans.
+- service.py owns SparkMetricsService, depending on SparkMetricsGateway stage_metrics/task_distribution ports, not file adapters. plugin.py supplies the same SparkInspectionAdapter to inspection and metrics services; its existing worker set and close owns all local scans.
 - tools.py exposes fetch_spark_event_log, inspect_spark_event_log, query_spark_events, get_spark_stage_metrics and get_spark_task_distribution; plugin.py composes dependencies under the existing single directory owner and closes acquisition/inspection work before releasing it.
 - skills/spark-diagnosis/SKILL.md consumes those capabilities for agent-side hypotheses and counterevidence; installers distribute its canonical file without registering a Spark server.
 

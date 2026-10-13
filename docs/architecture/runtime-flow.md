@@ -226,7 +226,7 @@ The portable spark-diagnosis Skill discovers capabilities, pins manifest/attempt
 ```text
 get_spark_stage_metrics(manifest_path, attempt_id, expected_sha256, ...paired Stage selector)
 get_spark_task_distribution(manifest_path, attempt_id, expected_sha256, stage_id, stage_attempt_id, ...)
-  -> tools.py -> SparkMetricsService -> SparkInspectionGateway
+  -> tools.py -> SparkMetricsService -> SparkMetricsGateway
   -> same SparkInspectionAdapter worker lifecycle -> metrics.py / VerifiedEventLogReader
   -> verify complete snapshot before publishing SparkStageMetricsResult / SparkTaskDistributionResult
 ```

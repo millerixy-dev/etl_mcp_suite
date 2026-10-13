@@ -23,7 +23,7 @@ Fresh-context updated probe retrieved correct application→snapshot→Stage→d
 
 ## Self-review
 
-Only owned Skill, both READMEs, architecture views, source contract tests and task plan/report changed. Original failure/recovery/unknown/query-truncation/external-evidence guidance preserved. Tool names portable; description triggers-only; no DiagnosisState, fixed query budget, config/dependency/installer/deployment change. Architecture matches SparkMetricsService→SparkInspectionGateway and shared inspector ownership. Final parent whole-change review, fresh validation and checkbox gates remain separate.
+Only owned Skill, both READMEs, architecture views, source contract tests and task plan/report changed. Original failure/recovery/unknown/query-truncation/external-evidence guidance preserved. Tool names portable; description triggers-only; no DiagnosisState, fixed query budget, config/dependency/installer/deployment change. Architecture matches SparkMetricsService→SparkMetricsGateway and shared inspector ownership. Final parent whole-change review, fresh validation and checkbox gates remain separate.
 
 # Task 3.2 actual offline FastMCP exercises
 
@@ -65,7 +65,7 @@ Passed: real exposed dispatch/schema, pin/explicit attempts, stage separation, 4
 
 ## Exact actual call inputs
 
-Each case below defines M as the recorded private synthetic manifest path and H as its fixed sanitized digest. Every input below is the actual input with those two literal values replaced by aliases for readability; all other supplied fields are unchanged. Runtime closes and temporary fixtures are deleted after replay. The controlling agent independently reran the same harness successfully after final documentation edits; hashes/counts/refs were unchanged. Full result JSON and schemas remain `/tmp/task-3.2-mcp-results.json`; replay creates new private paths with the same hashes.
+Each case below defines M as the recorded private synthetic manifest path and H as its fixed sanitized digest. Every input below is the actual input with those two literal values replaced by aliases for readability; all other supplied fields are unchanged. Runtime closes after replay; private synthetic manifests and JSONL materials remain available for review. The harness uses mkdtemp and does not delete them; review materials are retained while parent review/replay evidence is active. The controlling agent independently reran the same harness successfully after final documentation edits; hashes/counts/refs were unchanged. Full result JSON and schemas remain `/tmp/task-3.2-mcp-results.json`; replay creates new private paths with the same hashes.
 
 ### Case A
 
@@ -141,3 +141,15 @@ H=`8da348f14b9183583b803b69535ca6743be509454399f5cc81f96e69c4bbc88e`
 17. `query_spark_events`: `{"manifest_path":"M","attempt_id":"1","expected_sha256":"H","executor_id":"2","event_types":["SparkListenerExecutorAdded","SparkListenerExecutorRemoved"],"max_detail_chars":2048}`
 
 Named public results verified: SparkEventLogInspectionResult, SparkEventQueryResult, SparkStageMetricsResult and SparkTaskDistributionResult via actual FastMCP structured output; these are not direct gateway calls.
+
+## Review correction and fresh evidence
+
+Whole-change review identified two inaccurate documentation claims. Verified `service.py` SparkMetricsService constructor directly depends on SparkMetricsGateway; corrected only metric-service references in runtime-flow.md, modules.md, task-3.2-plan.md and this report. Existing SparkInspectionGateway inspection/query/close description remains intact. Verified replay uses mkdtemp and awaits runtime.close without deleting files; corrected the call-input record to describe retained private synthetic materials for review. No current material was deleted and no backend, behavior, tests or task checkbox changed.
+
+Fresh commands after correction:
+
+- `UV_NO_EDITABLE=1 uv run --locked --reinstall-package hive-cli-mcp-stdio pytest tests/contract/test_architecture.py tests/unit/test_agent_skills.py`: **60 passed in 2.11s**.
+- `openspec validate add-spark-performance-metrics --strict`: **valid**, exit0.
+- `git diff --check`: **passed**, exit0.
+
+Self-review: exact service annotation and harness lifecycle checked against source; metrics port corrected in all four owned files, older inspection port preserved, fixture retention stated accurately. Parent-owned task-4.1 report and all other files remain outside this correction commit.

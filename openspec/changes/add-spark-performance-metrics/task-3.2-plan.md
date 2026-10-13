@@ -4,7 +4,7 @@
 
 **Goal:** Extend the existing portable Spark diagnosis reference with slow-job metric selection and synchronized usage/architecture documentation.
 
-**Architecture:** Existing FastMCP tools call SparkMetricsService through SparkInspectionGateway; the same SparkInspectionAdapter owns inspection and metrics workers. No runtime or deployment changes.
+**Architecture:** Existing FastMCP tools call SparkMetricsService through SparkMetricsGateway; the same SparkInspectionAdapter owns inspection and metrics workers. No runtime or deployment changes.
 
 **Tech Stack:** Existing Python 3.10+ package, uv locked execution, pytest, Markdown Skill.
 
