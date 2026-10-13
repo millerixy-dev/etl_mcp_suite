@@ -153,3 +153,7 @@ Fresh commands after correction:
 - `git diff --check`: **passed**, exit0.
 
 Self-review: exact service annotation and harness lifecycle checked against source; metrics port corrected in all four owned files, older inspection port preserved, fixture retention stated accurately. Parent-owned task-4.1 report and all other files remain outside this correction commit.
+
+## Controller gate
+
+Parent fresh Skill26tests passed1.86s; parent replay `UV_NO_EDITABLE=1 uv run --locked --no-sync python /tmp/task-3.2-mcp-replay.py` exit0 with A16/B15/C17 calls, identical hashes and ref line sets. After documentation corrections, parent architecture/Skill60tests passed; independent re-review spec compliant/qualityApproved with no remainingfindings. Configurationexample correction and final whole-change checks belong to task4.1.

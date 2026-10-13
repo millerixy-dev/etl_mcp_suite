@@ -143,6 +143,7 @@ MetricDistribution 不含 total；MetricTotal 不含分位数，避免 Stage 概
 | Field | Type | Default | Range | Required |
 | --- | --- | --- | --- | --- |
 | version / plugin | int / string | 无 | 1 / spark | 文件模式是 |
+| secrets | object | 无 | 文件模式必须提供 mapping；无需凭证时为 {} | 文件模式是 |
 | settings.history_server_url | string | 无 | 无凭证/query/fragment HTTPS，≤2048 字符 | 是 |
 | settings.cache_dir | string | 无 | 专用私有绝对目录，≤4096 字符，非 symlink | 是 |
 | settings.verify_tls | bool | true | 仅既有网络获取；false 跳过证书及主机名校验 | 否 |
@@ -164,6 +165,7 @@ settings:
   history_server_url: https://history.example.invalid:8443/gateway/analytics/sparkhistory
   # 复用已有 L3，同一目录同时只允许一个 Spark 实例持有。
   cache_dir: /var/tmp/mcp-spark-l3
+secrets: {}  # 文件模式保留空 mapping，不读取凭证。
 ```
 
 启动：`uv run --locked mcp-stdio --plugin spark --config /absolute/path/to/spark.yaml`。
