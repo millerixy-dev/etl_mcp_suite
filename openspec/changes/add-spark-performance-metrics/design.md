@@ -130,7 +130,7 @@ MetricDistribution 不含 total；MetricTotal 不含分位数，避免 Stage 概
 
 ### 5. 架构与计算成本
 
-在 Spark slice 增加最小指标 DTO 和计算模块，readonly gateway 扩展两个方法，service 负责输入/原 deadline/安全错误，MCP adapter 翻译固定结构。gateway 的两项请求输入/结果即上面两张表和对应 JSON，不另创不同 port 合同。registry 保持唯一 concrete plugin 导入位置，core 只追加安全 operation 名及允许的 application/attempt identifier。
+在 Spark slice 增加最小指标 DTO 和计算模块，readonly gateway 扩展两个方法，service 负责输入/原 deadline/安全错误，MCP adapter 翻译固定结构。gateway 的两项请求输入/结果即上面两张表和对应 JSON，不另创不同 port 合同。复用现有 SparkInspectionAdapter 的 reader、扫描任务集合和 close；新增 metrics.py 放置 Stage/Task 聚合，避免重复实现一套 worker 生命周期。registry 保持唯一 concrete plugin 导入位置，core 只追加安全 operation 名及允许的 application/attempt identifier。
 
 复用 VerifiedEventLogReader；Stage 扫描只保留每组计数、和与两项 refs。分布扫描只为指定组保存有效数值，优先使用标准库紧凑数值容器；排名仅保存至多 limit 条固定投影。完整 JSON 事件不保留。精确分位数需 O(选定组成功样本数) 的临时数值空间，排序 O(n log n)；不用采样/近似算法掩盖口径。六组数值在返回或取消后释放，不跨请求存活，不是 DiagnosisState。
 

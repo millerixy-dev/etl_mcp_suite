@@ -1,7 +1,7 @@
 ## 1. 指标合同与计算口径
 
 - [x] 1.1 RED：在现有 `tests/unit/plugins/spark/test_models.py` 补两个请求、命名结果和严格输入失败测试；GREEN：定义最小指标 DTO 与只读 gateway 合同；REFACTOR：复用现有 snapshot/ref/coverage 和输入校验。用 `uv run --locked pytest tests/unit/plugins/spark/test_models.py` 验证配对 Stage 选择、固定 order_by、limit、nullable application attempt、摘要、未知参数和精确结果字段；运行 `openspec validate --changes --strict` 核对工具并集衔接。
-- [ ] 1.2 RED：新增 `tests/unit/plugins/spark/test_metrics.py` 的单事件指标/样本口径测试；GREEN：实现六个固定指标提取、Success/非成功/未知分类和 nearest-rank；REFACTOR：共享数值有效性规则，不加通用指标表达式。用 `uv run --locked pytest tests/unit/plugins/spark/test_metrics.py` 验证合法零、缺对象/字段、bool/string/float/负数、非法时间、Shuffle 缺分量、两个大分量求和、重试/推测样本及空/单/双样本分位数。
+- [x] 1.2 RED：新增 `tests/unit/plugins/spark/test_metrics.py` 的单事件指标/样本口径测试；GREEN：实现六个固定指标提取、Success/非成功/未知分类和 nearest-rank；REFACTOR：共享数值有效性规则，不加通用指标表达式。用 `uv run --locked pytest tests/unit/plugins/spark/test_metrics.py` 验证合法零、缺对象/字段、bool/string/float/负数、非法时间、Shuffle 缺分量、两个大分量求和、重试/推测样本及空/单/双样本分位数。
 
 ## 2. 两个离线事实工具
 

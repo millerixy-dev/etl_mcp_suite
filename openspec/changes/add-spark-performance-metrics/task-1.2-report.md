@@ -49,3 +49,7 @@ Result: exit 0, `0 errors, 0 warnings, 0 informations`.
 Compared design section 2 and sample/distribution capability scenarios against tests: zero/absent, invalid bool/string/float/negative/overflow values, malformed/missing objects, invalid timestamps, both Shuffle components, large component sum, missing metrics with usable duration, valid/invalid reason distinction, retries/speculation without deduplication, empty/single/double/20-value nearest-rank, unmodified inputs and exact fixed name order are covered. No arbitrary event data appears in DTOs. Existing task_reason is reused rather than duplicated. No unresolved requirement concern.
 
 Scope limitation: these are pure local helpers, not TaskEnd scanners; Stage/distribution adapters must enforce event selection and successful sample count invariants. Full suite, architecture/runtime integration and strict OpenSpec validation remain the parent's whole-change gate. No live integration was run or claimed. Unrelated download/executor artifacts were preserved.
+
+## Controller gate
+
+Fresh controller command `UV_NO_EDITABLE=1 uv run --locked --reinstall-package hive-cli-mcp-stdio pytest tests/unit/plugins/spark/test_metrics.py` passed: 54 tests in 0.12s. Independent task review: spec compliant, quality Approved, no findings. TaskEnd selection, success-only scan counts, full snapshot/digest checking and lifecycle remain later-task gates.
