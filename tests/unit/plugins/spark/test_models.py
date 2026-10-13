@@ -392,3 +392,229 @@ def test_inspection_port_is_async_with_explicit_deadline() -> None:
         )
         assert get_type_hints(method) == {"request": request, "deadline": float, "return": result}
     assert inspect.iscoroutinefunction(port.close)
+
+
+def test_metrics_requests_are_strict_and_have_fixed_defaults() -> None:
+    from mcp_stdio.plugins.spark.metrics_models import StageMetricsRequest, TaskDistributionRequest
+
+    stage = StageMetricsRequest.model_validate(query_values())
+    assert stage.model_dump() == {
+        **query_values(),
+        "stage_id": None,
+        "stage_attempt_id": None,
+        "limit": 20,
+    }
+    assert StageMetricsRequest.model_json_schema()["required"] == [
+        "manifest_path",
+        "attempt_id",
+        "expected_sha256",
+    ]
+    assert (
+        StageMetricsRequest.model_validate(
+            query_values(stage_id=0, stage_attempt_id=2**63 - 1, limit=1)
+        ).stage_attempt_id
+        == 2**63 - 1
+    )
+    distribution = TaskDistributionRequest.model_validate(
+        query_values(stage_id=17, stage_attempt_id=0)
+    )
+    assert distribution.model_dump() == {
+        **query_values(stage_id=17, stage_attempt_id=0),
+        "order_by": "duration_ms",
+        "limit": 20,
+    }
+    assert TaskDistributionRequest.model_json_schema()["required"] == [
+        "manifest_path",
+        "attempt_id",
+        "expected_sha256",
+        "stage_id",
+        "stage_attempt_id",
+    ]
+    for metric in (
+        "duration_ms",
+        "executor_run_time_ms",
+        "jvm_gc_time_ms",
+        "input_bytes",
+        "shuffle_read_bytes",
+        "shuffle_fetch_wait_ms",
+    ):
+        assert (
+            TaskDistributionRequest.model_validate(
+                query_values(stage_id=0, stage_attempt_id=0, order_by=metric, limit=1)
+            ).order_by
+            == metric
+        )
+
+
+@pytest.mark.parametrize("request_type", ["stage", "distribution"])
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"manifest_path": "relative"},
+        {"attempt_id": "bad/attempt"},
+        {"expected_sha256": "A" * 64},
+        {"expected_sha256": "a" * 63},
+        {"extra": 1},
+        {"limit": 0},
+        {"limit": 21},
+        {"limit": True},
+        {"limit": "1"},
+        {"limit": 1.0},
+        {"stage_id": True},
+        {"stage_id": "1"},
+        {"stage_id": -1},
+        {"stage_id": 2**63},
+        {"stage_attempt_id": True},
+        {"stage_attempt_id": "1"},
+        {"stage_attempt_id": -1},
+        {"stage_attempt_id": 2**63},
+    ],
+)
+def test_metrics_requests_reject_unsafe_input(
+    request_type: str, overrides: dict[str, object]
+) -> None:
+    from mcp_stdio.plugins.spark.metrics_models import StageMetricsRequest, TaskDistributionRequest
+
+    model = StageMetricsRequest if request_type == "stage" else TaskDistributionRequest
+    values = query_values(
+        **({} if request_type == "stage" else {"stage_id": 0, "stage_attempt_id": 0})
+    )
+    with pytest.raises(ValidationError):
+        model.model_validate({**values, **overrides})
+
+
+def test_stage_pair_and_distribution_required_fields() -> None:
+    from mcp_stdio.plugins.spark.metrics_models import StageMetricsRequest, TaskDistributionRequest
+
+    for values in (query_values(stage_id=1), query_values(stage_attempt_id=0)):
+        with pytest.raises(ValidationError):
+            StageMetricsRequest.model_validate(values)
+    for values in (
+        {"manifest_path": "/cache/manifest.json", "expected_sha256": "a" * 64},
+        {"manifest_path": "/cache/manifest.json", "attempt_id": None},
+        query_values(stage_id=1),
+        query_values(stage_attempt_id=0),
+        query_values(stage_id=None, stage_attempt_id=0),
+        query_values(stage_id=0, stage_attempt_id=None),
+        query_values(stage_id=0, stage_attempt_id=0, order_by="average"),
+    ):
+        with pytest.raises(ValidationError):
+            TaskDistributionRequest.model_validate(values)
+
+
+def test_metrics_results_have_exact_named_shapes() -> None:
+    from mcp_stdio.plugins.spark import metrics_models as metric
+
+    snapshot = {"application_id": "application_1_42", "attempt_id": None, "sha256": "a" * 64}
+    coverage = {"application_start_seen": True, "application_end_seen": False}
+    ref = {"sha256": "a" * 64, "line": 13}
+    total = {"total": 300, "valid_count": 2, "missing_count": 0}
+    stage = {
+        "stage_id": 17,
+        "stage_attempt_id": 0,
+        "submission_time_ms": 1000,
+        "completion_time_ms": 2000,
+        "duration_ms": 1000,
+        "submitted_ref": ref,
+        "completed_ref": None,
+        "task_end_count": 3,
+        "successful_task_end_count": 2,
+        "non_success_task_end_count": 1,
+        "unknown_reason_task_end_count": 0,
+        "input_bytes": total,
+        "shuffle_read_bytes": total,
+    }
+    stage_result = metric.SparkStageMetricsResult.model_validate(
+        {
+            "snapshot": snapshot,
+            "coverage": coverage,
+            "matched_stage_attempt_count": 1,
+            "unassigned_task_end_count": 0,
+            "stages": (stage,),
+            "stages_omitted": 0,
+        }
+    )
+    assert set(stage_result.model_dump()) == {
+        "snapshot",
+        "coverage",
+        "matched_stage_attempt_count",
+        "unassigned_task_end_count",
+        "stages",
+        "stages_omitted",
+    }
+    assert set(stage_result.model_dump()["stages"][0]) == set(stage)
+    assert set(metric.MetricTotal.model_validate(total).model_dump()) == set(total)
+    distribution = {"valid_count": 2, "missing_count": 0, "min": 0, "p50": 0, "p95": 9, "max": 9}
+    values = {
+        "duration_ms": 9,
+        "executor_run_time_ms": None,
+        "jvm_gc_time_ms": 0,
+        "input_bytes": 300,
+        "shuffle_read_bytes": 100,
+        "shuffle_fetch_wait_ms": 2,
+    }
+    task = {"task_id": None, "executor_id": None, "ref": ref, **values}
+    result = metric.SparkTaskDistributionResult.model_validate(
+        {
+            "snapshot": snapshot,
+            "coverage": coverage,
+            "stage_id": 17,
+            "stage_attempt_id": 0,
+            "task_end_count": 3,
+            "successful_task_end_count": 2,
+            "non_success_task_end_count": 1,
+            "unknown_reason_task_end_count": 0,
+            "distributions": {name: distribution for name in values},
+            "order_by": "duration_ms",
+            "ranked_task_count": 1,
+            "top_tasks": (task,),
+            "tasks_omitted": 0,
+        }
+    )
+    assert set(result.model_dump()) == {
+        "snapshot",
+        "coverage",
+        "stage_id",
+        "stage_attempt_id",
+        "task_end_count",
+        "successful_task_end_count",
+        "non_success_task_end_count",
+        "unknown_reason_task_end_count",
+        "distributions",
+        "order_by",
+        "ranked_task_count",
+        "top_tasks",
+        "tasks_omitted",
+    }
+    assert set(result.model_dump()["top_tasks"][0]) == set(task)
+    assert set(result.model_dump()["distributions"]) == set(values)
+    assert set(metric.MetricDistribution.model_validate(distribution).model_dump()) == set(
+        distribution
+    )
+    assert set(metric.TaskMetricValues.model_validate(values).model_dump()) == set(values)
+    for model, payload in ((metric.SparkStageMetrics, stage), (metric.SparkRankedTask, task)):
+        with pytest.raises(ValidationError):
+            model.model_validate({**payload, "extra": 1})
+    for bad_executor_id in ("../3", "", "x" * 129):
+        with pytest.raises(ValidationError):
+            metric.SparkRankedTask.model_validate({**task, "executor_id": bad_executor_id})
+
+
+def test_metrics_gateway_is_async_with_explicit_deadline() -> None:
+    import inspect
+    from typing import get_type_hints
+
+    from mcp_stdio.plugins.spark import gateway
+    from mcp_stdio.plugins.spark import metrics_models as metric
+
+    for name, request, result in (
+        ("stage_metrics", metric.StageMetricsRequest, metric.SparkStageMetricsResult),
+        ("task_distribution", metric.TaskDistributionRequest, metric.SparkTaskDistributionResult),
+    ):
+        method = getattr(gateway.SparkMetricsGateway, name)
+        assert inspect.iscoroutinefunction(method)
+        assert (
+            inspect.signature(method).parameters["deadline"].kind is inspect.Parameter.KEYWORD_ONLY
+        )
+        assert get_type_hints(method) == {"request": request, "deadline": float, "return": result}
+    assert inspect.iscoroutinefunction(gateway.SparkMetricsGateway.close)

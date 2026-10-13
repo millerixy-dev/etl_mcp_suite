@@ -11,6 +11,12 @@ from mcp_stdio.plugins.spark.inspection_models import (
     SparkEventLogInspectionResult,
     SparkEventQueryResult,
 )
+from mcp_stdio.plugins.spark.metrics_models import (
+    SparkStageMetricsResult,
+    SparkTaskDistributionResult,
+    StageMetricsRequest,
+    TaskDistributionRequest,
+)
 from mcp_stdio.plugins.spark.models import SparkEventLogFetchResult
 
 
@@ -61,4 +67,14 @@ class SparkInspectionGateway(Protocol):
         self, request: InspectRequest, *, deadline: float
     ) -> SparkEventLogInspectionResult: ...
     async def query(self, request: QueryRequest, *, deadline: float) -> SparkEventQueryResult: ...
+    async def close(self) -> None: ...
+
+
+class SparkMetricsGateway(Protocol):
+    async def stage_metrics(
+        self, request: StageMetricsRequest, *, deadline: float
+    ) -> SparkStageMetricsResult: ...
+    async def task_distribution(
+        self, request: TaskDistributionRequest, *, deadline: float
+    ) -> SparkTaskDistributionResult: ...
     async def close(self) -> None: ...
