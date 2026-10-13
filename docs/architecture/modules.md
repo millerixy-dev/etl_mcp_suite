@@ -6,7 +6,7 @@ This document describes the package structure, module responsibilities, dependen
 
 The active OpenSpec proposal, specs, design, and tasks are the normative source of truth. This document is an explanatory architecture view and must be synchronized after approved OpenSpec changes.
 
-The fixed registry contains delivered Hive, Zeppelin, DolphinScheduler and Spark slices. The active Spark download change governs its acquisition and local evidence behavior.
+The fixed registry contains delivered Hive, Zeppelin, DolphinScheduler and Spark slices. The active Spark download and inspection changes govern acquisition and read-only local evidence selection.
 
 ## Architectural Style
 
@@ -163,6 +163,10 @@ src/mcp_stdio/
         ├── http_client.py
         ├── files.py
         ├── cache.py
+        ├── inspection_models.py
+        ├── inspection_reader.py
+        ├── inspection_events.py
+        ├── inspection.py
         └── tools.py
 ```
 
@@ -297,9 +301,14 @@ The configured status path is deployment input, not MCP caller input.
 - service.py validates requests and decides reuse versus refresh under one deadline.
 - http_client.py performs one lazy, bounded verified HTTPS GET; files.py validates ZIP/JSONL identities, redacts records and computes digests.
 - cache.py implements the gateway, owns the private root lock and acquisition workers, and publishes one directory/manifest per download. It verifies exact-source/scope manifests and file hashes for reuse.
-- tools.py exposes only fetch_spark_event_log; plugin.py composes dependencies and closes owned resources.
+- inspection_models.py owns strict InspectRequest/QueryRequest and named inspection/query results; gateway.py adds the read-only SparkInspectionGateway inspect/query/close port.
+- service.py also owns SparkInspectionService request validation, total deadlines and safe inspection/query errors; it depends on the port, not local file adapters.
+- inspection_reader.py verifies one explicitly selected manifest/attempt in a single scan; inspection_events.py projects direct IDs, selected redacted text and bounded head/tail details.
+- inspection.py implements SparkInspectionAdapter, full-file counters, bounded evidence selection and own-field query pagination without relation propagation or a persistent index.
+- tools.py exposes fetch_spark_event_log, inspect_spark_event_log and query_spark_events; plugin.py composes dependencies under the existing single directory owner and closes acquisition/inspection work before releasing it.
+- skills/spark-diagnosis/SKILL.md consumes those capabilities for agent-side hypotheses and counterevidence; installers distribute its canonical file without registering a Spark server.
 
-No object store, snapshot layer, index, TTL, GC or generic storage interface is introduced. Files/cache adapters are infrastructure and cannot be imported by the Spark service. All plugin imports remain within the slice; only registry imports its concrete composition root from shared code.
+No object store, persistent analysis index, TTL, GC or generic storage interface is introduced. Files/cache adapters are infrastructure and cannot be imported by the Spark service. All plugin imports remain within the slice; only registry imports its concrete composition root from shared code.
 
 ## Cross-Cutting Policies
 

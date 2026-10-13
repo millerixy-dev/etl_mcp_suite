@@ -4,7 +4,7 @@
 
 一个轻量级、基于插件的 MCP（Model Context Protocol）stdio Server。每个子进程只加载一个内置插件，并且只向 MCP Host 暴露该插件的工具。
 
-内置插件包括：用于只读 HiveServer2 元数据查询（数据库、表、字段、分区与可选 DDL）的 **Hive schema plugin**、**Zeppelin 笔记本执行**、**DolphinScheduler 调度**，以及 **Spark event log 下载**。
+内置插件包括：用于只读 HiveServer2 元数据查询（数据库、表、字段、分区与可选 DDL）的 **Hive schema plugin**、**Zeppelin 笔记本执行**、**DolphinScheduler 调度**，以及 **Spark event log 下载与取证**。
 
 ## 前置条件
 
@@ -168,7 +168,7 @@ ln -sfn "$PROD_ROOT/releases/<previous-release>" "$PROD_ROOT/current"
 
 ## Agent Skills
 
-客户端无关的 Hive、Zeppelin 和自然语言查询 Skill 统一维护在 `skills/hive`、`skills/zeppelin` 与 `skills/nl2sql`。根据正在使用的 MCP 客户端，将相同的规范文件安装到当前项目：
+客户端无关的 Hive、Zeppelin、自然语言查询和 Spark 诊断 Skill 统一维护在 `skills/hive`、`skills/zeppelin`、`skills/nl2sql` 与 `skills/spark-diagnosis`。根据正在使用的 MCP 客户端，将相同的规范文件安装到当前项目：
 
 ```bash
 ./scripts/install-skills-codex.sh
@@ -533,7 +533,8 @@ uv run mcp-stdio --plugin dolphinscheduler \
 
 ## Spark event log 下载
 
-Spark 只暴露 `fetch_spark_event_log(application_id, attempt_id=None, refresh=False)`。
+Spark 暴露 `fetch_spark_event_log`、`inspect_spark_event_log` 和 `query_spark_events`。
+获取接口为 `fetch_spark_event_log(application_id, attempt_id=None, refresh=False)`。
 它下载配置的 Spark History Server ZIP，校验身份、CRC 和 JSONL，脱敏后保存 JSONL 与一份
 清单，后续诊断工具直接读取本地路径。首版格式以已验证的 Spark 2.4.7 单文件 JSONL 为依据。
 
@@ -643,6 +644,63 @@ SPARK URL/cache/CA 部署环境，以及 Cookie 或用户名密码和 SSO 地址
 ```sh
 uv run --locked pytest -m integration tests/integration/test_spark_server.py
 ```
+
+### 本地证据概览与精确查询
+
+两个读取工具只扫描已保存的私有脱敏 JSONL，不发送 HTTP、不刷新、不写分析状态，也不需要凭据。`history_server_url` 仍必须与 manifest 来源一致；原 cache_dir、大小/时限和目录锁约束不变。inspect 返回 `SparkEventLogInspectionResult`，query 返回 `SparkEventQueryResult`。以下为合成示例，不是真实应用诊断。
+
+inspect 只接受前两项；query 接受所有参数。数字严格为整数（不接受 bool 或字符串），未知参数和空列表拒绝；实体 ID 与游标范围为 0–2^63-1，行号从 1 开始。attempt/executor ID 使用 `[A-Za-z0-9_-]{1,128}`。
+
+| Parameter | Type / default | Meaning |
+| --- | --- | --- |
+| manifest_path | string, required | Absolute existing private-cache manifest path |
+| attempt_id | string or null, required | Explicit selected attempt; null means actual no-attempt |
+| expected_sha256 | string, required by query | Copy inspect.snapshot.sha256; sanitized JSONL digest |
+| event_types | list[string] or null | 1–16 exact Event names, OR within list |
+| execution_id / job_id / stage_id / task_id | int or null | Nonnegative direct event IDs only |
+| stage_attempt_id | int or null | Requires stage_id |
+| executor_id | string or null | Direct executor ID |
+| task_end_reason | string or null | Exact TaskEnd reason; UNKNOWN selects missing/invalid reason |
+| lines | list[int] or null | 1–20 distinct 1-based physical lines |
+| after_line | int, 0 | Page begins strictly after this line |
+| limit | int, 20 | 1–20 returned records |
+| max_detail_chars | int, 2048 | 1–32768 characters; >2048 requires one lines entry and limit=1 |
+
+```json
+{"manifest_path":"/var/tmp/mcp-spark-l3/evidence/manifest.json","attempt_id":null}
+```
+
+```json
+{
+  "snapshot":{"application_id":"application_100_1","attempt_id":null,"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+  "spark_version":"2.4.7","event_count":3,
+  "event_types":[{"event_type":"SparkListenerApplicationStart","count":1},{"event_type":"SparkListenerJobEnd","count":1},{"event_type":"SparkListenerLogStart","count":1}],
+  "event_types_omitted":0,
+  "signals":{"job_failed_events":0,"stage_failure_events":0,"task_non_success_events":0,"executor_removed_events":0},
+  "task_end_count":0,"task_end_reasons":[],"reasons_omitted":0,
+  "evidence":[{"ref":{"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","line":3},"event_type":"SparkListenerJobEnd","ids":{"execution_id":null,"job_id":0,"stage_id":null,"stage_attempt_id":null,"task_id":null,"executor_id":null},"details":"Job Result: {\"Result\":\"JobSucceeded\"}","details_truncated":false}],
+  "evidence_omitted":0,"coverage":{"application_start_seen":true,"application_end_seen":false}
+}
+```
+
+```json
+{"manifest_path":"/var/tmp/mcp-spark-l3/evidence/manifest.json","attempt_id":null,"expected_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","event_types":["SparkListenerTaskEnd"],"stage_id":3,"task_end_reason":"FetchFailed"}
+```
+
+```json
+{
+  "snapshot":{"application_id":"application_100_1","attempt_id":null,"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+  "matched_count":0,"task_end_count":0,"task_end_reasons":[],"reasons_omitted":0,
+  "events":[],"returned_count":0,"next_after_line":null,
+  "coverage":{"application_start_seen":true,"application_end_seen":false}
+}
+```
+
+不同筛选 AND；只匹配事件自身字段。job_id 不自动带回 task/stage；execution_id 不自动带回 JobEnd。先读 JobStart 的 Stage IDs / SQL 属性，再分别查询实体。`matched_count` 和原因分布在分页前统计全部匹配；翻页只改变 after_line，保持筛选和摘要固定。
+
+默认最多 20 条、每条 details 最多 2048 字符；类型/原因前 32 类和概览证据前 20 条均有 omitted 字段。details_truncated 表示中段省略，外层结果合法 JSON，但正文不保证合法 JSON。关键文本用原 hash 和 `lines=[ref.line], limit=1, max_detail_chars=32768` 扩大回读；仍截断须报告缺口。ref 绑定脱敏文件 SHA-256 与物理行号。coverage 只表示 ApplicationStart/End 是否可见，不证明上游完整、YARN 或 SQL 成功。
+
+[spark-diagnosis Skill](skills/spark-diagnosis/SKILL.md) 指导假设、反证、重试恢复与引用，输出 supported / inconclusive / no_observed_failure；不自动分类根因。FetchFailed 加 executor 丢失不能证明 OOM。现有安装脚本会复制这份 Skill；`--with-mcp` 仍只配置 Hive、Zeppelin 和 DolphinScheduler，Spark 实例按上文独立配置，不自动修改用户 MCP 配置。
 
 ## 进程隔离
 

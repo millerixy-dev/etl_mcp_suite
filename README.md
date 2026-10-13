@@ -8,7 +8,7 @@ plugin's tools to an MCP host.
 
 The built-in plugins are the **Hive schema plugin** for read-only HiveServer2
 metadata inspection (databases, tables, columns, partitions, and optional DDL),
-**Zeppelin notebook execution**, **DolphinScheduler scheduling**, and **Spark event-log download**.
+**Zeppelin notebook execution**, **DolphinScheduler scheduling**, and **Spark event-log download and inspection**.
 
 ## Requirements
 
@@ -184,8 +184,8 @@ ln -sfn "$PROD_ROOT/releases/<previous-release>" "$PROD_ROOT/current"
 
 ## Agent Skills
 
-The client-neutral Hive, Zeppelin, and natural-language query skills are maintained once at
-`skills/hive`, `skills/zeppelin`, and `skills/nl2sql`. Install the same canonical files into the
+The client-neutral Hive, Zeppelin, natural-language query, and Spark diagnosis skills are maintained once at
+`skills/hive`, `skills/zeppelin`, `skills/nl2sql`, and `skills/spark-diagnosis`. Install the same canonical files into the
 current project for the MCP client in use:
 
 ```bash
@@ -598,7 +598,8 @@ operations.
 
 ## Spark event log download
 
-Spark exposes exactly `fetch_spark_event_log(application_id, attempt_id=None, refresh=False)`.
+Spark exposes `fetch_spark_event_log`, `inspect_spark_event_log` and `query_spark_events`.
+Acquisition uses `fetch_spark_event_log(application_id, attempt_id=None, refresh=False)`.
 It downloads the configured Spark History Server logs ZIP, validates identities/CRC/JSONL,
 redacts credentials and saves local JSONL files plus one manifest for later diagnosis tools.
 The first format target is the verified Spark 2.4.7 single-file JSONL layout.
@@ -718,6 +719,63 @@ URL/cache/CA deployment environment plus either Cookie or paired username/passwo
 ```sh
 uv run --locked pytest -m integration tests/integration/test_spark_server.py
 ```
+
+### Inspect and query saved local evidence
+
+Both readers scan existing private sanitized JSONL without HTTP, refresh, analysis writes or credentials. The configured history_server_url must still match the manifest source; existing cache, size/deadline and exclusive ownership rules apply. inspect returns `SparkEventLogInspectionResult`; query returns `SparkEventQueryResult`. Examples below are synthetic.
+
+inspect accepts only the first two parameters; query accepts all. Numeric inputs are strict integers (not bool/string); unknown fields and empty lists are rejected. Entity IDs/cursors range from 0 to 2^63-1; physical lines start at 1. Attempt/executor IDs use `[A-Za-z0-9_-]{1,128}`.
+
+| Parameter | Type / default | Meaning |
+| --- | --- | --- |
+| manifest_path | string, required | Absolute existing private-cache manifest path |
+| attempt_id | string or null, required | Explicit selected attempt; null means actual no-attempt |
+| expected_sha256 | string, required by query | Copy inspect.snapshot.sha256; sanitized JSONL digest |
+| event_types | list[string] or null | 1–16 exact Event names, OR within list |
+| execution_id / job_id / stage_id / task_id | int or null | Nonnegative direct event IDs only |
+| stage_attempt_id | int or null | Requires stage_id |
+| executor_id | string or null | Direct executor ID |
+| task_end_reason | string or null | Exact TaskEnd reason; UNKNOWN selects missing/invalid reason |
+| lines | list[int] or null | 1–20 distinct 1-based physical lines |
+| after_line | int, 0 | Page begins strictly after this line |
+| limit | int, 20 | 1–20 returned records |
+| max_detail_chars | int, 2048 | 1–32768 characters; >2048 requires one lines entry and limit=1 |
+
+```json
+{"manifest_path":"/var/tmp/mcp-spark-l3/evidence/manifest.json","attempt_id":null}
+```
+
+```json
+{
+  "snapshot":{"application_id":"application_100_1","attempt_id":null,"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+  "spark_version":"2.4.7","event_count":3,
+  "event_types":[{"event_type":"SparkListenerApplicationStart","count":1},{"event_type":"SparkListenerJobEnd","count":1},{"event_type":"SparkListenerLogStart","count":1}],
+  "event_types_omitted":0,
+  "signals":{"job_failed_events":0,"stage_failure_events":0,"task_non_success_events":0,"executor_removed_events":0},
+  "task_end_count":0,"task_end_reasons":[],"reasons_omitted":0,
+  "evidence":[{"ref":{"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","line":3},"event_type":"SparkListenerJobEnd","ids":{"execution_id":null,"job_id":0,"stage_id":null,"stage_attempt_id":null,"task_id":null,"executor_id":null},"details":"Job Result: {\"Result\":\"JobSucceeded\"}","details_truncated":false}],
+  "evidence_omitted":0,"coverage":{"application_start_seen":true,"application_end_seen":false}
+}
+```
+
+```json
+{"manifest_path":"/var/tmp/mcp-spark-l3/evidence/manifest.json","attempt_id":null,"expected_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","event_types":["SparkListenerTaskEnd"],"stage_id":3,"task_end_reason":"FetchFailed"}
+```
+
+```json
+{
+  "snapshot":{"application_id":"application_100_1","attempt_id":null,"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+  "matched_count":0,"task_end_count":0,"task_end_reasons":[],"reasons_omitted":0,
+  "events":[],"returned_count":0,"next_after_line":null,
+  "coverage":{"application_start_seen":true,"application_end_seen":false}
+}
+```
+
+Filters are ANDed and match each event's own fields. job_id does not expand to stages/tasks; execution_id does not expand to JobEnd. Read JobStart Stage IDs / SQL properties and query each entity separately. matched_count and reason distribution cover all matches before pagination; keep filters/hash fixed while changing after_line.
+
+Outputs default to 20 records and 2048 characters per details. Type/reason lists contain at most 32 categories and overview evidence at most 20 entries, with omitted counts. details_truncated marks omitted middle text: the outer result is valid JSON, but details need not be. Expand critical text using the same hash and `lines=[ref.line], limit=1, max_detail_chars=32768`; report a gap if still truncated. References bind sanitized-file SHA-256 and physical line. coverage describes observed ApplicationStart/End only, not upstream completeness or YARN/SQL success.
+
+The [spark-diagnosis Skill](skills/spark-diagnosis/SKILL.md) guides hypotheses, counterevidence, recovery checks and citations with supported / inconclusive / no_observed_failure conclusions; it adds no backend classifier. FetchFailed plus executor loss does not prove OOM. Existing installers copy this Skill; `--with-mcp` continues to configure Hive, Zeppelin, and DolphinScheduler only. Configure the Spark instance separately as above; installation does not automatically alter user Spark MCP configuration.
 
 ## Process isolation
 

@@ -12,6 +12,7 @@ import yaml
 
 PROJECT_ROOT = Path(__file__).parents[2]
 CANONICAL_SKILLS = {
+    "spark-diagnosis": {"fetch_spark_event_log", "inspect_spark_event_log", "query_spark_events"},
     "hive": {"list_databases", "list_tables", "get_table_schema"},
     "zeppelin": {
         "get_interpreter_bindings",
@@ -37,6 +38,19 @@ CANONICAL_SKILLS = {
     },
 }
 REQUIRED_GUIDANCE = {
+    "spark-diagnosis": {
+        "manifest_path",
+        "attempt_id",
+        "expected_sha256",
+        "snapshot.sha256",
+        "Stage IDs",
+        "JobEnd",
+        "details_truncated",
+        "32768",
+        "supported",
+        "inconclusive",
+        "no_observed_failure",
+    },
     "hive": {"partition_columns", "[A-Za-z_][A-Za-z0-9_]*", "zeppelin"},
     "zeppelin": {
         "restart_allowed",
@@ -280,8 +294,7 @@ def test_installer_help_names_the_public_entry_point(
     assert completed.returncode == 0, completed.stderr
     expected_suffix = " [--with-mcp]"
     assert (
-        f"Usage: {script_name} [--project-root PATH] [--force]{expected_suffix}"
-        in completed.stdout
+        f"Usage: {script_name} [--project-root PATH] [--force]{expected_suffix}" in completed.stdout
     )
 
 

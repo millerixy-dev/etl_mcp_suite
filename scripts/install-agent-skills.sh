@@ -107,7 +107,7 @@ script_directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 repository_root=$(CDPATH= cd -- "$script_directory/.." && pwd -P)
 source_root=$repository_root/skills
 destination_root=$project_root/$client_directory/skills
-managed_skills="hive zeppelin nl2sql"
+managed_skills="hive zeppelin nl2sql spark-diagnosis"
 
 codex_config=$project_root/.codex/config.toml
 trae_config=$project_root/.trae/mcp.json
@@ -276,7 +276,7 @@ for skill_name in $managed_skills; do
     cp -R "$source_skill/." "$target_skill/"
 done
 
-printf 'Installed hive, zeppelin, and nl2sql skills into %s\n' "$destination_root"
+printf 'Installed hive, zeppelin, nl2sql, and spark-diagnosis skills into %s\n' "$destination_root"
 
 if [ "$with_mcp" -eq 1 ]; then
     if [ "$client" = codex ]; then

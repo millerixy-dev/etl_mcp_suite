@@ -203,6 +203,24 @@ Startup acquires a local exclusive directory lock without connecting upstream. T
 
 Evidence persists until user cleanup. Refresh creates another directory; there is no TTL, deduplication or GC. Cancellation/failure deletes only the call's unpublished directory. Shutdown cancels and awaits owned acquisition workers before closing the HTTP client and releasing the root lock. Force-kill remnants are ignored .part directories for manual cleanup.
 
+### Offline inspection and query
+
+```text
+inspect_spark_event_log(manifest_path, attempt_id)
+query_spark_events(manifest_path, attempt_id, expected_sha256, ...direct filters)
+  -> validate strict request DTO under the original total deadline
+  -> select one explicit attempt (null means actual no-attempt)
+  -> verify private regular paths, configured source and manifest format
+  -> single JSONL scan: digest/size/count/identity validation plus bounded selection
+  -> publish named result only after verified EOF; no HTTP or replacement download
+```
+
+query requires the sanitized snapshot.sha256 from inspect. It ANDs direct own-field filters, computes all-match counts/reasons before after_line/limit, and returns hash/physical-line references. JobStart Stage IDs remain readable evidence for a separate stage query; the adapter never expands job/SQL relationships. Critical truncated details can be reread with one lines entry, limit=1 and max_detail_chars=32768. End-event coverage records presence only, not terminal YARN/SQL success.
+
+Both calls reuse configured byte/time limits, redaction and directory ownership. Cancellation/timeout/shutdown cancel and await owned readers before directory lock release; corrupt or changed evidence returns safe errors without partial results or persisted analysis. These local calls work without credentials and never trigger the acquisition login/download flow above.
+
+The portable spark-diagnosis Skill discovers capabilities, pins manifest/attempt/hash, checks full-match distributions, direct entity evidence and recovery, and returns supported/inconclusive/no_observed_failure with supporting/opposing refs and gaps. Driver/Executor/YARN evidence is optional only through already available tools and its actual contract; no inferred uniform snapshot field, ad-hoc endpoint or backend classifier is introduced.
+
 ## Error Flow
 
 ```mermaid
