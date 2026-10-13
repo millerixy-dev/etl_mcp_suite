@@ -15,7 +15,7 @@ Five synthetic diagnostic cases were exercised separately through actual in-proc
 
 ## Final verification
 
-The controller will append actual integrated command/review results below before gating task 4.1.
+Integrated verification was executed on the final implementation and the corrected core operation test. Results and the local environment adjustment are recorded below.
 
 ### Core error-operation contract correction
 
@@ -23,3 +23,27 @@ The closed public operation assertion in `tests/unit/core/test_errors.py` lagged
 
 - RED: `UV_NO_EDITABLE=1 uv run --locked pytest tests/unit/core/test_errors.py::test_tool_operations_are_closed_to_v1_tools_plus_internal_fallback` failed (1 failed), with precisely those two names extra in the actual set.
 - GREEN: after adding the two names to the exact expected set, `UV_NO_EDITABLE=1 uv run --locked pytest tests/unit/core/test_errors.py` passed (45 passed in 0.12s).
+
+### Integrated command results
+
+| Command | Actual result |
+| --- | --- |
+| `uv sync --locked` | 57 packages resolved, 51 checked; no dependency or lock edits |
+| `uv sync --locked --no-editable` | Same current project installed as a regular package; local verification environment only |
+| `UV_NO_EDITABLE=1 uv run --locked pytest` | 1806 passed, 6 skipped, 6 deselected in 29.77 s |
+| `uv run --locked --no-editable ruff check .` | All checks passed |
+| `UV_NO_EDITABLE=1 uv run --locked pyright` | 0 errors, 0 warnings, 0 informations; updater notice only |
+| `uv build` | Built wheel and source distribution successfully |
+| `UV_NO_EDITABLE=1 uv run --locked mcp-stdio --help` | Exit 0; four-plugin console help displayed without upstream access |
+| `openspec validate add-spark-event-log-inspection --strict` | Valid |
+| `openspec validate --changes --strict` | 16 passed, 0 failed |
+| `openspec validate --specs --strict` | 2 passed, 0 failed |
+| `git diff --check` | Exit 0 |
+
+The initial full run had 1799 passed, one stale exact-operation assertion failure and six subprocess import failures. The assertion correction follows the RED/GREEN evidence above. The six import failures and initial console smoke failure reproduced the previously diagnosed macOS environment issue: the editable .pth carried UF_HIDDEN and Python site initialization skipped it. Clearing that flag restored the import within one process, but the flag reappeared before later child processes. Installing the same project via uv's non-editable mode removed the .pth dependency. The focused registry suite then passed (14 tests in 2.59 s), followed by the complete green rerun above. No PYTHONPATH, source, lockfile or production configuration workaround was added.
+
+The default suite excludes tests marked integration (six deselected), and six opt-in DolphinScheduler cases skipped because integration was not enabled. No live-backend integration was executed or claimed. Strict validation also emitted existing informational notices about unrelated archive ordering and a long main-spec requirement; all validations passed.
+
+### Whole-change review
+
+A separate read-only reviewer examined the capability range `cd8abb0..17a21f7`, its active design/spec/tasks, relevant unchanged cache/redaction/runtime code, tests and task reports. The verdict was ready after the controller records final passing verification, with no Critical, Important or Minor findings. It confirmed snapshot verification, direct filtering and pagination, cleanup, public redaction, architecture boundaries, documentation and the evidence-loop Skill. The reviewer also checked the final narrow test-contract correction in `5b73fdc` and approved it without findings. No additional feature, dependency, index, state file or broad refactor was recommended.

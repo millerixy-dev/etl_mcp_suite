@@ -17,4 +17,4 @@
 
 ## 4. 整体验证
 
-- [ ] 4.1 运行 `uv sync --locked`、`uv run --locked pytest`、`uv run --locked ruff check .`、`uv run --locked pyright`、`uv build`、`uv run --locked mcp-stdio --help`、`openspec validate add-spark-event-log-inspection --strict`、`openspec validate --changes --strict` 和 `openspec validate --specs --strict`；审查整项 diff/合同一致性并在本任务下记录结果。本地真实成功日志可选验证扫描耗时、峰值内存、事件数/摘要，不入库；没有材料或未执行网络集成时明确记为跳过。
+- [x] 4.1 运行 `uv sync --locked`、`uv run --locked pytest`、`uv run --locked ruff check .`、`uv run --locked pyright`、`uv build`、`uv run --locked mcp-stdio --help`、`openspec validate add-spark-event-log-inspection --strict`、`openspec validate --changes --strict` 和 `openspec validate --specs --strict`；审查整项 diff/合同一致性并在本任务下记录结果。本地真实成功日志可选验证扫描耗时、峰值内存、事件数/摘要，不入库；没有材料或未执行网络集成时明确记为跳过。
