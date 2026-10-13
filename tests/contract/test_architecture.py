@@ -133,3 +133,22 @@ def test_spark_service_file_adapters_are_rejected(
     assert [(v.rule, v.imported) for v in find_import_violations(root)] == [
         ("service-to-infrastructure", imported),
     ]
+
+
+@pytest.mark.parametrize("module", ["inspection", "inspection_reader", "inspection_events"])
+@pytest.mark.parametrize(
+    "form",
+    [
+        "from .{module} import Value\n",
+        "from mcp_stdio.plugins.spark import {module}\n",
+        "import mcp_stdio.plugins.spark.{module}\n",
+    ],
+)
+def test_spark_service_inspection_infrastructure_rejected(
+    tmp_path: Path, module: str, form: str
+) -> None:
+    root = tmp_path / "src"
+    _write_module(root, "mcp_stdio/plugins/spark/service.py", form.format(module=module))
+    assert [(v.rule, v.imported) for v in find_import_violations(root)] == [
+        ("service-to-infrastructure", "mcp_stdio.plugins.spark." + module),
+    ]

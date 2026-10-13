@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+from typing import NoReturn
 
 import pytest
 
 from mcp_stdio.core.errors import ErrorCategory
 from mcp_stdio.plugins.spark.gateway import SparkGatewayError, spark_error
+from mcp_stdio.plugins.spark.inspection_models import InspectRequest, QueryRequest
 from mcp_stdio.plugins.spark.models import SparkEventLogFetchResult, SparkEventLogFile
 
 
@@ -119,3 +121,83 @@ async def test_domain_errors_propagate() -> None:
     with pytest.raises(SparkGatewayError) as error:
         await service.fetch("application_1_42", refresh=True)
     assert error.value.tool_error.category == ErrorCategory.NOT_FOUND
+
+
+class FakeInspectionGateway:
+    def __init__(self, delay: float = 0) -> None:
+        self.calls: list[tuple[object, float]] = []
+        self.delay = delay
+        self.cleaned = False
+
+    async def inspect(self, request: InspectRequest, *, deadline: float) -> NoReturn:
+        self.calls.append((request, deadline))
+        try:
+            await asyncio.sleep(self.delay)
+            raise spark_error(ErrorCategory.NOT_FOUND)
+        finally:
+            self.cleaned = True
+
+    async def query(self, request: QueryRequest, *, deadline: float) -> NoReturn:
+        return await self.inspect(request, deadline=deadline)
+
+    async def close(self) -> None:
+        self.cleaned = True
+
+
+@pytest.mark.parametrize(
+    "query, options",
+    [
+        (False, {}),
+        (True, {}),
+        (True, {"stage_attempt_id": 1}),
+        (True, {"max_detail_chars": 2049}),
+        (True, {"job_id": True}),
+        (True, {"limit": "1"}),
+    ],
+)
+async def test_inspection_service_validation_and_public_errors(
+    query: bool, options: dict[str, object]
+) -> None:
+    from mcp_stdio.plugins.spark.service import SparkInspectionService
+
+    gateway = FakeInspectionGateway()
+    service = SparkInspectionService(gateway=gateway, request_timeout_seconds=1)
+    with pytest.raises(SparkGatewayError) as error:
+        if query:
+            await service.query("/l3/manifest.json", None, "a" * 64, **options)
+        else:
+            await service.inspect("/l3/manifest.json", None)
+    expected = ErrorCategory.INVALID_INPUT if options else ErrorCategory.NOT_FOUND
+    assert error.value.tool_error.category == expected
+    assert error.value.tool_error.operation.value == (
+        "query_spark_events" if query else "inspect_spark_event_log"
+    )
+    assert bool(gateway.calls) is (not options)
+
+
+async def test_inspection_service_timeout_awaits_cleanup() -> None:
+    from mcp_stdio.plugins.spark.service import SparkInspectionService
+
+    gateway = FakeInspectionGateway(delay=1)
+    service = SparkInspectionService(gateway=gateway, request_timeout_seconds=0.01)
+    with pytest.raises(SparkGatewayError) as error:
+        await service.inspect("/l3/manifest.json", None)
+    assert error.value.tool_error.category == ErrorCategory.TIMEOUT
+    assert error.value.tool_error.operation.value == "inspect_spark_event_log"
+    assert gateway.cleaned
+
+
+async def test_inspection_service_cancellation_awaits_cleanup() -> None:
+    from mcp_stdio.plugins.spark.service import SparkInspectionService
+
+    gateway = FakeInspectionGateway(delay=1)
+    task = asyncio.create_task(
+        SparkInspectionService(gateway=gateway, request_timeout_seconds=2).inspect(
+            "/l3/manifest.json", None
+        )
+    )
+    await asyncio.sleep(0.01)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert gateway.cleaned

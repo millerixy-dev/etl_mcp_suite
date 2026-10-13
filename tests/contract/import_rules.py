@@ -50,7 +50,15 @@ def _imports(tree: ast.AST, package: str) -> list[tuple[str, int]]:
                     (f"{imported}.{alias.name}", node.lineno)
                     for imported in resolved
                     for alias in node.names
-                    if alias.name in {"websocket_client", "files", "cache"}
+                    if alias.name
+                    in {
+                        "websocket_client",
+                        "files",
+                        "cache",
+                        "inspection",
+                        "inspection_reader",
+                        "inspection_events",
+                    }
                 )
     return imports
 
@@ -74,6 +82,9 @@ def _is_service_infrastructure_import(module: str, imported: str) -> bool:
         "tools",
         "websocket_client",
         "files",
+        "inspection",
+        "inspection_reader",
+        "inspection_events",
     }
     return (
         imported.split(".")[-1] in infrastructure_modules

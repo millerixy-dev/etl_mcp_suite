@@ -82,7 +82,11 @@ def _session(root: Path, outcome: str, auth: str = "cookie") -> dict[str, Any]:
         _send(process, _INITIALIZED_NOTIFICATION)
         _send(process, _TOOLS_LIST_REQUEST)
         listing = _read(process)
-        assert [tool["name"] for tool in listing["result"]["tools"]] == ["fetch_spark_event_log"]
+        assert [tool["name"] for tool in listing["result"]["tools"]] == [
+            "fetch_spark_event_log",
+            "inspect_spark_event_log",
+            "query_spark_events",
+        ]
         _send(
             process,
             {
@@ -97,6 +101,87 @@ def _session(root: Path, outcome: str, auth: str = "cookie") -> dict[str, Any]:
         )
         reply = _read(process)
         messages.append(reply)
+        if outcome != "error":
+            fetched = json.loads(reply["result"]["content"][0]["text"])
+            immutable = {
+                str(path): (path.read_bytes(), path.stat().st_mtime_ns)
+                for path in root.rglob("*")
+                if path.is_file() and path.name != ".lock"
+            }
+            common = {"manifest_path": fetched["manifest_path"], "attempt_id": "1"}
+            responses: list[dict[str, Any]] = []
+            for request_id, name, arguments in [
+                (4, "inspect_spark_event_log", common),
+                (
+                    5,
+                    "query_spark_events",
+                    {
+                        **common,
+                        "expected_sha256": fetched["files"][0]["sha256"],
+                        "lines": [3],
+                        "limit": 1,
+                        "max_detail_chars": 32768,
+                    },
+                ),
+                (6, "query_spark_events", {**common, "expected_sha256": "a" * 64}),
+                (7, "inspect_spark_event_log", {**common, "unknown": "forbidden-secret"}),
+            ]:
+                _send(
+                    process,
+                    {
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "method": "tools/call",
+                        "params": {"name": name, "arguments": arguments},
+                    },
+                )
+                response = _read(process)
+                messages.append(response)
+                responses.append(response["result"])
+            overview = json.loads(responses[0]["content"][0]["text"])
+            query = json.loads(responses[1]["content"][0]["text"])
+            assert set(overview) == {
+                "snapshot",
+                "spark_version",
+                "event_count",
+                "event_types",
+                "event_types_omitted",
+                "signals",
+                "task_end_count",
+                "task_end_reasons",
+                "reasons_omitted",
+                "evidence",
+                "evidence_omitted",
+                "coverage",
+            }
+            assert set(query) == {
+                "snapshot",
+                "matched_count",
+                "task_end_count",
+                "task_end_reasons",
+                "reasons_omitted",
+                "events",
+                "returned_count",
+                "next_after_line",
+                "coverage",
+            }
+            assert overview["event_count"] == 3
+            assert query["events"][0]["ref"] == {
+                "sha256": overview["snapshot"]["sha256"],
+                "line": 3,
+            }
+            assert query["matched_count"] == query["returned_count"] == 1
+            assert query["next_after_line"] is None
+            assert "UNEXPECTED_RESPONSE" in responses[2]["content"][0]["text"]
+            assert "query_spark_events" in responses[2]["content"][0]["text"]
+            assert "INVALID_INPUT" in responses[3]["content"][0]["text"]
+            assert "inspect_spark_event_log" in responses[3]["content"][0]["text"]
+            assert "forbidden-secret" not in json.dumps(messages)
+            assert immutable == {
+                str(path): (path.read_bytes(), path.stat().st_mtime_ns)
+                for path in root.rglob("*")
+                if path.is_file() and path.name != ".lock"
+            }
         assert process.stdin is not None
         process.stdin.close()
         process.stdin = None
