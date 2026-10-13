@@ -6,7 +6,7 @@
 ## 2. 两个离线事实工具
 
 - [x] 2.1 RED：在 metrics 测试补 Stage attempt 分组、未归属事件、生命周期选取、排名/遗漏与筛选；GREEN：复用验证 reader 实现 `get_spark_stage_metrics`；REFACTOR：只保留计数、和及必要 refs。用 `uv run --locked pytest tests/unit/plugins/spark/test_metrics.py` 验证重试分开、缺/逆序时间为 null、TaskEnd-only 组、排序并列、全组计数先于 limit、成功样本总量及来源 ref；沿用快照冲突、私有路径和无写入/网络合同。
-- [ ] 2.2 RED：补分布与有界 Task 排名、独立缺失计数、各 order_by、refs 回读与取消测试；GREEN：实现 `get_spark_task_distribution`，仅保留选定组必要数值和至多 limit 个任务投影；REFACTOR：复用字段提取与口径，保证原总时限和关闭等待。用 `uv run --locked pytest tests/unit/plugins/spark/test_metrics.py tests/unit/plugins/spark/test_cache.py` 验证全部成功样本先于排名、并列按行号、未知 ID 保持 null、零成功/零匹配、末端摘要冲突不发布结果、取消/超时关闭和 refs 对应原事件。
+- [x] 2.2 RED：补分布与有界 Task 排名、独立缺失计数、各 order_by、refs 回读与取消测试；GREEN：实现 `get_spark_task_distribution`，仅保留选定组必要数值和至多 limit 个任务投影；REFACTOR：复用字段提取与口径，保证原总时限和关闭等待。用 `uv run --locked pytest tests/unit/plugins/spark/test_metrics.py tests/unit/plugins/spark/test_cache.py` 验证全部成功样本先于排名、并列按行号、未知 ID 保持 null、零成功/零匹配、末端摘要冲突不发布结果、取消/超时关闭和 refs 对应原事件。
 
 ## 3. MCP 接线与 Agent 工作流
 

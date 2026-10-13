@@ -70,3 +70,7 @@ Result: 0 errors, 0 warnings, 0 informations.
 `git diff --check`: passed.
 
 Only metrics.py, test_metrics.py and this report changed in the follow-up. No task checkbox, unrelated change, dependency/config/network or architecture adjustment.
+
+## Controller gate
+
+Controller fresh command `UV_NO_EDITABLE=1 uv run --locked --reinstall-package hive-cli-mcp-stdio pytest tests/unit/plugins/spark/test_metrics.py tests/unit/plugins/spark/test_cache.py tests/unit/plugins/spark/test_inspection.py` passed170 tests in14.50s; independent spec/quality re-review Approved, no findings. Stage and Task publication deadline checks are both verified. Service/MCP composition remains task3.1.
