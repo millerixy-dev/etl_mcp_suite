@@ -131,3 +131,33 @@ Task 1.2 RED/GREEN evidence: initial missing-module RED 26 failed/8 passed; over
 float RED 1 failed/41 passed; canonical ancestor alias RED 1 failed/46 passed.
 Fresh final cache verification 47 passed. Focused ruff clean, pyright 0 errors/warnings.
 Full details and exact commands are in task-1.2-report.md; parent owns checkbox gate.
+
+## Task 2.1 micro-plan: bounded full-file overview
+
+Files: create `src/mcp_stdio/plugins/spark/inspection.py`, extend
+`inspection_events.py`, create `tests/unit/plugins/spark/test_inspection.py`.
+No query or public operation mapping; controller alone gates tasks.md.
+
+1. RED: real snapshots use `private_manifest`, replace JSONL and size/hash/count/end
+metadata. Assert 25 FetchFailed events plus late JobFailed/Stage failure select
+lines `[30,29,3]`, 20 samples and eight omitted, complete counters. Cover invalid
+reasons, fallback ending lines, category ties, fixed projection, Unicode,
+head/tail, configured/pattern secrets and splice reconstruction, close cancellation.
+Run `uv run --locked pytest tests/unit/plugins/spark/test_inspection.py`; expect
+missing `inspection` module before implementation.
+2. GREEN: `SparkInspectionAdapter.inspect(request, *, deadline)` launches and tracks
+an owned reader task; visitor increments Counter types/reasons and signal counts.
+Keep at most 20 `(priority,line,bounded evidence)` candidates by insertion/sort/pop and a
+separate at-most-20 fallback list; project only new eligible candidates, never retain raw event dicts. `VerifiedEventLogReader.read` returns snapshot,
+coverage/count/version; only after verification produce refs. `close()` cancels
+and gathers active tasks before return, idempotently.
+3. Shared helpers: `task_reason(event)->tuple[str,bool]` validates nonempty bounded
+control-free reason; invalid values return `('UNKNOWN',False)`. `event_details`
+selects fixed ordered fields, applies `redact_event`, serializes labels and sorted
+Unicode JSON, truncates entire text by `text[:limit//2]+text[-(limit-limit//2):]`,
+redacts the joined text again and caps any redaction expansion. Counts use raw
+reason and direct IDs use `direct_ids` independent of truncated projection.
+4. Fresh GREEN verification: focused pytest, focused ruff and pyright. Use
+`chflags nohidden .venv/lib/python3.12/site-packages/_editable_impl_hive_cli_mcp_stdio.pth`
+in the same shell before uv to repair runtime path discovery. Commit only scoped
+implementation/tests/plan/report and report RED/GREEN evidence; no checkbox ledger.
