@@ -37,3 +37,19 @@ Integration note for task 3.1: final service result guard must fail closed if co
 credentials or recognized credential patterns occur in raw event type/reason/ID metadata.
 Those labels retain their original direct semantics and counts here. Public operation
 mapping is also deferred to task 3.1 per controlling-agent scope.
+
+## Task 2.1 review correction: task projection order
+
+The approved TaskStart/TaskEnd projection order is `Task Info`, `Task End Reason`,
+`Task Metrics`. Added a focused case with distinct values for each field. RED ran
+`chflags nohidden .venv/lib/python3.12/site-packages/_editable_impl_hive_cli_mcp_stdio.pth && uv run --locked pytest tests/unit/plugins/spark/test_inspection.py`:
+1 failed, 14 passed; the failure showed `Task End Reason` rendered before `Task Info`.
+After changing only the projection tuple, the same focused suite passed 15 tests.
+Focused ruff and pyright checks also passed: `chflags nohidden
+.venv/lib/python3.12/site-packages/_editable_impl_hive_cli_mcp_stdio.pth && uv run
+--locked ruff check src/mcp_stdio/plugins/spark/inspection_events.py
+tests/unit/plugins/spark/test_inspection.py` (all checks passed), and `chflags
+nohidden .venv/lib/python3.12/site-packages/_editable_impl_hive_cli_mcp_stdio.pth
+&& uv run --locked pyright src/mcp_stdio/plugins/spark/inspection_events.py
+tests/unit/plugins/spark/test_inspection.py` (0 errors, 0 warnings, 0
+informations; available-version notice only).

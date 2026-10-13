@@ -174,6 +174,16 @@ async def test_fallback_ending_entry_order_and_empty_candidates(tmp_path: Path):
         ),
         (
             {
+                "Event": "SparkListenerTaskEnd",
+                "Task Info": {"Task ID": 3},
+                "Task End Reason": {"Reason": "FetchFailed"},
+                "Task Metrics": {"Executor Run Time": 7},
+            },
+            'Task Info: {"Task ID": 3}\nTask End Reason: {"Reason": "FetchFailed"}'
+            '\nTask Metrics: {"Executor Run Time": 7}',
+        ),
+        (
+            {
                 "Event": "SparkListenerExecutorAdded",
                 "Executor Info": {"Host": "host", "Total Cores": 4, "Other": "omit"},
             },

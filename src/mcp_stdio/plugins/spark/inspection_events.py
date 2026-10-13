@@ -89,7 +89,7 @@ def event_details(
         )
         source = _object(event.get("Stage Info"))
     elif name in ("SparkListenerTaskStart", "SparkListenerTaskEnd"):
-        fields = ("Task End Reason", "Task Info", "Task Metrics")
+        fields = ("Task Info", "Task End Reason", "Task Metrics")
     elif name in ("SparkListenerExecutorAdded", "SparkListenerExecutorRemoved"):
         fields = ("Timestamp", "Executor Info", "Removed Reason")
         source = dict(event)

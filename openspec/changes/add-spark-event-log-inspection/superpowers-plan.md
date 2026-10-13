@@ -134,6 +134,10 @@ Full details and exact commands are in task-1.2-report.md; parent owns checkbox 
 
 ## Task 2.1 micro-plan: bounded full-file overview
 
+Task 2.1 review correction: retain the approved `Task Info`, `Task End Reason`,
+`Task Metrics` projection order. A focused regression case uses distinct values
+for all three labels and verifies their rendered line order.
+
 Files: create `src/mcp_stdio/plugins/spark/inspection.py`, extend
 `inspection_events.py`, create `tests/unit/plugins/spark/test_inspection.py`.
 No query or public operation mapping; controller alone gates tasks.md.
