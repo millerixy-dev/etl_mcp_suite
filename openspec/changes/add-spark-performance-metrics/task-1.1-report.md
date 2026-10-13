@@ -31,3 +31,7 @@ One test collection attempt failed transiently because pytest, Ruff, and Pyright
 Checked exact field sets against design sections 3 and 4, request ranges and coercion rules against sections 1/3/4, and port signatures against the existing Spark gateway style. The DTOs intentionally do not calculate counts or enforce cross-field aggregate arithmetic; tasks 1.2 and 2.x own those behaviors. In task 1.2, a valid explicit reason with value `UNKNOWN` belongs in **non_success_task_end_count**; an absent or invalid reason belongs in **unknown_reason_task_end_count**. Use the existing `task_reason` validity flag to distinguish these cases. When task 2.x wires `MetricsSnapshotRequest` to `VerifiedEventLogReader`, it must enforce `expected_sha256` against the sanitized JSONL digest before returning aggregates; task 1.1 only validates the digest syntax.
 
 No known remaining contract issue in task 1.1. The report's first RED and final GREEN commands were run using a regular package reinstall because the macOS environment can otherwise mask source changes through editable installation state.
+
+## Controller gate
+
+Fresh controller verification: `UV_NO_EDITABLE=1 uv run --locked --reinstall-package hive-cli-mcp-stdio pytest tests/unit/plugins/spark/test_models.py` — 144 passed in 0.15s. Independent task review: spec compliant and quality Approved, no findings. Cross-task checks (aggregation arithmetic, reader digest enforcement, no-network/cancellation/MCP union) remain assigned to later tasks; no completion claim for those behaviors here.
