@@ -15,4 +15,4 @@
 
 ## 4. 整体验证
 
-- [ ] 4.1 执行 `uv sync --locked`、`uv run --locked pytest`、`uv run --locked ruff check .`、`uv run --locked pyright`、`uv build`、`uv run --locked mcp-stdio --help`、`openspec validate add-spark-performance-metrics --strict`、`openspec validate --changes --strict`、`openspec validate --specs --strict` 和整项代码/经济性评审，记录实际结果后验收。使用可用的真实私有本地样本验证计数/摘要/refs并记录扫描耗时与进程峰值；无材料或未运行 live integration 时明确跳过，不把小成功样本宣称为100 MB或真实根因验收。
+- [x] 4.1 执行 `uv sync --locked`、`uv run --locked pytest`、`uv run --locked ruff check .`、`uv run --locked pyright`、`uv build`、`uv run --locked mcp-stdio --help`、`openspec validate add-spark-performance-metrics --strict`、`openspec validate --changes --strict`、`openspec validate --specs --strict` 和整项代码/经济性评审，记录实际结果后验收。使用可用的真实私有本地样本验证计数/摘要/refs并记录扫描耗时与进程峰值；无材料或未运行 live integration 时明确跳过，不把小成功样本宣称为100 MB或真实根因验收。
