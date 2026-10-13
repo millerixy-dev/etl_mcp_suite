@@ -80,3 +80,54 @@ Run the same test command; expected all pass.
 - Focused `uv run --locked pyright src/mcp_stdio/plugins/spark/inspection_models.py src/mcp_stdio/plugins/spark/gateway.py tests/unit/plugins/spark/test_models.py`: 0 errors, 0 warnings.
 - `openspec validate --changes --strict`: 16 passed, 0 failed. Existing informational archive notices remain unrelated.
 - No network/integration execution. No task checkbox changed. Cross-change sentence edits remain unstaged to preserve user-owned executor artifacts; controlling agent owns final integration.
+
+## Task 1.2 micro-plan
+
+Files: inspection_reader.py owns descriptor-relative bounded streaming validation;
+inspection_events.py owns stateless direct_ids extraction; test_cache.py and fixtures.py
+own synthetic private snapshots. No task checkbox edits or new dependencies.
+
+Interface: VerifiedEventLogReader(settings, secret_values=()).read(request, visitor,
+*, deadline) returns frozen VerifiedScan(snapshot, spark_version, event_count, coverage)
+only after a single complete JSONL traversal. direct_ids(event) returns six nullable scalars.
+
+1. RED: synthetic two-attempt manifest selects null only while unselected file is missing;
+   corrupt source/format/hash/count/identity/version/ending/path/tail, missing/symlink,
+   size/deadline and numeric extraction parameter tests fail before implementation.
+   Run `uv run --locked pytest tests/unit/plugins/spark/test_cache.py`.
+2. GREEN: open root O_DIRECTORY|O_NOFOLLOW, walk relative parents using dir_fd,
+   require private directories/files and bounded regular manifest; parse closed DTO,
+   select exact attempt, open selected JSONL once. Hash raw bounded readline bytes,
+   validate JSON/Event/identity/version/end and call visitor each physical record;
+   compare all metadata at EOF; close descriptors in finally/cancellation.
+   Numeric extraction uses `type(value) is int and 0 <= value <= 2**63-1`;
+   JobStart SQL decimal properties use ASCII regex and at most 19 significant digits.
+3. REFACTOR/verification: same pytest plus focused ruff and pyright; record actual
+   results in task-1.2-report.md and commit only scoped files.
+
+Concrete task 1.2 execution pattern:
+
+```python
+@dataclass(frozen=True)
+class VerifiedScan:
+    snapshot: SparkSnapshot
+    spark_version: str
+    event_count: int
+    coverage: SparkEventCoverage
+
+async def consume(reader: VerifiedEventLogReader, request: InspectRequest,
+                  deadline: float) -> VerifiedScan:
+    lines: list[int] = []
+    return await reader.read(request, lambda line, event: lines.append(line), deadline=deadline)
+```
+
+Reader holds only digest, counts, identity/version/ending state. Descriptor-relative
+manifest reading duplicates the existing 131072-byte bound because cache._read_manifest
+opens by absolute path and cannot safely consume a pinned directory descriptor. Existing
+credential_values and MAX_LINE_BYTES are reused. SQL properties accept only ASCII decimal
+strings of 1–19 digits, including leading zeros within that bound, and values <=2**63-1.
+
+Task 1.2 RED/GREEN evidence: initial missing-module RED 26 failed/8 passed; overflow
+float RED 1 failed/41 passed; canonical ancestor alias RED 1 failed/46 passed.
+Fresh final cache verification 47 passed. Focused ruff clean, pyright 0 errors/warnings.
+Full details and exact commands are in task-1.2-report.md; parent owns checkbox gate.
