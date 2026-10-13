@@ -5,7 +5,7 @@
 
 ## 2. 概览与精确事件查询
 
-- [ ] 2.1 RED：在新 `tests/unit/plugins/spark/test_inspection.py` 增加全文件失败信号/原因计数、证据排序、未知字段/事件和固定文本投影测试；GREEN：实现 inspect 及共享直接 ID/文本提取；REFACTOR：保持计数和文本截断独立。用 `uv run --locked pytest tests/unit/plugins/spark/test_inspection.py` 验证最多 20 入口、32 类计数、omitted、结束存在性、缺失原因 UNKNOWN，且不汇总性能指标或推断应用根因。
+- [x] 2.1 RED：在新 `tests/unit/plugins/spark/test_inspection.py` 增加全文件失败信号/原因计数、证据排序、未知字段/事件和固定文本投影测试；GREEN：实现 inspect 及共享直接 ID/文本提取；REFACTOR：保持计数和文本截断独立。用 `uv run --locked pytest tests/unit/plugins/spark/test_inspection.py` 验证最多 20 入口、32 类计数、omitted、结束存在性、缺失原因 UNKNOWN，且不汇总性能指标或推断应用根因。
 - [ ] 2.2 RED：补充直接筛选、不跨实体扩展、stage attempt、稀有失败、多页遍历、页外原因统计、ref 回读及扩大文本测试；GREEN：实现 query；REFACTOR：复用单遍扫描与文本规则。用同一 inspection 测试命令验证页前全量计数、固定 hash、无空页循环、单行最多 32768 字符及截断标志。
 
 ## 3. MCP 与 Skill
