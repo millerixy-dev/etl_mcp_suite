@@ -36,6 +36,7 @@ async def test_lazy_startup_and_idempotent_close(
         "query_spark_events",
         "get_spark_stage_metrics",
         "get_spark_task_distribution",
+        "fetch_spark_executor_log",
     ]
     await runtime.close()
     await runtime.close()

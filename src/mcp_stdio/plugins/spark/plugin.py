@@ -14,11 +14,17 @@ from mcp_stdio.contracts.plugin import (
 from mcp_stdio.core.config import load_config
 from mcp_stdio.plugins.spark.cache import SparkEventLogAdapter
 from mcp_stdio.plugins.spark.config import SparkSecrets, SparkSettings
+from mcp_stdio.plugins.spark.executor_logs import SparkExecutorLogAdapter
 from mcp_stdio.plugins.spark.files import credential_values
-from mcp_stdio.plugins.spark.gateway import SparkEventLogGateway, SparkInspectionGateway
+from mcp_stdio.plugins.spark.gateway import (
+    SparkEventLogGateway,
+    SparkExecutorLogGateway,
+    SparkInspectionGateway,
+)
 from mcp_stdio.plugins.spark.inspection import SparkInspectionAdapter
 from mcp_stdio.plugins.spark.service import (
     SparkEventLogService,
+    SparkExecutorLogService,
     SparkInspectionService,
     SparkMetricsService,
 )
@@ -33,10 +39,12 @@ class SparkRuntime:
         redaction_values: tuple[str, ...],
         *,
         inspection_gateway: SparkInspectionGateway | None = None,
+        executor_log_gateway: SparkExecutorLogGateway | None = None,
     ) -> None:
         self._tools = tools
         self._gateway = gateway
         self._inspection_gateway = inspection_gateway
+        self._executor_log_gateway = executor_log_gateway
         self._secrets = redaction_values
         self._closed = False
 
@@ -56,10 +64,14 @@ class SparkRuntime:
             return
         self._closed = True
         try:
-            if self._inspection_gateway is not None:
-                await self._inspection_gateway.close()
+            if self._executor_log_gateway is not None:
+                await self._executor_log_gateway.close()
         finally:
-            await self._gateway.close()
+            try:
+                if self._inspection_gateway is not None:
+                    await self._inspection_gateway.close()
+            finally:
+                await self._gateway.close()
 
 
 def _create_runtime(config_path: Path | None, environ: Mapping[str, str] | None) -> PluginRuntime:
@@ -83,16 +95,24 @@ def _create_runtime(config_path: Path | None, environ: Mapping[str, str] | None)
     metrics_service = SparkMetricsService(
         gateway=inspector, request_timeout_seconds=loaded.settings.request_timeout_seconds
     )
+    logs = SparkExecutorLogAdapter(
+        settings=loaded.settings, secrets=loaded.secrets, event_logs=gateway
+    )
+    log_service = SparkExecutorLogService(
+        gateway=logs, request_timeout_seconds=loaded.settings.request_timeout_seconds
+    )
     return SparkRuntime(
         SparkToolAdapter(
             service=service,
             inspection_service=inspection_service,
             metrics_service=metrics_service,
+            executor_log_service=log_service,
             secret_values=values,
         ),
         gateway,
         values,
         inspection_gateway=inspector,
+        executor_log_gateway=logs,
     )
 
 

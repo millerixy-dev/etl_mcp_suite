@@ -179,7 +179,7 @@ SSO/login Location 映射 AUTHENTICATION_FAILED，不自动重新登录；其它
 
 HTML原字节只在有界内存处理，不落盘；httpx流式读 actual bytes，identity编码，逐请求及累计日志响应受固定8MiB上限限制。使用标准库HTMLParser/entity解码，不执行脚本、加载资源或遵循HTML/meta-refresh指令。首版只接受UTF-8已识别NodeManager/聚合HTML日志页，一份明确匹配stream的pre正文；识别登录form、外部h1错误和身份title/元数据，与pre正文严格分开。聚合页依据Log Type/Log Length等元数据定位；同stream多个内容块拒绝，不冒充一份完整日志。身份由已校验的请求URL及未改变身份的响应URL约束；若HTML提供身份元数据则须一致，但不要求不存在的页头字段。真实JobHistory页面可无页头container，其模板可能含空白pre；须将Log Type/Log Length元数据与其后的正文pre关联，只统计内容块，不能把模板空白块当作多版本。无recognized页结构即失败，不把任意pre或HTTP200当成功。完整页且明确长度0的空pre可成功。
 
-UTF-8尾部可能从字符/逻辑行中间开始。仅对取得的日志片段做固定凭据脱敏与已知secret替换；只在确认请求从行中间开始时丢弃首行；完整读取到EOF的末行保留并脱敏，即使没有换行。UTF-8不完整边界须安全处理，处理细节放manifest；不修复原始内容。固定规则覆盖password/passwd/secret/token/cookie/authorization/credential/access-key/private-key赋值、Basic/Bearer、URL userinfo、Cookie/Set-Cookie及已配置/本次获取秘密；复用现有文本脱敏函数，测试已知秘密与凭据赋值；有界正文先收集再脱敏，不建设流式跨块脱敏状态机。日志正文不应用EnvironmentUpdate白名单。脱敏输出若超过固定1MiB，按完整逻辑行保留尾部并记录coverage=tail；不得因HTML实体或脱敏膨胀突破上限。
+如果解码出的源正文超过请求的tail_bytes，说明上游没有遵守范围，返回UNEXPECTED_RESPONSE，不以脱敏后的字节数推算源范围，也不扩大保留内容。UTF-8尾部可能从字符/逻辑行中间开始。仅对取得的日志片段做固定凭据脱敏与已知secret替换；当明确源长度大于返回片段、确认字节起点非零时，保守丢弃首个逻辑行以避免保留可能截断的凭据前缀；没有这种证据时不丢首行；完整读取到EOF的末行保留并脱敏，即使没有换行。UTF-8不完整边界须安全处理，处理细节放manifest；不修复原始内容。固定规则覆盖password/passwd/secret/token/cookie/authorization/credential/access-key/private-key赋值、Basic/Bearer、URL userinfo、Cookie/Set-Cookie及已配置/本次获取秘密；复用现有文本脱敏函数，测试已知秘密与凭据赋值；有界正文先收集再脱敏，不建设流式跨块脱敏状态机。日志正文不应用EnvironmentUpdate白名单。脱敏输出若超过固定1MiB，按完整逻辑行保留尾部并记录coverage=tail；不得因HTML实体或脱敏膨胀突破上限。
 
 | Condition | ToolError category | Retryable |
 | --- | --- | --- |

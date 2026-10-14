@@ -5,8 +5,8 @@
 ## 2. 基于真实验证交付最小工具（RED → GREEN → REFACTOR）
 
 - [x] 2.1 先为严格五项输入、12项结果、两项新增配置、旧配置兼容、新ToolOperation/安全identifier及fake gateway service写失败测试并确认RED，再实现最小契约/服务。验证：`PYTHONPATH=src uv run --locked pytest -q tests/unit/plugins/spark/test_executor_logs.py tests/unit/plugins/spark/test_config.py tests/unit/core/test_errors.py tests/contract/test_architecture.py`。
-- [ ] 2.2 基于1.1确认的HTML形态和部署路径，先写Driver/Executor URL定位、缺URL不自动刷新、容器/attempt一致、同网关受控跳转、上游allowlist、Cookie/Basic范围、HTML200错误、固定字节上限和EOF末行保留的失败测试；实现一个聚焦的日志adapter，复用认证/脱敏而不预建双版本兼容层。验证：`PYTHONPATH=src uv run --locked pytest -q tests/unit/plugins/spark/test_executor_logs.py tests/unit/plugins/spark/test_knox_auth.py tests/unit/plugins/spark/test_http_client.py tests/unit/plugins/spark/test_files.py`；eventlog仍拒绝redirect。
-- [ ] 2.3 先写私有权限、symlink/traversal、原子发布、hash/manifest、一份deadline和取消清理、共享目录锁及已实现Spark能力精确工具并集的stdio失败测试，再接入最小证据保存和composition；详细溯源留manifest，不增缓存状态。验证：`PYTHONPATH=src uv run --locked pytest -q tests/unit/plugins/spark tests/contract/test_spark_stdio.py tests/contract/test_architecture.py tests/unit/test_registry.py`。
+- [x] 2.2 基于1.1确认的HTML形态和部署路径，先写Driver/Executor URL定位、缺URL不自动刷新、容器/attempt一致、同网关受控跳转、上游allowlist、Cookie/Basic范围、HTML200错误、固定字节上限和EOF末行保留的失败测试；实现一个聚焦的日志adapter，复用认证/脱敏而不预建双版本兼容层。验证：`PYTHONPATH=src uv run --locked pytest -q tests/unit/plugins/spark/test_executor_logs.py tests/unit/plugins/spark/test_knox_auth.py tests/unit/plugins/spark/test_http_client.py tests/unit/plugins/spark/test_files.py`；eventlog仍拒绝redirect。
+- [x] 2.3 先写私有权限、symlink/traversal、原子发布、hash/manifest、一份deadline和取消清理、共享目录锁及已实现Spark能力精确工具并集的stdio失败测试，再接入最小证据保存和composition；详细溯源留manifest，不增缓存状态。验证：`PYTHONPATH=src uv run --locked pytest -q tests/unit/plugins/spark tests/contract/test_spark_stdio.py tests/contract/test_architecture.py tests/unit/test_registry.py`。
 
 ## 3. 文档与发布验证
 

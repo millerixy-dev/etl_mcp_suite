@@ -1,6 +1,7 @@
 """Synthetic executor-log contracts and acquisition tests; no cluster data."""
 
 # pyright: reportPrivateUsage=false
+# ruff: noqa: ASYNC240 -- tiny synthetic private evidence assertions
 from __future__ import annotations
 
 import asyncio
@@ -486,3 +487,360 @@ def test_reused_redactor_removes_folded_headers_and_standalone_bearer() -> None:
     ):
         assert secret not in redacted
     assert "EOF" in redacted
+
+
+async def make_adapter(tmp_path: Path, text: str = "EOF", *, total: int | None = None):
+    import httpx
+
+    from mcp_stdio.plugins.spark.cache import SparkEventLogAdapter
+    from mcp_stdio.plugins.spark.config import SparkSecrets
+    from mcp_stdio.plugins.spark.executor_logs import SparkExecutorLogAdapter
+    from tests.unit.plugins.spark.fixtures import archive_bytes, encode, events
+    from tests.unit.plugins.spark.test_http_client import Stream
+
+    records = events("2")
+    records[1]["Driver Logs"] = {"stdout": ORIGINAL}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if "/api/v1/" in req.url.path:
+            return httpx.Response(
+                200, stream=Stream([archive_bytes({"application_1_42_2": encode(records)})])
+            )
+        return httpx.Response(200, stream=Stream([html_log(text, length=total)]))
+
+    settings = log_settings(tmp_path)
+    source = SparkEventLogAdapter(
+        settings=settings, secrets=SparkSecrets(), transport=httpx.MockTransport(handler)
+    )
+    return SparkExecutorLogAdapter(
+        settings=settings,
+        secrets=SparkSecrets(),
+        event_logs=source,
+        transport=httpx.MockTransport(handler),
+    ), source
+
+
+async def test_publish_private_fresh_evidence_and_manifest(tmp_path: Path) -> None:
+    import hashlib
+    import json
+    import stat
+
+    adapter, source = await make_adapter(tmp_path, "token=unconfigured-private\nEOF")
+    try:
+        first = await adapter.fetch(request(log_type="stdout"), deadline=time.monotonic() + 3)
+        second = await adapter.fetch(request(log_type="stdout"), deadline=time.monotonic() + 3)
+        assert first.local_path != second.local_path
+        path, manifest = Path(first.local_path), Path(first.manifest_path)
+        raw = path.read_bytes()
+        assert raw.endswith(b"EOF") and b"unconfigured-private" not in raw
+        assert first.size_bytes == len(raw) and first.sha256 == hashlib.sha256(raw).hexdigest()
+        body = json.loads(manifest.read_text())
+        assert body["event_log_sha256"] and Path(body["event_log_path"]).is_file()
+        assert body["source_size_bytes"] == len(b"token=unconfigured-private\nEOF")
+        assert body["source_kind"] == "node_manager" and body["format_version"] == 1
+        assert body["coverage"] == "complete"
+        for file in (path, manifest):
+            assert stat.S_IMODE(file.stat().st_mode) == 0o600
+        assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+        assert not list((tmp_path / "l3").rglob(".part-*"))
+    finally:
+        await adapter.close()
+        await source.close()
+
+
+@pytest.mark.parametrize("component", ["executor-logs", "application_1_42", "attempt-2", "driver"])
+async def test_publication_rejects_symlink_descendants(tmp_path: Path, component: str) -> None:
+    adapter, source = await make_adapter(tmp_path)
+    root = tmp_path / "l3"
+    parts = ["executor-logs", "application_1_42", "attempt-2", "driver"]
+    parent = root
+    target = tmp_path / "outside"
+    target.mkdir()
+    for part in parts:
+        if part == component:
+            (parent / part).symlink_to(target, target_is_directory=True)
+            break
+        parent = parent / part
+        parent.mkdir(mode=0o700)
+    try:
+        with pytest.raises(SparkGatewayError):
+            await adapter.fetch(request(log_type="stdout"), deadline=time.monotonic() + 3)
+        assert list(target.iterdir()) == []
+    finally:
+        await adapter.close()
+        await source.close()
+
+
+async def test_output_caps_eof_and_confirmed_start_fragment(tmp_path: Path) -> None:
+    adapter, source = await make_adapter(tmp_path, "unsafe-fragment\ncomplete\nEOF", total=5000)
+    try:
+        result = await adapter.fetch(request(log_type="stdout"), deadline=time.monotonic() + 3)
+        assert Path(result.local_path).read_text() == "complete\nEOF"
+        assert result.coverage == "tail"
+    finally:
+        await adapter.close()
+        await source.close()
+    other = tmp_path / "other"
+    other.mkdir()
+    adapter, source = await make_adapter(other, "token=x\n" * 120000 + "EOF")
+    try:
+        result = await adapter.fetch(
+            request(log_type="stdout", tail_bytes=1048576), deadline=time.monotonic() + 5
+        )
+        raw = Path(result.local_path).read_bytes()
+        assert len(raw) <= 1048576 and raw.endswith(b"EOF")
+        assert result.coverage == "tail"
+    finally:
+        await adapter.close()
+        await source.close()
+
+
+async def test_disabled_configuration_never_resolves_eventlog(tmp_path: Path) -> None:
+    from mcp_stdio.plugins.spark.config import SparkSecrets, SparkSettings
+    from mcp_stdio.plugins.spark.executor_logs import SparkExecutorLogAdapter
+
+    source = FakeGateway()
+    adapter = SparkExecutorLogAdapter(
+        settings=SparkSettings(history_server_url=ROOT, cache_dir=str(tmp_path)),
+        secrets=SparkSecrets(),
+        event_logs=source,
+    )
+    try:
+        with pytest.raises(SparkGatewayError) as error:
+            await adapter.fetch(request(), deadline=time.monotonic() + 1)
+        assert error.value.tool_error.category == ErrorCategory.CONFIG_ERROR
+        assert source.calls == []
+    finally:
+        await adapter.close()
+
+
+async def test_failed_publication_keeps_prior_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+
+    adapter, source = await make_adapter(tmp_path)
+    try:
+        prior = await adapter.fetch(request(log_type="stdout"), deadline=time.monotonic() + 3)
+
+        def fail(*args: object, **kwargs: object) -> None:
+            raise OSError("untrusted private upstream detail")
+
+        monkeypatch.setattr(os, "rename", fail)
+        with pytest.raises(SparkGatewayError) as error:
+            await adapter.fetch(request(log_type="stdout"), deadline=time.monotonic() + 3)
+        assert error.value.tool_error.category == ErrorCategory.UPSTREAM_ERROR
+        assert Path(prior.local_path).is_file()
+        assert not list((tmp_path / "l3").rglob(".part-*"))
+        assert "untrusted" not in str(error.value)
+    finally:
+        await adapter.close()
+        await source.close()
+
+
+async def test_login_cookie_rotation_keeps_all_redaction_values(tmp_path: Path) -> None:
+    import httpx
+    from pydantic import SecretStr
+
+    from mcp_stdio.plugins.spark.config import SparkSecrets
+    from mcp_stdio.plugins.spark.executor_logs import SparkExecutorLogAdapter, _LogRoute
+    from tests.unit.plugins.spark.test_http_client import Stream
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.method == "POST":
+            return httpx.Response(
+                303, headers={"set-cookie": "jwt=first-issued-cookie; Path=/; Secure"}
+            )
+        return httpx.Response(
+            200,
+            headers={"set-cookie": "jwt=second-issued-cookie; Path=/; Secure"},
+            stream=Stream([html_log("first-issued-cookie\nsecond-issued-cookie\nEOF")]),
+        )
+
+    settings = log_settings(tmp_path).model_copy(update={"knox_sso_url": ROOT + "/sso"})
+    adapter = SparkExecutorLogAdapter(
+        settings=settings,
+        secrets=SparkSecrets(
+            username=SecretStr("synthetic-user"), password=SecretStr("synthetic-password")
+        ),
+        event_logs=FakeGateway(),
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        content = await adapter._receive(
+            _LogRoute(settings, request(log_type="stdout"), ORIGINAL), deadline=time.monotonic() + 2
+        )
+        assert (
+            "first-issued-cookie" not in content.text and "second-issued-cookie" not in content.text
+        )
+    finally:
+        await adapter.close()
+
+
+@pytest.mark.parametrize(
+    "original",
+    [
+        ORIGINAL.replace(":8042", ":bad"),
+        ORIGINAL.split("?")[0] + "?start",
+        ORIGINAL.replace("/owner/", "/%ff/"),
+    ],
+)
+def test_malformed_url_has_safe_domain_error(tmp_path: Path, original: str) -> None:
+    from mcp_stdio.plugins.spark.executor_logs import _LogRoute
+
+    with pytest.raises(SparkGatewayError) as error:
+        _LogRoute(log_settings(tmp_path), request(log_type="stdout"), original)
+    assert error.value.tool_error.category == ErrorCategory.UNEXPECTED_RESPONSE
+
+
+async def test_unsupported_redirect_is_unexpected(tmp_path: Path) -> None:
+    import httpx
+
+    from mcp_stdio.plugins.spark.config import SparkSecrets
+    from mcp_stdio.plugins.spark.executor_logs import SparkExecutorLogAdapter, _LogRoute
+
+    adapter = SparkExecutorLogAdapter(
+        settings=log_settings(tmp_path),
+        secrets=SparkSecrets(),
+        event_logs=FakeGateway(),
+        transport=httpx.MockTransport(lambda req: httpx.Response(301, headers={"location": JOB})),
+    )
+    try:
+        with pytest.raises(SparkGatewayError) as error:
+            await adapter._receive(
+                _LogRoute(log_settings(tmp_path), request(log_type="stdout"), ORIGINAL),
+                deadline=time.monotonic() + 1,
+            )
+        assert error.value.tool_error.category == ErrorCategory.UNEXPECTED_RESPONSE
+    finally:
+        await adapter.close()
+
+
+async def test_shutdown_cancels_active_and_queued_calls_before_lock_release(tmp_path: Path) -> None:
+    import httpx
+
+    from mcp_stdio.plugins.spark.cache import SparkEventLogAdapter
+    from mcp_stdio.plugins.spark.config import SparkSecrets
+    from mcp_stdio.plugins.spark.executor_logs import SparkExecutorLogAdapter
+    from tests.unit.plugins.spark.fixtures import archive_bytes, encode, events
+    from tests.unit.plugins.spark.test_http_client import Stream
+
+    entered, cancelled = asyncio.Event(), asyncio.Event()
+    records = events("2")
+    records[1]["Driver Logs"] = {"stdout": ORIGINAL}
+
+    async def handler(req: httpx.Request) -> httpx.Response:
+        if "/api/v1/" in req.url.path:
+            return httpx.Response(
+                200, stream=Stream([archive_bytes({"application_1_42_2": encode(records)})])
+            )
+        entered.set()
+        try:
+            await asyncio.sleep(10)
+        finally:
+            cancelled.set()
+        return httpx.Response(200)
+
+    settings = log_settings(tmp_path)
+    source = SparkEventLogAdapter(
+        settings=settings, secrets=SparkSecrets(), transport=httpx.MockTransport(handler)
+    )
+    adapter = SparkExecutorLogAdapter(
+        settings=settings,
+        secrets=SparkSecrets(),
+        event_logs=source,
+        transport=httpx.MockTransport(handler),
+    )
+    task = asyncio.create_task(
+        adapter.fetch(request(log_type="stdout"), deadline=time.monotonic() + 3)
+    )
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        with pytest.raises(SparkGatewayError) as error:
+            await adapter.fetch(request(log_type="stdout"), deadline=time.monotonic() + 0.01)
+        assert error.value.tool_error.category == ErrorCategory.TIMEOUT
+        await adapter.close()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert cancelled.is_set() and not adapter._acquisitions
+        assert source._lock_fd is not None
+        assert not list((tmp_path / "l3").rglob(".part-*"))
+        assert (
+            await source.lookup("application_1_42", "2", deadline=time.monotonic() + 1) is not None
+        )
+    finally:
+        await adapter.close()
+        await source.close()
+    replacement = SparkEventLogAdapter(settings=settings, secrets=SparkSecrets())
+    await replacement.close()
+
+
+@pytest.mark.parametrize(
+    "text,secret",
+    [
+        (
+            "Authorization: Bearer first-line\n unconfigured-folded-ticket\nEOF",
+            "unconfigured-folded-ticket",
+        ),
+        ('password="first-line\nunknown-assignment-value"\nEOF', "unknown-assignment-value"),
+    ],
+)
+async def test_small_tail_redacts_before_discarding_context(
+    tmp_path: Path, text: str, secret: str
+) -> None:
+    adapter, source = await make_adapter(tmp_path, text, total=len(text.encode()) + 100)
+    try:
+        result = await adapter.fetch(
+            request(log_type="stdout", tail_bytes=max(64, len(text.encode()))),
+            deadline=time.monotonic() + 3,
+        )
+        saved = Path(result.local_path).read_text()
+        assert secret not in saved and saved.endswith("EOF")
+    finally:
+        await adapter.close()
+        await source.close()
+
+
+async def test_failed_staging_open_removes_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+
+    adapter, source = await make_adapter(tmp_path)
+    open_real = os.open
+
+    def fail_stage(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        if str(path).startswith(".part-"):
+            raise OSError("synthetic descriptor exhaustion")
+        return open_real(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "open", fail_stage)
+    try:
+        with pytest.raises(SparkGatewayError):
+            await adapter.fetch(request(log_type="stdout"), deadline=time.monotonic() + 3)
+        assert not list((tmp_path / "l3").rglob(".part-*"))
+    finally:
+        await adapter.close()
+        await source.close()
+
+
+async def test_oversized_source_range_is_rejected_even_if_redaction_shrinks_it(
+    tmp_path: Path,
+) -> None:
+    adapter, source = await make_adapter(tmp_path, "EARLY MARKER\npassword=" + "x" * 1000 + "\nEOF")
+    try:
+        with pytest.raises(SparkGatewayError) as error:
+            await adapter.fetch(
+                request(log_type="stdout", tail_bytes=64), deadline=time.monotonic() + 3
+            )
+        assert error.value.tool_error.category == ErrorCategory.UNEXPECTED_RESPONSE
+        assert not list((tmp_path / "l3").rglob("stdout.log"))
+    finally:
+        await adapter.close()
+        await source.close()

@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import json
 from collections.abc import Awaitable, Iterable
-from typing import Annotated, NoReturn
+from typing import Annotated, Literal, NoReturn
 
 from mcp.server.fastmcp.exceptions import ToolError as FastMCPToolError
 from pydantic import Field, ValidationError
 
 from mcp_stdio.contracts.plugin import ToolRegistrar
 from mcp_stdio.core.errors import ErrorCategory, ToolError, ToolOperation, unexpected_tool_error
+from mcp_stdio.plugins.spark.executor_log_models import SparkExecutorLogFetchResult
 from mcp_stdio.plugins.spark.files import redact_event
 from mcp_stdio.plugins.spark.gateway import SparkGatewayError, spark_error
 from mcp_stdio.plugins.spark.inspection_models import (
@@ -25,6 +26,7 @@ from mcp_stdio.plugins.spark.metrics_models import (
 from mcp_stdio.plugins.spark.models import SparkEventLogFetchResult
 from mcp_stdio.plugins.spark.service import (
     SparkEventLogService,
+    SparkExecutorLogService,
     SparkInspectionService,
     SparkMetricsService,
 )
@@ -61,10 +63,12 @@ class SparkToolAdapter:
         secret_values: Iterable[str],
         inspection_service: SparkInspectionService | None = None,
         metrics_service: SparkMetricsService | None = None,
+        executor_log_service: SparkExecutorLogService | None = None,
     ) -> None:
         self._service = service
         self._inspection_service = inspection_service
         self._metrics_service = metrics_service
+        self._executor_log_service = executor_log_service
         self._secrets = tuple(value for value in secret_values if value)
 
     def register_tools(self, registrar: ToolRegistrar) -> None:
@@ -73,6 +77,7 @@ class SparkToolAdapter:
         registrar.add_tool(self.query_spark_events, name="query_spark_events")
         registrar.add_tool(self.get_spark_stage_metrics, name="get_spark_stage_metrics")
         registrar.add_tool(self.get_spark_task_distribution, name="get_spark_task_distribution")
+        registrar.add_tool(self.fetch_spark_executor_log, name="fetch_spark_executor_log")
 
     async def fetch_spark_event_log(
         self,
@@ -92,6 +97,40 @@ class SparkToolAdapter:
             self._raise_error(
                 unexpected_tool_error(error, operation=ToolOperation.FETCH_SPARK_EVENT_LOG)
             )
+
+    async def fetch_spark_executor_log(
+        self,
+        application_id: ApplicationId,
+        attempt_id: Annotated[str, Field(strict=True, pattern=r"^[1-9][0-9]{0,9}$")],
+        executor_id: Annotated[str, Field(strict=True, pattern=r"^(driver|0|[1-9][0-9]{0,19})$")],
+        log_type: Literal["stdout", "stderr"] = "stderr",
+        tail_bytes: Annotated[int, Field(strict=True, ge=1, le=1048576)] = 65536,
+    ) -> SparkExecutorLogFetchResult:
+        """Save a fresh redacted container-log tail and provenance; driver is supported."""
+        operation = ToolOperation.FETCH_SPARK_EXECUTOR_LOG
+        try:
+            if self._executor_log_service is None:
+                raise SparkGatewayError(
+                    ToolError.create(
+                        category=ErrorCategory.CONFIG_ERROR, operation=operation, retryable=False
+                    )
+                )
+            result = await self._executor_log_service.fetch(
+                application_id, attempt_id, executor_id, log_type, tail_bytes
+            )
+            if any(secret in result.model_dump_json() for secret in self._secrets):
+                raise SparkGatewayError(
+                    ToolError.create(
+                        category=ErrorCategory.UNEXPECTED_RESPONSE,
+                        operation=operation,
+                        retryable=False,
+                    )
+                )
+            return result
+        except SparkGatewayError as error:
+            self._raise_error(error.tool_error)
+        except Exception as error:
+            self._raise_error(unexpected_tool_error(error, operation=operation))
 
     async def inspect_spark_event_log(
         self,

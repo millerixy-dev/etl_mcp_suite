@@ -52,6 +52,7 @@ async def test_strict_mcp_schema_and_unknown_parameters(tmp_path: Path) -> None:
             "query_spark_events",
             "get_spark_stage_metrics",
             "get_spark_task_distribution",
+            "fetch_spark_executor_log",
         ]
         schema = tools[0].inputSchema
         assert set(schema["properties"]) == {"application_id", "attempt_id", "refresh"}
@@ -353,3 +354,47 @@ async def test_full_result_redaction_preserves_raw_counting_labels(tmp_path: Pat
         assert "UNEXPECTED_RESPONSE" in str(error.value)
     finally:
         await gateway.close()
+
+
+async def test_executor_log_schema_and_disabled_safe_error(tmp_path: Path) -> None:
+    from mcp_stdio.plugins.spark.plugin import PLUGIN_DEFINITION
+
+    runtime = PLUGIN_DEFINITION.create_runtime(
+        None,
+        environ={
+            "SPARK_HISTORY_SERVER_URL": "https://history.example",
+            "SPARK_CACHE_DIR": str(tmp_path),
+        },
+    )
+    server = StdioMcpServer(runtime)
+    try:
+        listed = {tool.name: tool for tool in await server._fastmcp.list_tools()}
+        schema = listed["fetch_spark_executor_log"].inputSchema
+        assert set(schema["properties"]) == {
+            "application_id",
+            "attempt_id",
+            "executor_id",
+            "log_type",
+            "tail_bytes",
+        }
+        assert schema["required"] == ["application_id", "attempt_id", "executor_id"]
+        assert schema["additionalProperties"] is False
+        common = {"application_id": "application_1_42", "attempt_id": "2", "executor_id": "driver"}
+        for extra in (
+            {"attempt_id": None},
+            {"tail_bytes": True},
+            {"tail_bytes": "1"},
+            {"log_type": "syslog"},
+            {"url": "forbidden-secret"},
+        ):
+            with pytest.raises(ToolError) as error:
+                await server._fastmcp.call_tool("fetch_spark_executor_log", {**common, **extra})
+            value = json.loads(str(error.value))
+            assert value["category"] == "INVALID_INPUT"
+            assert value["operation"] == "fetch_spark_executor_log"
+            assert "forbidden-secret" not in str(error.value)
+        with pytest.raises(ToolError) as error:
+            await server._fastmcp.call_tool("fetch_spark_executor_log", common)
+        assert '"category":"CONFIG_ERROR"' in str(error.value)
+    finally:
+        await runtime.close()

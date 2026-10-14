@@ -102,6 +102,7 @@ def _session(root: Path, outcome: str, auth: str = "cookie") -> dict[str, Any]:
             "query_spark_events",
             "get_spark_stage_metrics",
             "get_spark_task_distribution",
+            "fetch_spark_executor_log",
         ]
         _send(
             process,
@@ -308,3 +309,110 @@ def test_basic_stdio_exchange_then_cross_process_cache(tmp_path: Path) -> None:
     hit = _session(root, "cache", "basic")
     assert not hit.get("isError", False)
     assert json.loads(hit["content"][0]["text"])["cache_hit"]
+
+
+_LOG_DRIVER = """
+import json, sys
+from unittest.mock import patch
+import httpx
+from mcp_stdio.core.server import StdioMcpServer
+from mcp_stdio.plugins.spark.cache import SparkEventLogAdapter
+from mcp_stdio.plugins.spark.executor_logs import SparkExecutorLogAdapter
+from mcp_stdio.plugins.spark.plugin import PLUGIN_DEFINITION
+from tests.unit.plugins.spark.fixtures import archive_bytes, encode, events
+from tests.unit.plugins.spark.test_http_client import Stream
+root = "https://history.example/gateway/test"
+container = "container_e83_1_0042_02_000001"
+records = events("2")
+records[1]["Driver Logs"] = {"stdout":
+    f"http://node.example:8042/node/containerlogs/{container}/owner/stdout?start=-4096"}
+calls = []
+def handler(request):
+    calls.append(request.url.path)
+    assert "Authorization" not in request.headers
+    assert request.headers["Cookie"] == "session=synthetic-cookie"
+    if "/api/v1/" in request.url.path:
+        return httpx.Response(200, stream=Stream([
+            archive_bytes({"application_1_42_2": encode(records)})]))
+    if "/yarn/" in request.url.path:
+        return httpx.Response(307, headers={"location":
+            f"{root}/jobhistory/joblogs/node.example:8041/{container}/{container}/owner/stdout"
+            "?scheme=http&host=jhs.example&port=19888"})
+    text = "token=synthetic-private\\nEOF"
+    html = f"<p>Log Type: stdout</p><p>Log Length: {len(text)}</p><pre>{text}</pre>"
+    return httpx.Response(200, stream=Stream([html.encode()]))
+def event_factory(**kwargs):
+    return SparkEventLogAdapter(**kwargs, transport=httpx.MockTransport(handler))
+def log_factory(**kwargs):
+    return SparkExecutorLogAdapter(**kwargs, transport=httpx.MockTransport(handler))
+with patch("mcp_stdio.plugins.spark.plugin.SparkEventLogAdapter", side_effect=event_factory), \\
+     patch("mcp_stdio.plugins.spark.plugin.SparkExecutorLogAdapter", side_effect=log_factory):
+    runtime = PLUGIN_DEFINITION.create_runtime(None, environ={
+        "SPARK_HISTORY_SERVER_URL": root+"/sparkhistory", "SPARK_CACHE_DIR": sys.argv[1],
+        "SPARK_GATEWAY_COOKIE": "session=synthetic-cookie",
+        "SPARK_EXECUTOR_LOG_NODE_MANAGER_PATH": "/yarn/nodemanager/node",
+        "SPARK_EXECUTOR_LOG_ALLOWED_UPSTREAMS":
+            '["http://node.example:8042","http://jhs.example:19888"]'})
+StdioMcpServer(runtime).run()
+print("CLEANUP " + json.dumps({"requests":len(calls)}), file=sys.stderr)
+"""
+
+
+def test_executor_log_real_stdio_with_mock_gateway(tmp_path: Path) -> None:
+    import hashlib
+
+    process = subprocess.Popen(
+        [sys.executable, "-c", _LOG_DRIVER, str(tmp_path / "l3")],
+        cwd=PROJECT_ROOT,
+        env={
+            **os.environ,
+            "PYTHONPATH": os.pathsep.join([str(PROJECT_ROOT / "src"), str(PROJECT_ROOT)]),
+        },
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        _send(process, _INITIALIZE_REQUEST)
+        _read(process)
+        _send(process, _INITIALIZED_NOTIFICATION)
+        _send(process, _TOOLS_LIST_REQUEST)
+        listing = _read(process)
+        assert len(listing["result"]["tools"]) == 6
+        for index in range(2):
+            _send(
+                process,
+                {
+                    "jsonrpc": "2.0",
+                    "id": 3 + index,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "fetch_spark_executor_log",
+                        "arguments": {
+                            "application_id": "application_1_42",
+                            "attempt_id": "2",
+                            "executor_id": "driver",
+                            "log_type": "stdout",
+                        },
+                    },
+                },
+            )
+            reply = _read(process)
+            assert not reply["result"].get("isError")
+            value = json.loads(reply["result"]["content"][0]["text"])
+            assert len(value) == 12 and value["container_id"] == "container_e83_1_0042_02_000001"
+            raw = Path(value["local_path"]).read_bytes()
+            assert raw.endswith(b"EOF") and b"synthetic-private" not in raw
+            assert hashlib.sha256(raw).hexdigest() == value["sha256"]
+            assert "synthetic-private" not in json.dumps(reply)
+        assert process.stdin is not None
+        process.stdin.close()
+        assert process.wait(timeout=10) == 0
+        assert process.stderr is not None and process.stdout is not None
+        assert '"requests": 5' in process.stderr.read()
+        assert process.stdout.read() == ""
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.wait(timeout=5)
