@@ -533,7 +533,7 @@ uv run mcp-stdio --plugin dolphinscheduler \
 
 ## Spark event log 下载
 
-Spark 暴露 `fetch_spark_event_log`、`inspect_spark_event_log`、`query_spark_events`、`get_spark_stage_metrics` 和 `get_spark_task_distribution`。
+Spark 暴露 `fetch_spark_event_log`、`inspect_spark_event_log`、`query_spark_events`、`get_spark_stage_metrics`、`get_spark_task_distribution` 和 `fetch_spark_executor_log`。
 获取接口为 `fetch_spark_event_log(application_id, attempt_id=None, refresh=False)`。
 它下载配置的 Spark History Server ZIP，校验身份、CRC 和 JSONL，脱敏后保存 JSONL 与一份
 清单，后续诊断工具直接读取本地路径。首版格式以已验证的 Spark 2.4.7 单文件 JSONL 为依据。
@@ -722,6 +722,58 @@ inspect 后的调用示例（路径/摘要为合成占位，使用真实返回�
 慢作业先 query 应用起止时间，再排名 Stage、明确 attempt、比较同任务指标、回读 refs，检查重试/executor 反证。成功 JobEnd 不结束性能调查；无可比基准不称耗时异常。长尾与大 Shuffle 同现形成工作量不均衡候选，数据量相近而 Fetch Wait 高形成等待候选，均不直接证明倾斜/网络/OOM。Stage 重叠、阶段外时间保留为缺口，Stage/GC/等待/运行时间不相加为应用耗时。无失败也需报告性能事实、完整样本/缺失数、排名遗漏和因果限制。
 
 [spark-diagnosis Skill](skills/spark-diagnosis/SKILL.md) 指导假设、反证、重试恢复与引用，输出 supported / inconclusive / no_observed_failure；不自动分类根因。按需查阅 [Spark 2.4.7 事件语义](skills/spark-diagnosis/references/spark-events-2.4.7.md)，了解事件含义、字段可见性和单位；[搜索指引](skills/spark-diagnosis/references/event-search.md) 提供现有 MCP 筛选与证据选择示例。FetchFailed 加 executor 丢失不能证明 OOM。现有安装脚本会复制这份 Skill 及其参考文件；`--with-mcp` 仍只配置 Hive、Zeppelin 和 DolphinScheduler，Spark 实例按上文独立配置，不自动修改用户 MCP 配置。
+
+### Driver / executor stdout、stderr
+
+`fetch_spark_executor_log(application_id, attempt_id, executor_id, log_type="stderr", tail_bytes=65536)` 每次保存新的脱敏尾部及来源 manifest，MCP 仅返回路径和结构摘要。Driver 使用 executor_id="driver"；数字 executor 使用已验证的精确 attempt eventlog 末次注册。缺 executor/stream 返回 NOT_FOUND，不自动刷新整份 eventlog；需要时通过 fetch_spark_event_log 显式 refresh。不猜 container ID、owner 或 NodeId 端口。
+
+| 参数 | 约束 |
+| --- | --- |
+| application_id | 必填 ASCII application_[0-9]+_[0-9]+，最多128字符 |
+| attempt_id | 必填规范正整数字符串，最多10位；拒绝 null/latest |
+| executor_id | 必填 driver 或规范非负整数字符串，数字最多20位 |
+| log_type | stdout/stderr，默认 stderr |
+| tail_bytes | 严格整数1–1048576，默认65536；拒绝字符串和布尔值 |
+
+[YAML](docs/examples/spark-executor-logs.yaml) 和 [JSON](docs/examples/spark-executor-logs.json) 仅新增 `executor_log_node_manager_path`（默认 null 禁用，安全网关相对路径，以 /node 结尾）及 `executor_log_allowed_upstreams`（默认[]，最多128个唯一 http(s)://host:显式端口，精确主机或单 DNS 标签通配符）。两项须一起配置。示例路径需替换为部署确认值；history_server_url 须以 /sparkhistory 结尾，去掉后作为网关 root。旧配置兼容，禁用时新工具在获取前返回 CONFIG_ERROR。
+
+
+```sh
+# Inject SPARK_GATEWAY_COOKIE privately (or use the existing Knox Basic settings).
+export SPARK_HISTORY_SERVER_URL='https://history.example.invalid:8443/gateway/analytics/sparkhistory'
+export SPARK_CACHE_DIR='/var/tmp/mcp-spark-l3'
+export SPARK_EXECUTOR_LOG_NODE_MANAGER_PATH='/yarn/nodemanager/node'
+export SPARK_EXECUTOR_LOG_ALLOWED_UPSTREAMS='["http://*.nodes.example.invalid:8042","http://jobhistory.example.invalid:19888"]'
+# Private CA: export SPARK_CA_BUNDLE_PATH='/etc/mcp/spark-ca.pem'
+uv run --locked mcp-stdio --plugin spark
+# Equivalent file mode:
+uv run --locked mcp-stdio --plugin spark --config docs/examples/spark-executor-logs.yaml
+```
+
+```json
+{"application_id":"application_1700000000000_0042","attempt_id":"2","executor_id":"driver","log_type":"stdout"}
+{"application_id":"application_1700000000000_0042","attempt_id":"2","executor_id":"3","log_type":"stderr","tail_bytes":65536}
+```
+
+`SparkExecutorLogFetchResult` (12 fields; synthetic example):
+
+```json
+{"application_id":"application_1700000000000_0042","attempt_id":"2","executor_id":"driver","container_id":"container_e83_1700000000000_0042_02_000001","log_type":"stdout","requested_tail_bytes":65536,"fetched_at":"2026-10-14T00:00:00Z","coverage":"complete","local_path":"/var/tmp/mcp-spark-l3/executor-logs/application_1700000000000_0042/attempt-2/driver/00000000000040008000000000000001/stdout.log","size_bytes":4404,"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","manifest_path":"/var/tmp/mcp-spark-l3/executor-logs/application_1700000000000_0042/attempt-2/driver/00000000000040008000000000000001/manifest.json"}
+```
+
+复用既有 TLS/CA、Cookie 或 Knox Basic 认证。Basic 模式移除 Cookie 引用，按 spark-basic.yaml 设置 SPARK_USERNAME、SPARK_PASSWORD、SPARK_KNOX_SSO_URL；Basic Authorization 只到 SSO POST。实际 GET 限于配置的 HTTPS 网关，query 后端同样受 allowlist 约束；仅日志工具允许最多3次保持身份的 NodeManager/JobHistory 跳转，eventlog 下载仍拒绝跳转。工具不接受 URL、路径、认证或 TLS 参数。
+
+每次新目录0700，含一个 stdout.log/stderr.log 及 manifest.json0600，原子发布并核对保存字节的 SHA-256。manifest 另含网关 root/route、脱敏来源 URL、可空源长度、eventlog 路径/hash 及处理元数据。coverage=complete/tail/unknown 如实反映范围，脱敏后 size_bytes 不是源偏移。失败清理本次暂存，成功证据由操作者管理；不复用日志缓存，不自动清理保留证据。
+
+源正文超过请求 tail_bytes 时返回 UNEXPECTED_RESPONSE，不从脱敏字节数推算源范围。固定累计 HTML 上限8MiB、保存文本上限1MiB；排队、eventlog 定位与网络共用既有超时。先对完整已取得片段脱敏，再按完整逻辑行裁剪；确认源字节起点非零时保守丢弃首个边界行，完整 EOF 末行无换行也保留。凭据脱敏不承诺通用业务数据匿名化。
+
+仅解析已验证的 UTF-8 Log Type/pre 形态，忽略模板空白，拒绝登录/ACL/缺日志页、编码冲突及多个版本。没有 stream 元数据的标准本地 NodeManager 页面可能返回 UNEXPECTED_RESPONSE。用户指定的 Driver JobHistory stdout 已实测；生产 NodeManager 路由及其他 stream 仍需部署 opt-in 验证。
+
+真实 stdio 测试需注入设置/认证，以及 MCP_STDIO_SPARK_EXECUTOR_LOG_INTEGRATION=1、MCP_STDIO_SPARK_APPLICATION_ID、MCP_STDIO_SPARK_ATTEMPT_ID、MCP_STDIO_SPARK_EXECUTOR_ID；请求 stdout 并独立校验私有文件，不输出正文：
+
+```sh
+uv run --locked pytest -m integration tests/integration/test_spark_executor_logs.py
+```
 
 ## 进程隔离
 

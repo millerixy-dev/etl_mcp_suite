@@ -10,6 +10,6 @@
 
 ## 3. 文档与发布验证
 
-- [ ] 3.1 用配置例子测试验证文件/env模式，添加stdout/stderr调用和两项配置的YAML/JSON示例，同步README.md、README.zh-CN.md、docs/architecture/runtime-flow.md和modules.md。验证：`PYTHONPATH=src uv run --locked pytest -q tests/unit/plugins/spark/test_config.py tests/unit/test_package.py`及按design逐项核对输入/结果/网关边界。
+- [x] 3.1 用配置例子测试验证文件/env模式，添加stdout/stderr调用和两项配置的YAML/JSON示例，同步README.md、README.zh-CN.md、docs/architecture/runtime-flow.md和modules.md。验证：`PYTHONPATH=src uv run --locked pytest -q tests/unit/plugins/spark/test_config.py tests/unit/test_package.py`及按design逐项核对输入/结果/网关边界。
 - [ ] 3.2 为明确opt-in的真实stdio日志测试写门禁失败测试，再实现integration：仅在`MCP_STDIO_SPARK_EXECUTOR_LOG_INTEGRATION=1`及application/attempt/executor、日志网关/认证环境齐备时运行。验证：`PYTHONPATH=src uv run --locked pytest -q tests/integration/test_opt_in.py`；具备环境时另运行`PYTHONPATH=src uv run --locked pytest -m integration tests/integration/test_spark_executor_logs.py`，否则记录skipped。
 - [ ] 3.3 整变更审查后fresh验证：`uv sync --locked`、`PYTHONPATH=src uv run --locked pytest -q`、`uv run --locked ruff check .`、`uv run --locked pyright`、`uv build`、`PYTHONPATH=src uv run --locked mcp-stdio --help`、不可达localhost配置的Spark EOF smoke；`openspec validate add-spark-executor-log-fetch --strict`、`openspec validate --changes --strict`、`openspec validate --specs --strict`、`git diff --check`。verification.md记录准确命令/结果及live通过或skipped；全部门禁通过才完成tool交付。

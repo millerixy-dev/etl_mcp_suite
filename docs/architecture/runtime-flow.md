@@ -185,6 +185,24 @@ get_server_status
 
 The MCP caller cannot select an HTTP method, URL, path or headers. Scheduling inputs follow the active scheduling capability specs.
 
+## Spark Container Log Flow
+
+```text
+fetch_spark_executor_log(application_id, attempt_id, executor_id, log_type="stderr", tail_bytes=65536)
+  -> strict MCP input -> SparkExecutorLogService -> SparkExecutorLogGateway
+  -> enabled configuration -> one deadline/worker queue
+  -> same eventlog gateway lookup/download -> VerifiedEventLogReader exact attempt/hash
+  -> last Driver/Executor URL -> configured NodeManager gateway route
+  -> existing SSO Basic POST/Cookie -> validated same-gateway redirects/approved backend
+  -> bounded metadata-bound UTF-8 HTML -> shared redaction -> complete-line limits
+  -> private descriptor-relative staging -> log + manifest -> SHA-256 -> atomic rename
+  -> 12-field paths/metadata result, no log text
+```
+
+Only log GETs follow up to3 validated redirects; eventlog HTTP behavior stays unchanged. Both actual HTTPS gateway origin/root and embedded backend authority are constrained. Fixed8MiB response and1MiB output caps share the original deadline, including queueing/resolution. Missing stream never triggers automatic eventlog refresh. Disabled settings fail before acquisition, unknown HTML/stream identity or multiple versions fail closed.
+
+No second root lock: shutdown cancels/awaits log workers and closes/clears their HTTP/Cookie state before inspection and the existing eventlog owner release the evidence lock. Descriptor traversal rejects symlink descendants; directories0700/files0600; failed unpublished staging only is removed. Successful evidence remains operator-managed. Detailed source/coverage processing belongs to manifest; stdout remains MCP protocol-only.
+
 ## Spark Request Flow
 
 ```text

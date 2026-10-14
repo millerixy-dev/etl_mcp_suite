@@ -219,3 +219,21 @@ def test_invalid_executor_log_config(tmp_path: Path, path: str | None, rules: li
             executor_log_node_manager_path=path,
             executor_log_allowed_upstreams=rules,
         )
+
+
+@pytest.mark.parametrize("suffix", ["yaml", "json"])
+def test_executor_example_matches_env_only(tmp_path: Path, suffix: str) -> None:
+    path = Path(__file__).parents[4] / "docs" / "examples" / f"spark-executor-logs.{suffix}"
+    common = {"SPARK_CACHE_DIR": str(tmp_path), "SPARK_GATEWAY_COOKIE": "session=synthetic-example"}
+    file = _load(path, common)
+    env = _load(
+        None,
+        {
+            **common,
+            "SPARK_HISTORY_SERVER_URL": "https://history.example.invalid:8443/gateway/analytics/sparkhistory",
+            "SPARK_EXECUTOR_LOG_NODE_MANAGER_PATH": "/yarn/nodemanager/node",
+            "SPARK_EXECUTOR_LOG_ALLOWED_UPSTREAMS": '["http://*.nodes.example.invalid:8042","http://jobhistory.example.invalid:19888"]',
+        },
+    )
+    assert file.settings == env.settings
+    assert file.secrets == env.secrets

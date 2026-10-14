@@ -299,7 +299,7 @@ The configured status path is deployment input, not MCP caller input.
 
 ## Spark Module Responsibilities
 
-- config.py owns seven settings (including default-on verify_tls and same-origin knox_sso_url) and environment Cookie or paired username/password references.
+- config.py owns nine settings (including default-on verify_tls and same-origin knox_sso_url) and environment Cookie or paired username/password references.
 - models.py owns strict FetchRequest and immutable file/fetch results; gateway.py owns lookup/download/close and safe errors.
 - service.py validates requests and decides reuse versus refresh under one deadline.
 - http_client.py performs one lazy, bounded verified HTTPS GET; files.py validates ZIP/JSONL identities, redacts records and computes digests.
@@ -311,7 +311,9 @@ The configured status path is deployment input, not MCP caller input.
 - inspection.py implements SparkInspectionAdapter, full-file counters, bounded evidence selection and own-field query pagination without relation propagation or a persistent index.
 - metrics_models.py owns strict Stage/Task requests and named metric results; metrics_events.py extracts six fixed metrics, success-attempt samples and nearest-rank statistics; metrics.py performs transient Stage aggregation and selected-group distributions with bounded rankings.
 - service.py owns SparkMetricsService, depending on SparkMetricsGateway stage_metrics/task_distribution ports, not file adapters. plugin.py supplies the same SparkInspectionAdapter to inspection and metrics services; its existing worker set and close owns all local scans.
-- tools.py exposes fetch_spark_event_log, inspect_spark_event_log, query_spark_events, get_spark_stage_metrics and get_spark_task_distribution; plugin.py composes dependencies under the existing single directory owner and closes acquisition/inspection work before releasing it.
+- executor_log_models.py owns the strict five-input/twelve-field result contracts; gateway.py adds SparkExecutorLogGateway fetch/close; service.py validates and remaps errors with one deadline.
+- executor_logs.py resolves last-registration URLs with VerifiedEventLogReader, constrains gateway/backend/redirect identity, extracts bounded metadata-bound HTML, reuses SparkHttpClient authentication and files.redact_event, and atomically publishes private log/manifest evidence. It takes no new root lock.
+- tools.py exposes fetch_spark_event_log, inspect_spark_event_log, query_spark_events, get_spark_stage_metrics, get_spark_task_distribution and fetch_spark_executor_log; plugin.py composes dependencies under the existing single directory owner and closes log workers/clients, then inspection, then acquisition and its directory lock.
 - skills/spark-diagnosis/SKILL.md consumes those capabilities for agent-side hypotheses and counterevidence; installers distribute its canonical file without registering a Spark server.
 
 No object store, persistent analysis index, TTL, GC or generic storage interface is introduced. Files/cache adapters are infrastructure and cannot be imported by the Spark service. All plugin imports remain within the slice; only registry imports its concrete composition root from shared code.
