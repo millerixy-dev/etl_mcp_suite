@@ -180,3 +180,68 @@ async def test_spark_basic_opt_in_reaches_gateway(monkeypatch, tmp_path):
             await live.test_spark_download()
         except pytest.skip.Exception:
             pytest.fail("complete Basic configuration must pass the opt-in gate")
+
+
+_LOG_ENV = {
+    "MCP_STDIO_SPARK_EXECUTOR_LOG_INTEGRATION": "1",
+    "MCP_STDIO_SPARK_APPLICATION_ID": "application_1_42",
+    "MCP_STDIO_SPARK_ATTEMPT_ID": "2",
+    "MCP_STDIO_SPARK_EXECUTOR_ID": "driver",
+    "SPARK_HISTORY_SERVER_URL": "https://history.example.invalid/gateway/test/sparkhistory",
+    "SPARK_CACHE_DIR": "/tmp/spark-logs-opt-in-test",
+    "SPARK_EXECUTOR_LOG_NODE_MANAGER_PATH": "/yarn/nodemanager/node",
+    "SPARK_EXECUTOR_LOG_ALLOWED_UPSTREAMS": '["http://node.example.invalid:8042"]',
+    "SPARK_GATEWAY_COOKIE": "session=synthetic-cookie",
+}
+
+
+@pytest.mark.parametrize("missing", list(_LOG_ENV))
+async def test_executor_log_missing_prerequisite_never_starts_stdio(monkeypatch, missing):
+    from tests.integration import test_spark_executor_logs as live
+
+    for name in ("SPARK_USERNAME", "SPARK_PASSWORD", "SPARK_KNOX_SSO_URL"):
+        monkeypatch.delenv(name, raising=False)
+    for key, value in _LOG_ENV.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.delenv(missing)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("stdio started without complete opt-in")
+
+    monkeypatch.setattr(live, "_run_stdout", forbidden)
+    with pytest.raises(pytest.skip.Exception):
+        await live.test_spark_executor_stdout()
+
+
+@pytest.mark.parametrize("flag", ["0", "true", "2", ""])
+async def test_executor_log_requires_literal_opt_in(monkeypatch, flag):
+    from tests.integration import test_spark_executor_logs as live
+
+    for key, value in _LOG_ENV.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("MCP_STDIO_SPARK_EXECUTOR_LOG_INTEGRATION", flag)
+    with pytest.raises(pytest.skip.Exception):
+        await live.test_spark_executor_stdout()
+
+
+async def test_executor_log_complete_basic_reaches_stdio(monkeypatch, tmp_path):
+    from tests.integration import test_spark_executor_logs as live
+
+    for key, value in _LOG_ENV.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.delenv("SPARK_GATEWAY_COOKIE")
+    monkeypatch.delenv("SPARK_CA_BUNDLE_PATH", raising=False)
+    monkeypatch.setenv("SPARK_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("SPARK_USERNAME", "synthetic-user")
+    monkeypatch.setenv("SPARK_PASSWORD", "synthetic-password")
+    monkeypatch.setenv("SPARK_KNOX_SSO_URL", "https://history.example.invalid/gateway/sso")
+    calls = []
+
+    async def capture(environ, loaded):
+        calls.append(
+            (environ["MCP_STDIO_SPARK_EXECUTOR_ID"], loaded.secrets.password.get_secret_value())
+        )
+
+    monkeypatch.setattr(live, "_run_stdout", capture)
+    await live.test_spark_executor_stdout()
+    assert calls == [("driver", "synthetic-password")]
