@@ -719,7 +719,7 @@ inspect 后的调用示例（路径/摘要为合成占位，使用真实返回�
 
 慢作业先 query 应用起止时间，再排名 Stage、明确 attempt、比较同任务指标、回读 refs，检查重试/executor 反证。成功 JobEnd 不结束性能调查；无可比基准不称耗时异常。长尾与大 Shuffle 同现形成工作量不均衡候选，数据量相近而 Fetch Wait 高形成等待候选，均不直接证明倾斜/网络/OOM。Stage 重叠、阶段外时间保留为缺口，Stage/GC/等待/运行时间不相加为应用耗时。无失败也需报告性能事实、完整样本/缺失数、排名遗漏和因果限制。
 
-[spark-diagnosis Skill](skills/spark-diagnosis/SKILL.md) 指导假设、反证、重试恢复与引用，输出 supported / inconclusive / no_observed_failure；不自动分类根因。FetchFailed 加 executor 丢失不能证明 OOM。现有安装脚本会复制这份 Skill；`--with-mcp` 仍只配置 Hive、Zeppelin 和 DolphinScheduler，Spark 实例按上文独立配置，不自动修改用户 MCP 配置。
+[spark-diagnosis Skill](skills/spark-diagnosis/SKILL.md) 指导假设、反证、重试恢复与引用，输出 supported / inconclusive / no_observed_failure；不自动分类根因。按需查阅 [Spark 2.4.7 事件语义](skills/spark-diagnosis/references/spark-events-2.4.7.md)，了解事件含义、字段可见性和单位；[搜索指引](skills/spark-diagnosis/references/event-search.md) 提供现有 MCP 筛选与证据选择示例。FetchFailed 加 executor 丢失不能证明 OOM。现有安装脚本会复制这份 Skill 及其参考文件；`--with-mcp` 仍只配置 Hive、Zeppelin 和 DolphinScheduler，Spark 实例按上文独立配置，不自动修改用户 MCP 配置。
 
 ## 进程隔离
 

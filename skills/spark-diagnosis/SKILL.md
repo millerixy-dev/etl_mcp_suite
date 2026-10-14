@@ -13,6 +13,12 @@ description: Use when investigating Spark long runtime, performance problems, jo
 
 先 inspect 原 `manifest_path` 和显式 `attempt_id`，把 `snapshot.sha256` 原样复制为所有 query 和指标请求的 `expected_sha256`；摘要属于脱敏 JSONL，不是 source_sha256。整轮保留 manifest、attempt 和 hash，不隐式 refresh 或替换文件。
 
+## 按问题查阅参考
+
+解释事件、失败原因、关联字段或原始指标单位时，按需读 [Spark 2.4.7 事件语义](references/spark-events-2.4.7.md) 的相关章节；它区分事件实际含义、日志是否记录，以及当前工具能返回的字段。厂商扩展先查 inspect 中实际完整 Event 名，不套用未知语义。
+
+把问题转换为搜索条件、串联 SQL/Job/Stage/Task 或选择要进入上下文的证据时，读 [事件搜索与上下文选择](references/event-search.md)。当前 `query_spark_events` 提供精确筛选，没有全文、regex 或任意 JSON 字段查询；`rg` 可辅助查找参考文档，日志证据仍由 MCP 固定快照查询与回读。
+
 ## 选择与核实
 
 从 inspect 的全文件 signals、TaskEnd 原因分布、coverage 和证据入口提出待验证假设，再按目的查询。
