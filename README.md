@@ -664,7 +664,7 @@ uv run --locked mcp-stdio --plugin spark
 
 Before each network download, the adapter sends one empty POST with Basic Authorization to
 the configured SSO endpoint and obtains scoped cookies. Only that POST receives the password;
-the download GET uses cookies. It never follows redirects or retries failed logins. Both
+the eventlog download GET uses cookies. Neither follows redirects or retries failed logins. Both
 requests share the call deadline. Cookies stay in memory for that acquisition, are cleared
 on all receive exits, and are included in credential redaction before publishing evidence.
 Cache hits make no login request. The plugin does not automatically read personal credential

@@ -585,7 +585,7 @@ uv run --locked mcp-stdio --plugin spark
 ```
 
 每次实际下载前发一次携带 Basic Authorization 的空 body POST，换取 Cookie；下载 GET
-只携带 Cookie。登录和下载共享超时预算，不跟随重定向、不重试失败密码。Cookie 只在
+只携带 Cookie。登录和 eventlog 下载共享超时预算，均不跟随重定向、不重试失败密码。Cookie 只在
 内存中使用，接收结束即清空 Cookie jar，并将本次 Cookie 值纳入落盘前脱敏。
 缓存命中不登录，插件不自动读取个人凭据文件。协议依据：[Knox SSO](https://apache.github.io/knox/config_knox_sso/)。
 

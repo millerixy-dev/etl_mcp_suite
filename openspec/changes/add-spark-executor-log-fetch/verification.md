@@ -1,3 +1,7 @@
+# Current delivery — 2026-10-14
+
+The public `fetch_spark_executor_log` tool is now implemented and registered alongside the five existing Spark tools. Tasks2.1–3.3 are verified below. The earlier section records task1.1's separate real stdout milestone; it does not establish a live production NodeManager/redirect test of the new tool.
+
 # Stdout validation — 2026-10-13
 
 Task 1.1 completed the real Driver stdout validation. Public MCP tool implementation remains pending. No production source, dependencies or MCP registration changed in this milestone.
@@ -48,3 +52,44 @@ Configured username/password/Basic encoding and all acquired Cookie values were 
 The experiment program was private and temporary; no generic parser, new tool or credential loader was added to production. Verification establishes the provided Driver JobHistory stdout path and observed HTML; NodeManager-to-JobHistory redirect flow, other executors and stderr remain unverified. Later tasks remain unchecked.
 
 Fresh final scope checks: `openspec validate --changes --strict` passed 16 changes; `openspec validate --specs --strict` passed 2 specs; `git diff --check` passed. Existing unrelated archive-order and long-requirement informational notices remain; no new validation failure.
+
+
+## Apply verification — 2026-10-14
+
+Implementation reuses SparkHttpClient's existing Knox exchange, SparkSecrets/credential_values/redact_event, the existing eventlog directory owner, and VerifiedEventLogReader. No new dependency, root setting, storage framework, credential loader or retention/cache subsystem was added. Two optional deployment settings enable gateway access; old configurations remain valid. Services depend only on domain contracts/ports. Six-tool stdio contracts and architecture tests verify composition and isolation.
+
+### TDD and review evidence
+
+- Task2.1: missing input/result/service/config tests observed RED (16 failures), then strict contracts/config/service + safe operation passed132 scoped tests.
+- Task2.2: missing URL/HTML/auth adapter tests observed RED. Verified last registration, Driver selection, missing stream without refresh, URL identity/query/allowlist, redirects, authentication, recognized HTML, limits and EOF behavior using synthetic events/HTML and MockTransport. Existing eventlog refusal of redirects remains covered.
+- Task2.3: absent fetch/publication and missing MCP/schema/architecture wiring observed RED. Private permissions, symlink descendants, atomic hash/manifest publication, independent repeated evidence, failure cleanup, one deadline, queued-call timeout, shutdown cancellation and shared lock reuse now pass.
+- Read-only task and whole-change reviews found Cookie rotation losing an earlier secret; malformed-URL/unsupported-3xx mapping; pre-redaction trimming losing folded/quoted credential context; staging-open cleanup; and redacted-size source-range inference. Each was reproduced by a failing regression test before its fix and re-reviewed. The final policy rejects source text exceeding requested tail_bytes before publication, redacts the full acquired context, and trims only the fixed saved-output bound. OpenSpec was updated before implementing the clarified boundary policy.
+- Final task review approved; whole-change review found no additional feature/security issue. Its minor Chinese tool-overview omission was corrected and checked. Review used no real credentials/network.
+- Task3.1: new example-file checks first failed due to missing files; equivalent YAML/JSON/env settings now pass. README (both languages) and both architecture views were synchronized, including unsupported stream-metadata shapes and operational limits.
+- Task3.2: missing opt-in runner tests first failed (14 failures); complete prerequisites now gate process creation. Both Cookie and Basic modes use existing configuration. Live test runs the shipped stdio process via the MCP SDK and independently verifies saved evidence without printing log text.
+
+### Fresh final checks
+
+| Exact command / check | Result |
+| --- | --- |
+| `uv sync --locked` | PASS: resolved57 packages, checked51; no dependency change |
+| `PYTHONPATH=src uv run --locked pytest -q tests/unit/plugins/spark tests/contract/test_spark_stdio.py tests/contract/test_architecture.py tests/unit/test_registry.py` | 599 passed |
+| `PYTHONPATH=src uv run --locked pytest -q tests/unit/plugins/spark/test_config.py tests/unit/test_package.py` | 39 passed |
+| `PYTHONPATH=src uv run --locked pytest -q tests/integration/test_opt_in.py` | 41 passed,1 deselected |
+| `PYTHONPATH=src uv run --locked pytest -q` | 2078 passed,6 skipped,7 deselected in32.30s |
+| `uv run --locked ruff check .` | All checks passed |
+| `uv run --locked pyright` | 0 errors,0 warnings,0 informations |
+| `uv build` | wheel and sdist built successfully |
+| `PYTHONPATH=src uv run --locked mcp-stdio --help` | exit0; documented plugin/config/debug options |
+| Spark EOF smoke described below | PASS |
+| `openspec validate add-spark-executor-log-fetch --strict` | valid |
+| `openspec validate --changes --strict` | 18 passed,0 failed |
+| `openspec validate --specs --strict` | 3 passed,0 failed |
+| `git diff --check` | PASS |
+| `PYTHONPATH=src uv run --locked pytest -q -m integration tests/integration/test_spark_executor_logs.py` | 1 skipped: explicit deployment opt-in/settings absent |
+
+EOF smoke ran `uv run --locked mcp-stdio --plugin spark` with stdin=/dev/null, an isolated temporary private cache, unreachable `https://127.0.0.1:1/gateway/test/sparkhistory`, enabled placeholder log route and synthetic allowlist. It exited0, emitted no stdout, and a subsequent runtime reopened the same cache successfully. Startup-network rejection is additionally covered by the runtime unit test. Real subprocess contracts exercise eventlog resolution -> NodeManager307 -> JobHistory200 -> fresh private log/manifest, repeat without another eventlog download, and protocol-only stdout.
+
+### Live status and limits
+
+Task1.1's user-designated Driver JobHistory stdout remains a real successful validation with its independently checked private files/hash recorded above. The newly shipped tool's production NodeManager route/redirect and other executors/streams have **not** been live-validated; the new explicit integration suite was **skipped**, not reported passed. The parser accepts only recognized UTF-8 metadata-bound stream content; standard local NodeManager pages without stream metadata fail safely. No deployment route was guessed or probed. Fixed credential redaction is not general business-data anonymization. Existing unrelated archive-order/long-requirement informational notices remain, with no strict-validation failures.

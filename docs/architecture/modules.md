@@ -170,6 +170,8 @@ src/mcp_stdio/
         ├── metrics_models.py
         ├── metrics_events.py
         ├── metrics.py
+        ├── executor_log_models.py
+        ├── executor_logs.py
         └── tools.py
 ```
 
