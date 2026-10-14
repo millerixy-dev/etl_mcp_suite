@@ -35,7 +35,11 @@ _ASSIGNMENT = re.compile(
     r"(?:\"[^\"]*\"|'[^']*'|(?:Bearer|Basic)\s+[^\s;,&]+|[^\s;,&]+)"
 )
 _USERINFO = re.compile(r"(?i)([a-z][a-z0-9+.-]*://)[^/\s@]*@")
-_COOKIE_HEADER = re.compile(r"(?i)(\b(?:set-cookie|cookie)\s*[:=]\s*)[^\r\n]+")
+_COOKIE_HEADER = re.compile(
+    r"(?i)(\b(?:set-cookie|cookie|authorization)[ \t]*[:=][ \t]*)"
+    r"[^\r\n]*(?:\r?\n[ \t]+[^\r\n]*)*"
+)
+_AUTH_SCHEME = re.compile(r"(?i)(\b(?:Basic|Bearer)[ \t]+)[A-Za-z0-9._~+/=-]+")
 _SAFE_SPARK_PROPERTIES = frozenset(
     {
         "spark.app.id",
@@ -71,6 +75,7 @@ def _redact_text(value: str, secrets: tuple[str, ...]) -> str:
         value = value.replace(secret, "[REDACTED]")
     value = _USERINFO.sub(r"\1[REDACTED]@", value)
     value = _COOKIE_HEADER.sub(lambda match: match[1] + "[REDACTED]", value)
+    value = _AUTH_SCHEME.sub(lambda match: match[1] + "[REDACTED]", value)
     return _ASSIGNMENT.sub(lambda match: match[1] + "[REDACTED]", value)
 
 

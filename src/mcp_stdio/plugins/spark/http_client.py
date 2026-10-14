@@ -6,6 +6,8 @@ import asyncio
 import os
 import ssl
 import time
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
@@ -49,6 +51,18 @@ class SparkHttpClient:
                 timeout=self._settings.request_timeout_seconds,
             )
         return self._client
+
+    @asynccontextmanager
+    async def authenticated(
+        self, url: str, *, deadline: float
+    ) -> AsyncGenerator[httpx.AsyncClient]:
+        """Reuse Knox login for a caller-validated gateway destination."""
+        client = self._ensure_client()
+        try:
+            await self._login(client, url, deadline)
+            yield client
+        finally:
+            client.cookies.clear()
 
     async def receive(
         self, application_id: str, attempt_id: str | None, destination: Path, *, deadline: float
