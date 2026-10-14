@@ -169,3 +169,53 @@ def test_documented_basic_example(tmp_path: Path, suffix: str) -> None:
     assert loaded.secrets.username is not None
     assert loaded.secrets.password is not None
     assert "synthetic-password" not in repr(loaded)
+
+
+def test_executor_log_settings_env_and_old_defaults(tmp_path: Path) -> None:
+    base = {
+        "SPARK_HISTORY_SERVER_URL": "https://history.example/gateway/test/sparkhistory",
+        "SPARK_CACHE_DIR": str(tmp_path),
+    }
+    old = _load(None, base).settings
+    assert old.executor_log_node_manager_path is None
+    assert old.executor_log_allowed_upstreams == []
+    configured = _load(
+        None,
+        {
+            **base,
+            "SPARK_EXECUTOR_LOG_NODE_MANAGER_PATH": "/yarn/nodemanager/node",
+            "SPARK_EXECUTOR_LOG_ALLOWED_UPSTREAMS": '["http://*.nodes.example:8042","http://history.example:19888"]',
+        },
+    ).settings
+    assert configured.executor_log_node_manager_path == "/yarn/nodemanager/node"
+    assert len(configured.executor_log_allowed_upstreams) == 2
+
+
+@pytest.mark.parametrize(
+    "path,rules",
+    [
+        ("/node", []),
+        (None, ["http://node.example:8042"]),
+        ("/../node", ["http://node.example:8042"]),
+        ("/%252e%252e/node", ["http://node.example:8042"]),
+        ("/node?host=x", ["http://node.example:8042"]),
+        ("/node", ["http://*.127.0.0.1:8042"]),
+        ("/node", ["http://*.*.example:8042"]),
+        ("/node", ["http://node.example"]),
+        ("/node", ["http://node.example:8042/"]),
+        ("/node", ["http://user:pass@node.example:8042"]),
+        ("/node", ["http://node.example:8042", "http://node.example:8042"]),
+    ],
+)
+def test_invalid_executor_log_config(tmp_path: Path, path: str | None, rules: list[str]) -> None:
+    from pydantic import ValidationError
+
+    from mcp_stdio.plugins.spark.config import SparkSettings
+
+    with pytest.raises(ValidationError):
+        SparkSettings(
+            history_server_url="https://history.example/gateway/test/sparkhistory",
+            cache_dir=str(tmp_path),
+            executor_log_node_manager_path=path,
+            executor_log_allowed_upstreams=rules,
+        )

@@ -8,8 +8,13 @@ import time
 from pydantic import ValidationError
 
 from mcp_stdio.core.errors import ErrorCategory, ToolError, ToolOperation, safe_error_identifiers
+from mcp_stdio.plugins.spark.executor_log_models import (
+    SparkExecutorLogFetchResult,
+    SparkExecutorLogRequest,
+)
 from mcp_stdio.plugins.spark.gateway import (
     SparkEventLogGateway,
+    SparkExecutorLogGateway,
     SparkGatewayError,
     SparkInspectionGateway,
     SparkMetricsGateway,
@@ -216,3 +221,62 @@ class SparkMetricsService:
             raise _error(ErrorCategory.TIMEOUT, operation, retryable=True) from None
         except SparkGatewayError as error:
             raise _remap(error, operation) from None
+
+
+class SparkExecutorLogService:
+    """One validated identity and one budget, independent of HTTP and storage."""
+
+    def __init__(self, *, gateway: SparkExecutorLogGateway, request_timeout_seconds: float) -> None:
+        self._gateway = gateway
+        self._timeout = request_timeout_seconds
+
+    async def fetch(
+        self,
+        application_id: object,
+        attempt_id: object,
+        executor_id: object,
+        log_type: object = "stderr",
+        tail_bytes: object = 65536,
+        **extra: object,
+    ) -> SparkExecutorLogFetchResult:
+        operation = ToolOperation.FETCH_SPARK_EXECUTOR_LOG
+        try:
+            request = SparkExecutorLogRequest.model_validate(
+                dict(
+                    application_id=application_id,
+                    attempt_id=attempt_id,
+                    executor_id=executor_id,
+                    log_type=log_type,
+                    tail_bytes=tail_bytes,
+                    **extra,
+                )
+            )
+        except ValidationError:
+            raise _error(ErrorCategory.INVALID_INPUT, operation) from None
+        deadline = time.monotonic() + self._timeout
+        identifiers = {
+            name: getattr(request, name)
+            for name in ("application_id", "attempt_id", "executor_id", "log_type")
+        }
+        try:
+            return await asyncio.wait_for(
+                self._gateway.fetch(request, deadline=deadline),
+                timeout=max(0, deadline - time.monotonic()),
+            )
+        except (asyncio.TimeoutError, SparkGatewayError) as error:
+            category = ErrorCategory.TIMEOUT
+            retryable = True
+            explanation = None
+            if isinstance(error, SparkGatewayError):
+                category = error.tool_error.category
+                retryable = error.tool_error.retryable
+                explanation = error.tool_error.explanation
+            raise SparkGatewayError(
+                ToolError.create(
+                    category=category,
+                    operation=operation,
+                    retryable=retryable,
+                    identifiers=identifiers,
+                    explanation=explanation,
+                )
+            ) from None

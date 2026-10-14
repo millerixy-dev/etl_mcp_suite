@@ -1,5 +1,18 @@
 # Stdout validation micro-plan
 
+## Apply execution decision — 2026-10-14
+
+Use inline executing-plans for this change: contracts, URL policy, publication and composition share interfaces/files and are sequential. Review uses requesting-code-review after implementation. Work in the existing development branch; tasks.md alone tracks completion.
+
+## Task 2.1 — Contracts and service
+
+Files: create `src/mcp_stdio/plugins/spark/executor_log_models.py` and `tests/unit/plugins/spark/test_executor_logs.py`; modify spark/config.py, gateway.py, service.py, core/errors.py and test_config.py. No HTTP or filesystem acquisition in the service.
+
+1. RED: tests construct `SparkExecutorLogRequest(application_id="application_1_42", attempt_id="2", executor_id="driver")`, reject coerced tail/extra fields, assert exactly 12 result fields. Fake gateway records `fetch(request, deadline=...)`, returns a named result, raises an existing eventlog error, or blocks until cancellation. Assert new operation/validated identifiers, timeout and cleanup. Config tests enable `/yarn/nodemanager/node` plus `["http://*.nodes.example:8042"]`, reject incomplete/unsafe settings and retain old defaults.
+2. Run `PYTHONPATH=src uv run --locked pytest -q tests/unit/plugins/spark/test_executor_logs.py tests/unit/plugins/spark/test_config.py` and confirm missing contracts/new settings fail.
+3. GREEN: implement frozen strict request/result models, `SparkExecutorLogGateway.fetch/close`, service validation/one deadline/remapped errors, operation allowlist and two locally validated settings. Example service invocation: `await gateway.fetch(request, deadline=deadline)` inside `asyncio.wait_for` using the original remaining budget. No new dependency.
+4. Verify `PYTHONPATH=src uv run --locked pytest -q tests/unit/plugins/spark/test_executor_logs.py tests/unit/plugins/spark/test_config.py tests/unit/core/test_errors.py tests/contract/test_architecture.py`; inspect diff, then commit only task files after passing. Gate task2.1 afterwards.
+
 > Use superpowers:executing-plans for this tightly coupled validation task. OpenSpec tasks.md remains the only milestone checklist.
 
 **Goal:** Complete task 1.1 against the user-authorized Driver stdout URL, reusing existing Spark authentication and redaction.

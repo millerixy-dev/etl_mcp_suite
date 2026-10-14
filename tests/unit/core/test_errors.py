@@ -87,6 +87,7 @@ def test_tool_operations_are_closed_to_v1_tools_plus_internal_fallback() -> None
         "get_task_log",
         "extract_log_links",
         "fetch_spark_event_log",
+        "fetch_spark_executor_log",
         "inspect_spark_event_log",
         "query_spark_events",
         "get_spark_stage_metrics",

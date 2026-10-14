@@ -47,6 +47,7 @@ class ToolOperation(str, Enum):
     START_WORKFLOW = "start_workflow"
     GET_TASK_LOG = "get_task_log"
     EXTRACT_LOG_LINKS = "extract_log_links"
+    FETCH_SPARK_EXECUTOR_LOG = "fetch_spark_executor_log"
     FETCH_SPARK_EVENT_LOG = "fetch_spark_event_log"
     INSPECT_SPARK_EVENT_LOG = "inspect_spark_event_log"
     QUERY_SPARK_EVENTS = "query_spark_events"
@@ -89,6 +90,9 @@ _ALLOWED_IDENTIFIER_KEYS: Mapping[ToolOperation, frozenset[str]] = MappingProxyT
         ToolOperation.START_WORKFLOW: frozenset(),
         ToolOperation.GET_TASK_LOG: frozenset(),
         ToolOperation.EXTRACT_LOG_LINKS: frozenset(),
+        ToolOperation.FETCH_SPARK_EXECUTOR_LOG: frozenset(
+            {"application_id", "attempt_id", "executor_id", "log_type"}
+        ),
         ToolOperation.FETCH_SPARK_EVENT_LOG: frozenset({"application_id", "attempt_id"}),
         ToolOperation.INSPECT_SPARK_EVENT_LOG: frozenset({"application_id", "attempt_id"}),
         ToolOperation.QUERY_SPARK_EVENTS: frozenset({"application_id", "attempt_id"}),

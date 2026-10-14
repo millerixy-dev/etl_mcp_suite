@@ -5,6 +5,10 @@ from __future__ import annotations
 from typing import Protocol
 
 from mcp_stdio.core.errors import ErrorCategory, ToolError, ToolOperation, safe_error_identifiers
+from mcp_stdio.plugins.spark.executor_log_models import (
+    SparkExecutorLogFetchResult,
+    SparkExecutorLogRequest,
+)
 from mcp_stdio.plugins.spark.inspection_models import (
     InspectRequest,
     QueryRequest,
@@ -77,4 +81,11 @@ class SparkMetricsGateway(Protocol):
     async def task_distribution(
         self, request: TaskDistributionRequest, *, deadline: float
     ) -> SparkTaskDistributionResult: ...
+    async def close(self) -> None: ...
+
+
+class SparkExecutorLogGateway(Protocol):
+    async def fetch(
+        self, request: SparkExecutorLogRequest, *, deadline: float
+    ) -> SparkExecutorLogFetchResult: ...
     async def close(self) -> None: ...

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import base64
+import ipaddress
 import os
+import re
 import ssl
 from pathlib import Path
 from typing import Annotated
@@ -22,7 +24,49 @@ class SparkSettings(StrictConfigModel):
     knox_sso_url: str | None = None
     ca_bundle_path: str | None = None
     request_timeout_seconds: Annotated[float, Field(gt=0, le=900)] = 300.0
+    executor_log_node_manager_path: str | None = None
+    executor_log_allowed_upstreams: list[str] = Field(default_factory=list)
     max_bytes: Annotated[int, Field(ge=1, le=1_073_741_824)] = 268_435_456
+
+    @field_validator("executor_log_node_manager_path")
+    @classmethod
+    def validate_log_path(cls, value: str | None) -> str | None:
+        if value is not None and (
+            len(value) > 512 or not re.fullmatch(r"/(?:[A-Za-z0-9_-]+/)*node", value)
+        ):
+            raise ValueError("unsafe NodeManager gateway path")
+        return value
+
+    @field_validator("executor_log_allowed_upstreams")
+    @classmethod
+    def validate_log_rules(cls, values: list[str]) -> list[str]:
+        if len(values) > 128 or len(set(values)) != len(values):
+            raise ValueError("invalid upstream rules")
+        for value in values:
+            if len(value) > 512 or not re.fullmatch(
+                r"https?://(?:\*\.)?[A-Za-z0-9.-]+:[0-9]{1,5}", value
+            ):
+                raise ValueError("invalid upstream rule")
+            parts = urlsplit(value)
+            host = parts.hostname or ""
+            if not parts.port or not 1 <= parts.port <= 65535:
+                raise ValueError("invalid upstream port")
+            domain = host.removeprefix("*.")
+            if any(
+                not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label)
+                for label in domain.split(".")
+            ):
+                raise ValueError("invalid upstream host")
+            if host.startswith("*."):
+                try:
+                    ipaddress.ip_address(domain)
+                except ValueError:
+                    pass
+                else:
+                    raise ValueError("wildcard IP rules are forbidden")
+            if value != value.lower():
+                raise ValueError("upstream rules require canonical lowercase")
+        return values
 
     @field_validator("history_server_url")
     @classmethod
@@ -88,6 +132,13 @@ class SparkSettings(StrictConfigModel):
 
     @model_validator(mode="after")
     def same_origin(self) -> SparkSettings:
+        if (self.executor_log_node_manager_path is None) != (
+            not self.executor_log_allowed_upstreams
+        ):
+            raise ValueError("log route and upstream rules must be configured together")
+        if self.executor_log_node_manager_path is not None:
+            if not urlsplit(self.history_server_url).path.endswith("/sparkhistory"):
+                raise ValueError("log access requires a sparkhistory mount")
         if self.knox_sso_url is not None:
             source, login = urlsplit(self.history_server_url), urlsplit(self.knox_sso_url)
             if (source.hostname, source.port or 443) != (login.hostname, login.port or 443):
