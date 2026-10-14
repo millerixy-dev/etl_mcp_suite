@@ -5,7 +5,7 @@ Provide a small Spark History Server download tool that converts a YARN applicat
 ## ADDED Requirements
 
 ### Requirement: Expose one event log download tool
-The Spark plugin SHALL expose exactly `fetch_spark_event_log(application_id: string, attempt_id: string | null = null, refresh: bool = false)`. Application identifiers SHALL match ASCII `application_[0-9]+_[0-9]+` with at most 128 characters; non-null attempts SHALL match `[A-Za-z0-9_-]{1,128}`. The tool MUST NOT accept arbitrary URLs, output paths, credentials, headers or TLS overrides. It SHALL return the named `SparkEventLogFetchResult` containing application_id, requested_attempt_id, cache_hit, downloaded_at, manifest_path and an array of named `SparkEventLogFile` values, with exactly the fields defined in design.md. Results MUST NOT contain raw events or credentials.
+This capability SHALL expose exactly one event-log download tool, `fetch_spark_event_log(application_id: string, attempt_id: string | null = null, refresh: bool = false)`. Additional Spark tools require their own capability specifications. Application identifiers SHALL match ASCII `application_[0-9]+_[0-9]+` with at most 128 characters; non-null attempts SHALL match `[A-Za-z0-9_-]{1,128}`. The tool MUST NOT accept arbitrary URLs, output paths, credentials, headers or TLS overrides. It SHALL return the named `SparkEventLogFetchResult` containing application_id, requested_attempt_id, cache_hit, downloaded_at, manifest_path and an array of named `SparkEventLogFile` values, with exactly the fields defined in design.md. Results MUST NOT contain raw events or credentials.
 
 #### Scenario: Download one attempt
 - **GIVEN** valid configuration and an application/attempt request
@@ -128,11 +128,11 @@ Failures SHALL use the shared ToolError fields/categories and operation fetch_sp
 #### Scenario: Expose only the Spark tool over stdio
 - **GIVEN** a locally configured Spark process
 - **WHEN** tools are listed and success/cache/error calls are made
-- **THEN** only fetch_spark_event_log is exposed and stdout remains protocol-only with redacted stderr diagnostics
+- **THEN** this capability exposes only fetch_spark_event_log, any additional Spark tools come from their own capability specifications, and stdout remains protocol-only with redacted stderr diagnostics
 
 
 ### Requirement: Authenticate through configured Knox Basic login
-The plugin SHALL support optional paired environment secrets username/password and a same-origin HTTPS knox_sso_url, mutually exclusive with gateway_cookie. Invalid combinations SHALL fail locally with CONFIG_ERROR. Before each actual download it SHALL POST an empty body to the configured SSO endpoint, passing encoded originalUrl and HTTP Basic credentials, and use only applicable response cookies for the download GET. Basic Authorization MUST NOT reach download or redirected endpoints. Login and download SHALL share the deadline and TLS settings; no redirects, retries, or persistent cookie storage are allowed. Login status/cookie checks and safe errors SHALL follow design.md; a valid event-log archive is required for final success. Response cookies SHALL be cleared on all receive exits; credential and acquired cookie values SHALL be excluded from saved evidence, results and diagnostics.
+For event-log acquisition, the plugin SHALL support optional paired environment secrets username/password and a same-origin HTTPS knox_sso_url, mutually exclusive with gateway_cookie. Invalid combinations SHALL fail locally with CONFIG_ERROR. Before each actual event-log download it SHALL POST an empty body to the configured SSO endpoint, passing encoded originalUrl and HTTP Basic credentials, and use only applicable response cookies for the download GET. Basic Authorization MUST NOT reach download or redirected endpoints. Login and event-log download SHALL share the deadline and TLS settings; no redirects, retries, or persistent cookie storage are allowed for event-log acquisition. Login status/cookie checks and safe errors SHALL follow design.md; a valid event-log archive is required for final success. Response cookies SHALL be cleared on all receive exits; credential and acquired cookie values SHALL be excluded from saved evidence, results and diagnostics.
 
 #### Scenario: Exchange Basic credentials and download
 - **GIVEN** valid paired credentials and same-origin SSO configuration

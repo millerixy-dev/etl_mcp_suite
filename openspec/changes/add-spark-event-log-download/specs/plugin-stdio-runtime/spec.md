@@ -21,7 +21,7 @@ The system SHALL provide an `mcp-stdio` command that loads exactly one of the bu
 #### Scenario: Start only the Spark download surface
 - **GIVEN** a structurally valid Spark configuration with an unreachable History Server
 - **WHEN** `mcp-stdio --plugin spark` starts
-- **THEN** tool registration succeeds locally and includes exactly `fetch_spark_event_log`, with no Hive, Zeppelin or DolphinScheduler tools and no startup network request
+- **THEN** tool registration succeeds locally and includes `fetch_spark_event_log` plus only additional Spark tools specified by their own capabilities, with no Hive, Zeppelin or DolphinScheduler tools and no startup network request
 
 ### Requirement: Isolate plugin processes
 The system MUST NOT share memory, credentials, connections, live caches or mutable runtime state between separately launched plugin processes. The Spark plugin SHALL allow sequential reuse of evidence in a dedicated configured cache_dir after the previous owner exits, using an exclusive directory lock; concurrent owners MUST NOT share that directory. Evidence lookup MUST match the configured History Server source and exact request selection.
