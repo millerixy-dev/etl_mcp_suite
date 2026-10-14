@@ -557,6 +557,8 @@ Spark 暴露 `fetch_spark_event_log`、`inspect_spark_event_log`、`query_spark_
 | request_timeout_seconds | 300 | 整个调用含查缓存、排队和处理的时间预算，最多 900 秒 |
 | max_bytes | 268435456 | 分别限制 ZIP、展开源文件总量和输出 JSONL 总量 |
 
+JSON 事件没有独立的单行字节上限。下载处理和离线分析按剩余总量预算逐行读取，工具返回文本仍保留长度限制。大型事件在 JSON 解析和脱敏时的瞬时内存可能明显高于其原始字节数。
+
 使用 [spark.yaml](docs/examples/spark.yaml) 或 [spark.json](docs/examples/spark.json)。
 通过安全环境注入已有登录 Cookie 到 `SPARK_GATEWAY_COOKIE`，配置文件只写变量名。
 匿名部署可以省略 secret 引用。默认校验证书；如明确需要跳过，可设置

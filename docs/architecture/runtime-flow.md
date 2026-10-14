@@ -203,6 +203,8 @@ Startup acquires a local exclusive directory lock without connecting upstream. T
 
 Evidence persists until user cleanup. Refresh creates another directory; there is no TTL, deduplication or GC. Cancellation/failure deletes only the call's unpublished directory. Shutdown cancels and awaits owned acquisition workers before closing the HTTP client and releasing the root lock. Force-kill remnants are ignored .part directories for manual cleanup.
 
+ZIP transfer, aggregate expanded source and aggregate saved JSONL each retain max_bytes. Acquisition and offline scans have no independent record-size cap: each readline is bounded by the remaining total budget plus one overflow-detection byte, checked before parsing. Large records may require substantially more transient parsing/redaction memory than their serialized size. MCP result text bounds remain unchanged.
+
 ### Offline inspection and query
 
 ```text

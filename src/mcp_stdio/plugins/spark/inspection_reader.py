@@ -19,11 +19,7 @@ from pydantic import ValidationError
 
 from mcp_stdio.core.errors import ErrorCategory
 from mcp_stdio.plugins.spark.config import SparkSettings
-from mcp_stdio.plugins.spark.files import (
-    MAX_LINE_BYTES,
-    checkpoint,
-    credential_values,
-)
+from mcp_stdio.plugins.spark.files import checkpoint, credential_values
 from mcp_stdio.plugins.spark.gateway import SparkGatewayError, spark_error
 from mcp_stdio.plugins.spark.inspection_models import (
     InspectRequest,
@@ -164,16 +160,12 @@ class VerifiedEventLogReader:
                 start = end = False
                 while True:
                     await checkpoint(deadline)
-                    raw = stream.readline(MAX_LINE_BYTES + 1)
+                    raw = stream.readline(self._settings.max_bytes - size + 1)
                     if not raw:
                         break
                     size += len(raw)
                     count += 1
-                    if (
-                        size > self._settings.max_bytes
-                        or len(raw) > MAX_LINE_BYTES
-                        or count > selected.event_count
-                    ):
+                    if size > self._settings.max_bytes or count > selected.event_count:
                         raise ValueError("event log exceeds limits")
                     digest.update(raw)
                     parsed = cast(

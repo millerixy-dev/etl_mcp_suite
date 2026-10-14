@@ -178,7 +178,7 @@ lookup/download 的输入 JSON 例为 `{"application_id":"application_1700000000
 
 一次 GET 流式写入本次私有 .part。按实际响应字节计数，不仅信 Content-Length；拒绝非 identity HTTP Content-Encoding。总 deadline 覆盖排队、缓存检查、HTTP、逐成员/逐行处理和发布；每个受限处理块设取消检查点，HTTP 各阶段超时不得超过剩余预算。配置的 Cookie 只发送给固定 origin，不跟随 redirect；显式 Cookie 模式不刷新或复用响应 Cookie，Basic 模式按下述一次调用生命周期处理。建立 HTTP client 前启用现有 wire-log suppression。
 
-使用 ZipFile 的公开 API，不写 EOCD/central-directory 解析器，不调用 extractall。首版固定最多 16 个成员、每行最多 8 MiB（读取与输出均限制）；ZIP 元数据内存由已接收 ZIP 上限间接约束，承认不提供独立 metadata 内存上限。逐成员实际展开量计数，读到 EOF 触发 CRC 检查。只接受 stored/deflate ZIP 普通文件，拒绝加密、symlink、目录、绝对/嵌套/穿越路径与重复成员/attempt。输出使用工具生成的文件名，不使用成员名作为落盘路径。
+使用 ZipFile 的公开 API，不写 EOCD/central-directory 解析器，不调用 extractall。首版固定最多 16 个成员；按 remove-spark-event-line-limit 的已批准变更，取消独立单行上限，读取按剩余展开总量预算加 1 字节探测溢出，输出继续检查累计总量；ZIP 元数据内存由已接收 ZIP 上限间接约束，承认不提供独立 metadata 内存上限。逐成员实际展开量计数，读到 EOF 触发 CRC 检查。只接受 stored/deflate ZIP 普通文件，拒绝加密、symlink、目录、绝对/嵌套/穿越路径与重复成员/attempt。输出使用工具生成的文件名，不使用成员名作为落盘路径。
 
 成员须为 UTF-8 JSONL，每条是带非空有界 Event 的 object。必须包含一致的 LogStart 与 ApplicationStart，App ID、可选 attempt 和源 basename 匹配请求及 Spark 单文件命名；允许 .inprogress 后缀。不接受事件文件自身 codec 或 rolling layout。记录 Spark Version，不按 patch 白名单拒绝；首版以已验证的 2.4.7 格式为兼容依据，未知自定义事件只做结构校验、不解释语义。
 

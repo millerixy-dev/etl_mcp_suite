@@ -307,6 +307,7 @@ The configured status path is deployment input, not MCP caller input.
 - inspection_models.py owns strict InspectRequest/QueryRequest and named inspection/query results; gateway.py adds the read-only SparkInspectionGateway inspect/query/close port.
 - service.py also owns SparkInspectionService request validation, total deadlines and safe inspection/query errors; it depends on the port, not local file adapters.
 - inspection_reader.py verifies one explicitly selected manifest/attempt in a single scan; inspection_events.py projects direct IDs, selected redacted text and bounded head/tail details.
+- files.py and inspection_reader.py constrain record reads by the remaining aggregate byte budget plus one overflow byte, without a separate line-size cap. The acquisition output retains its independent aggregate size check.
 - inspection.py implements SparkInspectionAdapter, full-file counters, bounded evidence selection and own-field query pagination without relation propagation or a persistent index.
 - metrics_models.py owns strict Stage/Task requests and named metric results; metrics_events.py extracts six fixed metrics, success-attempt samples and nearest-rank statistics; metrics.py performs transient Stage aggregation and selected-group distributions with bounded rankings.
 - service.py owns SparkMetricsService, depending on SparkMetricsGateway stage_metrics/task_distribution ports, not file adapters. plugin.py supplies the same SparkInspectionAdapter to inspection and metrics services; its existing worker set and close owns all local scans.

@@ -226,3 +226,54 @@ async def test_redact_complete_unknown_cookie_header(tmp_path: Path) -> None:
     saved = Path(result[0].local_path).read_text()
     assert "unknown-cookie-one" not in saved
     assert "unknown-cookie-two" not in saved
+
+
+async def test_acquire_large_record_within_total_budget(tmp_path: Path) -> None:
+    records = events()
+    records.insert(
+        2, {"Event": "VendorLargeEvent", "payload": "node " * (8 * 1024 * 1024 // 5 + 1)}
+    )
+    data = encode(records)
+    result = await _process(tmp_path, {APP + "_1": data}, max_bytes=len(data))
+    saved = Path(result[0].local_path).read_bytes()
+    assert saved == data
+    assert result[0].event_count == 4
+    assert result[0].source_sha256 == hashlib.sha256(data).hexdigest()
+    assert result[0].sha256 == hashlib.sha256(saved).hexdigest()
+
+
+@pytest.mark.parametrize("final_newline", [True, False])
+async def test_acquire_exact_output_budget(tmp_path: Path, final_newline: bool) -> None:
+    output = encode(events())
+    source = output if final_newline else output.rstrip(b"\n")
+    result = await _process(tmp_path, {APP + "_1": source}, max_bytes=len(output))
+    assert Path(result[0].local_path).read_bytes() == output
+    assert result[0].source_sha256 == hashlib.sha256(source).hexdigest()
+
+
+async def test_acquire_total_source_overflow_across_members(tmp_path: Path) -> None:
+    first, second = encode(events("1")), encode(events("2"))
+    with pytest.raises(SparkGatewayError) as error:
+        await _process(
+            tmp_path,
+            {APP + "_1": first, APP + "_2": second},
+            max_bytes=len(first) + len(second) - 1,
+        )
+    assert error.value.tool_error.category.value == "UPSTREAM_ERROR"
+
+
+async def test_acquire_checks_remaining_budget_before_parsing(tmp_path: Path) -> None:
+    prefix = encode(events()[:2])
+    with pytest.raises(SparkGatewayError) as error:
+        await _process(tmp_path, {APP + "_1": prefix + b"x" * 100}, max_bytes=len(prefix) + 1)
+    assert error.value.tool_error.category.value == "UPSTREAM_ERROR"
+
+
+async def test_acquire_total_output_overflow_after_redaction(tmp_path: Path) -> None:
+    records = events()
+    records.insert(2, {"Event": "VendorEvent", "password": "x"})
+    data = encode(records)
+    assert len(data.replace(b'"x"', b'"[REDACTED]"')) > len(data)
+    with pytest.raises(SparkGatewayError) as error:
+        await _process(tmp_path, {APP + "_1": data}, max_bytes=len(data))
+    assert error.value.tool_error.category.value == "UPSTREAM_ERROR"

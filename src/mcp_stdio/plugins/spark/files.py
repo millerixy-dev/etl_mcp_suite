@@ -23,7 +23,6 @@ from mcp_stdio.plugins.spark.models import (
 )
 
 MAX_MEMBERS = 16
-MAX_LINE_BYTES = 8 * 1024 * 1024
 
 _SENSITIVE_KEY = re.compile(
     r"password|passwd|secret|token|cookie|authorization|credential|"
@@ -177,11 +176,11 @@ async def process_archive(
                 with os.fdopen(fd, "wb") as output, source.open(member) as stream:
                     while True:
                         await checkpoint(deadline)
-                        raw = stream.readline(MAX_LINE_BYTES + 1)
+                        raw = stream.readline(max_bytes - total_source + 1)
                         if not raw:
                             break
                         total_source += len(raw)
-                        if total_source > max_bytes or len(raw) > MAX_LINE_BYTES:
+                        if total_source > max_bytes:
                             raise spark_error(
                                 ErrorCategory.UPSTREAM_ERROR,
                                 explanation="Event log exceeds byte limits.",
@@ -242,7 +241,7 @@ async def process_archive(
                         if any(secret in encoded.decode("utf-8") for secret in secrets):
                             _reject()
                         total_output += len(encoded)
-                        if total_output > max_bytes or len(encoded) > MAX_LINE_BYTES:
+                        if total_output > max_bytes:
                             raise spark_error(ErrorCategory.UPSTREAM_ERROR)
                         output.write(encoded)
                         output_hash.update(encoded)

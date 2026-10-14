@@ -623,6 +623,8 @@ Tool arguments cannot specify URLs, output paths, credentials or TLS settings.
 | request_timeout_seconds | 300 | Whole-call budget, including lookup, queueing and processing (maximum 900) |
 | max_bytes | 268435456 | Independently bounds ZIP bytes, expanded input and output JSONL totals |
 
+JSON events have no separate per-line byte limit. Acquisition and offline analysis read each line within the remaining total byte budget; output text limits still apply. Large events can increase transient JSON parsing/redaction memory beyond their byte size.
+
 Use [spark.yaml](docs/examples/spark.yaml) or [spark.json](docs/examples/spark.json).
 Safely inject an existing login Cookie into `SPARK_GATEWAY_COOKIE`; configuration contains
 only its environment-variable name. Anonymous deployments may omit the secret reference.

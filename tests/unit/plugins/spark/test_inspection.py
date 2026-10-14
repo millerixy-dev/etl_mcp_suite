@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from mcp_stdio.plugins.spark.config import SparkSettings
+from mcp_stdio.plugins.spark.gateway import SparkGatewayError
 from mcp_stdio.plugins.spark.inspection import SparkInspectionAdapter
 from mcp_stdio.plugins.spark.inspection_events import event_details
 from mcp_stdio.plugins.spark.inspection_models import InspectRequest
@@ -547,3 +548,47 @@ async def test_query_cancel_and_shared_close_wait_for_both_scans(tmp_path: Path)
     assert inspect.cancelled() and query.cancelled()
     with pytest.raises(asyncio.CancelledError):
         await adapter.query(query_request(request), deadline=time.monotonic() + 10)
+
+
+async def test_offline_large_record_within_total_budget(tmp_path: Path) -> None:
+    adapter, request = snapshot(
+        tmp_path, [{"Event": "VendorLargeEvent", "payload": "node " * (8 * 1024 * 1024 // 5 + 1)}]
+    )
+    try:
+        overview = await adapter.inspect(request, deadline=time.monotonic() + 30)
+        assert overview.event_count == 4
+        result = await adapter.query(
+            query_request(request, lines=[3], limit=1), deadline=time.monotonic() + 30
+        )
+        assert result.matched_count == 1
+        assert result.events[0].ref.line == 3
+        assert result.events[0].ref.sha256 == overview.snapshot.sha256
+        assert result.events[0].details_truncated
+        assert len(result.events[0].details) <= 2048
+    finally:
+        await adapter.close()
+
+
+@pytest.mark.parametrize("overflow", [False, True])
+async def test_offline_total_budget_boundary(tmp_path: Path, overflow: bool) -> None:
+    original, request = snapshot(tmp_path, [{"Event": "VendorEvent"}])
+    await original.close()
+    entry = json.loads(Path(request.manifest_path).read_text())["files"][0]
+    adapter = SparkInspectionAdapter(
+        SparkSettings(
+            history_server_url="https://history.example",
+            cache_dir=str(tmp_path / "l3"),
+            max_bytes=entry["size_bytes"] - int(overflow),
+        )
+    )
+    try:
+        if overflow:
+            with pytest.raises(SparkGatewayError) as error:
+                await adapter.inspect(request, deadline=time.monotonic() + 10)
+            assert error.value.tool_error.category.value == "UNEXPECTED_RESPONSE"
+        else:
+            result = await adapter.inspect(request, deadline=time.monotonic() + 10)
+            assert result.snapshot.sha256 == entry["sha256"]
+            assert result.event_count == 4
+    finally:
+        await adapter.close()
