@@ -13,6 +13,7 @@
 | executor 为什么丢失 | ExecutorRemoved、ExecutorLostFailure | 数据提供方/执行方分别核实，查任务恢复与已可用退出证据 |
 | 某 SQL 如何执行 | 完整 SQLExecutionStart/End 名和 execution_id → JobStart | 从 JobStart 取得 Job ID，再查 JobEnd 和明示 Stage IDs |
 | 一个指标/事件代表什么 | [事件语义参考](spark-events-2.4.7.md) 的相关标题/字段 | 核实版本、单位、字段是否被记录/返回；不由名字猜含义 |
+| Driver 退出、最后 SQL 无 Job 或 executor 原因不足 | [Driver / Executor 日志取证](container-logs.md) | fetch_spark_executor_log 下载所需流，核验 manifest/摘要后搜索本地脱敏文本，回到固定事件快照检查关联与恢复 |
 
 ## 查询示例
 
@@ -108,7 +109,7 @@ rg -n -F -- 'Shuffle Write Time' references/spark-events-2.4.7.md
 rg -n -F -- 'SQL execution' references/event-search.md
 ```
 
-这些命中是**说明文档的位置**，不是某次 Spark 应用的证据。最终事实要引用 MCP 返回的 ref.sha256 + ref.line；不能将参考行号当成 event log 行号。
+这些命中是**说明文档的位置**，不是某次 Spark 应用的证据。事件事实要引用 MCP 返回的 ref.sha256 + ref.line；不能将参考行号当成 event log 行号。已由容器日志工具保存并核验的 stdout.log/stderr.log 可按 [外部日志指引](container-logs.md) 用 rg 搜索，引用该日志自身的 hash 与本地行号；这不改变 event JSONL 的 MCP 查询边界。
 
 ## Gather–Select：只把必要证据放入上下文
 

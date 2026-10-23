@@ -725,6 +725,8 @@ inspect 后的调用示例（路径/摘要为合成占位，使用真实返回�
 
 ### Driver / executor stdout、stderr
 
+Skill 已包含 [容器日志排查编排](skills/spark-diagnosis/references/container-logs.md)：选择 Driver 或事件中明确的 executor，下载所需流，核对本地文件及 event log 来源，再搜索有界脱敏正文并检查恢复。只有退出码、没有堆栈时继续查另一条流；不完整覆盖保留为缺口。例如：“使用 spark-diagnosis 排查 application_1_42、attempt 1；事件不足以解释失败时补充 Driver/executor 日志，列出证据和待验证原因。”读取下载后的正文需要能访问 MCP server 所在主机的本地文件。
+
 `fetch_spark_executor_log(application_id, attempt_id, executor_id, log_type="stderr", tail_bytes=65536)` 每次保存新的脱敏尾部及来源 manifest，MCP 仅返回路径和结构摘要。Driver 使用 executor_id="driver"；数字 executor 使用已验证的精确 attempt eventlog 末次注册。缺 executor/stream 返回 NOT_FOUND，不自动刷新整份 eventlog；需要时通过 fetch_spark_event_log 显式 refresh。不猜 container ID、owner 或 NodeId 端口。
 
 | 参数 | 约束 |

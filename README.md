@@ -800,6 +800,8 @@ The [spark-diagnosis Skill](skills/spark-diagnosis/SKILL.md) guides hypotheses, 
 
 ### Driver and executor stdout/stderr
 
+The Skill now includes a [container-log investigation workflow](skills/spark-diagnosis/references/container-logs.md): select Driver or an observed executor, download the needed stream, verify the saved file and event-log provenance, then search bounded redacted text and cross-check recovery. An exit code without a stack trace prompts checking the other stream; partial coverage remains explicit. For example: “Use spark-diagnosis to investigate application_1_42 attempt 1; supplement Driver/executor logs when event evidence cannot explain the failure, and cite evidence and remaining gaps.” Reading the downloaded text requires local file access on the MCP server's host.
+
 `fetch_spark_executor_log(application_id, attempt_id, executor_id, log_type="stderr", tail_bytes=65536)` saves a fresh redacted tail plus provenance manifest, returning paths and structural metadata without log text. Driver uses executor_id="driver"; numeric executors use the last registration in verified exact-attempt eventlog. Missing executor/stream returns NOT_FOUND without a download refresh; explicitly refresh via fetch_spark_event_log if needed. No container ID, owner or NodeId port is guessed.
 
 | Input | Contract |

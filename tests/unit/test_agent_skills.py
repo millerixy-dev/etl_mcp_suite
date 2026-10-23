@@ -11,6 +11,10 @@ from typing import cast
 import pytest
 import yaml
 
+from mcp_stdio.plugins.spark.executor_log_models import (
+    SparkExecutorLogFetchResult,
+    SparkExecutorLogRequest,
+)
 from mcp_stdio.plugins.spark.inspection_models import QueryRequest
 
 PROJECT_ROOT = Path(__file__).parents[2]
@@ -18,6 +22,7 @@ CANONICAL_SKILLS = {
     "spark-diagnosis": {
         "fetch_spark_event_log", "inspect_spark_event_log", "query_spark_events",
         "get_spark_stage_metrics", "get_spark_task_distribution",
+        "fetch_spark_executor_log",
     },
     "hive": {"list_databases", "list_tables", "get_table_schema"},
     "zeppelin": {
@@ -641,6 +646,7 @@ def test_spark_skill_reference_links_resolve_inside_portable_skill() -> None:
     reference_targets = re.findall(r"\]\((references/[^)]+)\)", body)
     assert {
         "references/spark-events-2.4.7.md", "references/event-search.md",
+        "references/container-logs.md",
     } <= set(reference_targets)
     for target in reference_targets:
         resolved = (skill_root / target).resolve()
@@ -657,3 +663,30 @@ def test_spark_search_examples_validate_against_actual_query_contract() -> None:
     assert len(blocks) >= 3
     for block in blocks:
         QueryRequest.model_validate(json.loads(block))
+
+
+def test_spark_container_log_examples_validate_against_actual_contract() -> None:
+    guide = (
+        PROJECT_ROOT / "skills/spark-diagnosis/references/container-logs.md"
+    ).read_text(encoding="utf-8")
+    blocks = re.findall(r"```json\n(.*?)\n```", guide, flags=re.DOTALL)
+    requests: list[SparkExecutorLogRequest] = []
+    results: list[SparkExecutorLogFetchResult] = []
+    for block in blocks:
+        value = json.loads(block)
+        if "local_path" in value:
+            results.append(SparkExecutorLogFetchResult.model_validate(value))
+        else:
+            requests.append(SparkExecutorLogRequest.model_validate(value))
+    assert any(request.executor_id == "driver" for request in requests)
+    assert any(request.executor_id.isdecimal() for request in requests)
+    assert results
+    for result in results:
+        assert any(
+            result.application_id == request.application_id
+            and result.attempt_id == request.attempt_id
+            and result.executor_id == request.executor_id
+            and result.log_type == request.log_type
+            and result.requested_tail_bytes == request.tail_bytes
+            for request in requests
+        )
