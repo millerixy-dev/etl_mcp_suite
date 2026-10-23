@@ -10,6 +10,6 @@ settings:
   executor_log_allowed_upstreams:
     - "http://*.nodes.example.invalid:8042"
     - "http://jobhistory.example.invalid:19888"
-secrets:
-  # Environment-variable name; inject the actual Cookie privately.
-  gateway_cookie: SPARK_GATEWAY_COOKIE
+# Inject SPARK_GATEWAY_COOKIE or paired SPARK_USERNAME/SPARK_PASSWORD through
+# the MCP host environment; Basic mode also requires SPARK_KNOX_SSO_URL.
+secrets: {}
