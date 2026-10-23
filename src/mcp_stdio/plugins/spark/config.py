@@ -174,6 +174,12 @@ class SparkSecrets(SecretConfigModel):
             for value in (self.gateway_cookie, self.username, self.password)
             if value is not None
         )
+        # Only this field is a Cookie header; other secrets may contain '=' or ';'.
+        if self.gateway_cookie is not None:
+            for pair in self.gateway_cookie.get_secret_value().split(";"):
+                _, separator, item = pair.partition("=")
+                if separator and item.strip().strip('"'):
+                    values += (item.strip().strip('"'),)
         if self.username is not None and self.password is not None:
             pair = f"{self.username.get_secret_value()}:{self.password.get_secret_value()}"
             values += (base64.b64encode(pair.encode("utf-8")).decode("ascii"),)

@@ -61,13 +61,8 @@ _SAFE_SPARK_PROPERTIES = frozenset(
 
 
 def credential_values(values: tuple[str, ...]) -> tuple[str, ...]:
-    expanded = set(value for value in values if value)
-    for value in values:
-        for pair in value.split(";"):
-            _, separator, item = pair.partition("=")
-            if separator and item.strip().strip('"'):
-                expanded.add(item.strip().strip('"'))
-    return tuple(sorted(expanded, key=len, reverse=True))
+    """Normalize complete secrets without interpreting their contents."""
+    return tuple(sorted({value for value in values if value}, key=len, reverse=True))
 
 
 def _redact_text(value: str, secrets: tuple[str, ...]) -> str:

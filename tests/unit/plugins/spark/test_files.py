@@ -159,6 +159,9 @@ async def test_redact_nested_strings_and_credentials(
 ) -> None:
     import json
 
+    from pydantic import SecretStr
+
+    from mcp_stdio.plugins.spark.config import SparkSecrets
     from mcp_stdio.plugins.spark.files import process_archive
 
     records = events()
@@ -175,7 +178,9 @@ async def test_redact_nested_strings_and_credentials(
         attempt_id="1",
         max_bytes=1000000,
         deadline=time.monotonic() + 5,
-        secret_values=("session=sensitive-sentinel",),
+        secret_values=SparkSecrets(
+            gateway_cookie=SecretStr("session=sensitive-sentinel")
+        ).redaction_values,
     )
     saved = Path(result[0].local_path).read_bytes()
     assert b"sensitive-sentinel" not in saved
