@@ -723,6 +723,8 @@ inspect 后的调用示例（路径/摘要为合成占位，使用真实返回�
 
 [spark-diagnosis Skill](skills/spark-diagnosis/SKILL.md) 指导假设、反证、重试恢复与引用，输出 supported / inconclusive / no_observed_failure；不自动分类根因。按需查阅 [Spark 2.4.7 事件语义](skills/spark-diagnosis/references/spark-events-2.4.7.md)，了解事件含义、字段可见性和单位；[搜索指引](skills/spark-diagnosis/references/event-search.md) 提供现有 MCP 筛选与证据选择示例。FetchFailed 加 executor 丢失不能证明 OOM。现有安装脚本会复制这份 Skill 及其参考文件；`--with-mcp` 仍只配置 Hive、Zeppelin 和 DolphinScheduler，Spark 实例按上文独立配置，不自动修改用户 MCP 配置。
 
+运维问题可从 [现象与候选根因指引](skills/spark-diagnosis/references/operations-scenarios.md) 进入：先定位提交、排队、执行、产出或证据缺失等表现，再核实候选原因的支持证据、反证和恢复情况。缺少 YARN、存储、调度或业务结果所需证据时保留 inconclusive；该指引不新增 MCP 工具，也不自动判定根因。
+
 ### Driver / executor stdout、stderr
 
 Skill 已包含 [容器日志排查编排](skills/spark-diagnosis/references/container-logs.md)：选择 Driver 或事件中明确的 executor，下载所需流，核对本地文件及 event log 来源，再搜索有界脱敏正文并检查恢复。只有退出码、没有堆栈时继续查另一条流；不完整覆盖保留为缺口。例如：“使用 spark-diagnosis 排查 application_1_42、attempt 1；事件不足以解释失败时补充 Driver/executor 日志，列出证据和待验证原因。”读取下载后的正文需要能访问 MCP server 所在主机的本地文件。

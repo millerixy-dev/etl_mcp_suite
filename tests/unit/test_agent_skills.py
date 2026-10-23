@@ -647,12 +647,31 @@ def test_spark_skill_reference_links_resolve_inside_portable_skill() -> None:
     assert {
         "references/spark-events-2.4.7.md", "references/event-search.md",
         "references/container-logs.md",
+        "references/operations-scenarios.md",
     } <= set(reference_targets)
     for target in reference_targets:
         resolved = (skill_root / target).resolve()
         assert resolved.is_relative_to(skill_root.resolve())
         assert resolved.is_file()
         assert not agent_coupling(resolved.read_text(encoding="utf-8"))
+
+
+def test_spark_operations_scenarios_have_valid_cross_references() -> None:
+    guide = (
+        PROJECT_ROOT / "skills/spark-diagnosis/references/operations-scenarios.md"
+    ).read_text(encoding="utf-8")
+    symptom_ids = re.findall(r"^\| (S\d{2}) \|", guide, flags=re.MULTILINE)
+    root_cause_rows = re.findall(r"^\| (R\d{2}) \|([^\n]+)", guide, flags=re.MULTILINE)
+
+    assert symptom_ids and len(symptom_ids) == len(set(symptom_ids))
+    root_cause_ids = [root_cause_id for root_cause_id, _ in root_cause_rows]
+    assert root_cause_ids and len(root_cause_ids) == len(set(root_cause_ids))
+    linked_symptoms: set[str] = set()
+    for _, row in root_cause_rows:
+        linked = set(re.findall(r"S\d{2}", row.split("|")[1]))
+        assert linked and linked <= set(symptom_ids)
+        linked_symptoms.update(linked)
+    assert set(symptom_ids) <= linked_symptoms
 
 
 def test_spark_search_examples_validate_against_actual_query_contract() -> None:

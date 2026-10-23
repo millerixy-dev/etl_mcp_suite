@@ -1,6 +1,6 @@
 ---
 name: spark-diagnosis
-description: Use when investigating Spark long runtime, performance problems, job failures, retry recovery, executor loss, or an uncertain terminal state from saved Spark event logs.
+description: Use when investigating Spark job operations, long runtime, performance regressions, pending work, job failures, retry recovery, executor loss, uncertain terminal states, output anomalies, missing evidence, or Driver and Executor log errors.
 ---
 
 # Spark 诊断取证
@@ -14,6 +14,8 @@ description: Use when investigating Spark long runtime, performance problems, jo
 进行 event log 分析时，先 inspect 原 `manifest_path` 和显式 `attempt_id`，把 `snapshot.sha256` 原样复制为所有 query 和指标请求的 `expected_sha256`；摘要属于脱敏 JSONL，不是 source_sha256。整轮保留 manifest、attempt 和 hash，不隐式 refresh 或替换文件。仅请求下载某条容器日志时可直接调用下载工具，不要求先完成事件分析。
 
 ## 按问题查阅参考
+
+用户从提交失败、等待资源、执行停滞、反复重试、终态不一致、输出异常或日志缺失等运维表现提问，或要求列举可能 root cause 时，按需读 [运维场景与候选根因](references/operations-scenarios.md)。先选实际观察到的现象，再把关联原因当作待证伪假设；检查影响范围、后续恢复和反证。该参考不能替代下方的固定快照、直接身份、外部证据及结论规则。
 
 解释事件、失败原因、关联字段或原始指标单位时，按需读 [Spark 2.4.7 事件语义](references/spark-events-2.4.7.md) 的相关章节；它区分事件实际含义、日志是否记录，以及当前工具能返回的字段。厂商扩展先查 inspect 中实际完整 Event 名，不套用未知语义。
 
