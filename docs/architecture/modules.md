@@ -6,7 +6,7 @@ This document describes the package structure, module responsibilities, dependen
 
 The active OpenSpec proposal, specs, design, and tasks are the normative source of truth. This document is an explanatory architecture view and must be synchronized after approved OpenSpec changes.
 
-The Hive plugin ships via `deliver-hive-plugin-slice` and the Zeppelin plugin via `deliver-zeppelin-plugin-slice`; both are delivered. The DolphinScheduler module is described for reference but remains deferred; its registry loader is a placeholder that rejects runtime construction until implemented.
+The fixed registry contains delivered Hive, Zeppelin, DolphinScheduler and Spark slices. The active Spark download and inspection changes govern acquisition and read-only local evidence selection.
 
 ## Architectural Style
 
@@ -88,7 +88,7 @@ bootstrap.py (parse_args) → registry.py (select zeppelin) → plugin.py (_crea
 The inward dependency rule is enforced by `tests/contract/test_architecture.py` via `tests/contract/import_rules.py`, which defines four rules:
 
 - **core-to-plugin**: `core.*` must not import any `plugins.*`.
-- **service-to-infrastructure**: a `*.service` module must not import `httpx`, `mcp`, `pyhive`, `websockets`, or sibling modules `http_client`, `plugin`, `pyhive`, `tools`, `websocket_client`.
+- **service-to-infrastructure**: a `*.service` module must not import external client/MCP libraries or HTTP/plugin/tool/file adapters, including Spark files/cache. Hive's existing pure domain cache remains an application dependency.
 - **shared-to-plugin**: only `registry.py` may import a concrete plugin from shared code.
 - **plugin-to-plugin**: one plugin must not import another.
 
@@ -103,10 +103,13 @@ One installed package
 └── mcp-stdio entry point
 ├── process A: shared runtime + Hive plugin
 ├── process B: shared runtime + Zeppelin plugin
-└── process C: shared runtime + DolphinScheduler plugin (deferred)
+├── process C: shared runtime + DolphinScheduler plugin
+└── process D: shared runtime + Spark plugin
 ```
 
 The package boundary simplifies installation and versioning. The process boundary isolates credentials, failures, connections, caches, and mutable state.
+
+Spark persistent evidence permits sequential reuse of one dedicated directory with a process lock; it does not share live clients or credentials.
 
 ## Planned Source Layout
 
@@ -144,12 +147,31 @@ src/mcp_stdio/
     │   ├── http_client.py
     │   ├── websocket_client.py
     │   └── tools.py
-    └── dolphinscheduler/
+    ├── dolphinscheduler/
         ├── plugin.py
         ├── config.py
         ├── service.py
         ├── gateway.py
         ├── http_client.py
+        └── tools.py
+    └── spark/
+        ├── plugin.py
+        ├── config.py
+        ├── models.py
+        ├── gateway.py
+        ├── service.py
+        ├── http_client.py
+        ├── files.py
+        ├── cache.py
+        ├── inspection_models.py
+        ├── inspection_reader.py
+        ├── inspection_events.py
+        ├── inspection.py
+        ├── metrics_models.py
+        ├── metrics_events.py
+        ├── metrics.py
+        ├── executor_log_models.py
+        ├── executor_logs.py
         └── tools.py
 ```
 
@@ -165,8 +187,8 @@ Files may become subpackages when they grow, but their responsibility and depend
 | `core/config.py` | Safe YAML/JSON loading (optional file), versioning, env-var-only startup, prefix overrides, secret references | Standard library, Pydantic, PyYAML | Plugin tool behavior or network clients |
 | `core/errors.py` | Stable safe error categories and correlation metadata | Standard library/domain types | Raw backend-specific responses |
 | `core/logging.py` | stderr logging and redaction | Standard library | MCP stdout writing |
-| `core/server.py` | FastMCP stdio lifecycle and boundary error conversion | MCP SDK, plugin contract | Concrete backend adapters |
-| `contracts/plugin.py` | Minimal plugin construction, registration, and cleanup protocol | Shared types only | Hive, Zeppelin, or DolphinScheduler details |
+| `core/server.py` | FastMCP stdio lifecycle, raw declared-argument validation and safe errors | MCP SDK, Pydantic, plugin contract | Concrete backend adapters |
+| `contracts/plugin.py` | Minimal plugin construction, registration, and cleanup protocol | Shared types only | Concrete backend details |
 
 ## Plugin Module Pattern
 
@@ -267,15 +289,36 @@ The interpreter is parsed from the paragraph body's leading `%<interpreter>` she
 
 ## DolphinScheduler Module Responsibilities
 
-> **Deferred.** The DolphinScheduler plugin is not delivered by the Hive slice. The responsibilities below describe the planned shape for a follow-up change.
+The delivered slice owns status inspection and constrained scheduling.
 
 - `config.py` models base URL, fixed status path, authentication references, and timeout.
-- `service.py` implements only server-status inspection.
-- `gateway.py` exposes one status operation and no generic HTTP method.
+- `service.py` implements status, bounded enumeration/search/inspection/logs/link extraction and constrained workflow start.
+- `gateway.py` exposes fixed scheduling operations and no caller-selected generic HTTP method.
 - `http_client.py` calls the configured status endpoint and normalizes bounded safe fields.
-- `tools.py` registers only `get_server_status`.
+- `tools.py` registers get_server_status, list_objects, get_object, search_objects, start_workflow, get_task_log and extract_log_links.
 
 The configured status path is deployment input, not MCP caller input.
+
+## Spark Module Responsibilities
+
+- config.py owns nine settings (including default-on verify_tls and same-origin knox_sso_url) and environment Cookie or paired username/password references.
+- models.py owns strict FetchRequest and immutable file/fetch results; gateway.py owns lookup/download/close and safe errors.
+- service.py validates requests and decides reuse versus refresh under one deadline.
+- http_client.py performs one lazy, bounded verified HTTPS GET; files.py validates ZIP/JSONL identities, redacts records and computes digests.
+- cache.py implements the gateway, owns the private root lock and acquisition workers, and publishes one directory/manifest per download. It verifies exact-source/scope manifests and file hashes for reuse.
+- inspection_models.py owns strict InspectRequest/QueryRequest and named inspection/query results; gateway.py adds the read-only SparkInspectionGateway inspect/query/close port.
+- service.py also owns SparkInspectionService request validation, total deadlines and safe inspection/query errors; it depends on the port, not local file adapters.
+- inspection_reader.py verifies one explicitly selected manifest/attempt in a single scan; inspection_events.py projects direct IDs, selected redacted text and bounded head/tail details.
+- files.py and inspection_reader.py constrain record reads by the remaining aggregate byte budget plus one overflow byte, without a separate line-size cap. The acquisition output retains its independent aggregate size check.
+- inspection.py implements SparkInspectionAdapter, full-file counters, bounded evidence selection and own-field query pagination without relation propagation or a persistent index.
+- metrics_models.py owns strict Stage/Task requests and named metric results; metrics_events.py extracts six fixed metrics, success-attempt samples and nearest-rank statistics; metrics.py performs transient Stage aggregation and selected-group distributions with bounded rankings.
+- service.py owns SparkMetricsService, depending on SparkMetricsGateway stage_metrics/task_distribution ports, not file adapters. plugin.py supplies the same SparkInspectionAdapter to inspection and metrics services; its existing worker set and close owns all local scans.
+- executor_log_models.py owns the strict five-input/twelve-field result contracts; gateway.py adds SparkExecutorLogGateway fetch/close; service.py validates and remaps errors with one deadline.
+- executor_logs.py resolves last-registration URLs with VerifiedEventLogReader, constrains gateway/backend/redirect identity, extracts bounded metadata-bound HTML, reuses SparkHttpClient authentication and files.redact_event, and atomically publishes private log/manifest evidence. It takes no new root lock.
+- tools.py exposes fetch_spark_event_log, inspect_spark_event_log, query_spark_events, get_spark_stage_metrics, get_spark_task_distribution and fetch_spark_executor_log; plugin.py composes dependencies under the existing single directory owner and closes log workers/clients, then inspection, then acquisition and its directory lock.
+- skills/spark-diagnosis/SKILL.md consumes those capabilities for agent-side hypotheses and counterevidence; installers distribute its canonical file without registering a Spark server.
+
+No object store, persistent analysis index, TTL, GC or generic storage interface is introduced. Files/cache adapters are infrastructure and cannot be imported by the Spark service. All plugin imports remain within the slice; only registry imports its concrete composition root from shared code.
 
 ## Cross-Cutting Policies
 
@@ -329,3 +372,7 @@ Required structural checks include:
 ## Adding Future Behavior
 
 New tools, authentication modes, transports, third-party plugins, or generic endpoint/query features require a new or updated OpenSpec change before code is modified. The change must update capability specs first, then this document if module boundaries or dependency direction change.
+
+Spark HTTP owns the optional Knox Basic-to-Cookie exchange. Only the SSO POST receives
+Basic Authorization; the download GET receives scoped cookies. Acquired cookie values
+are returned as private per-acquisition redaction context to the cache adapter, not as MCP data.

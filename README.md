@@ -8,7 +8,7 @@ plugin's tools to an MCP host.
 
 The built-in plugins are the **Hive schema plugin** for read-only HiveServer2
 metadata inspection (databases, tables, columns, partitions, and optional DDL),
-**Zeppelin notebook execution**, and **DolphinScheduler scheduling**.
+**Zeppelin notebook execution**, **DolphinScheduler scheduling**, and **Spark event-log download and inspection**.
 
 ## Requirements
 
@@ -184,8 +184,8 @@ ln -sfn "$PROD_ROOT/releases/<previous-release>" "$PROD_ROOT/current"
 
 ## Agent Skills
 
-The client-neutral Hive, Zeppelin, and natural-language query skills are maintained once at
-`skills/hive`, `skills/zeppelin`, and `skills/nl2sql`. Install the same canonical files into the
+The client-neutral Hive, Zeppelin, natural-language query, and Spark diagnosis skills are maintained once at
+`skills/hive`, `skills/zeppelin`, `skills/nl2sql`, and `skills/spark-diagnosis`. Install the same canonical files into the
 current project for the MCP client in use:
 
 ```bash
@@ -596,10 +596,269 @@ The remaining tools are read-only. Results and task logs are bounded, and the
 server does not expose object create, update, delete, pause, resume, or stop
 operations.
 
+## Spark event log download
+
+Spark exposes `fetch_spark_event_log`, `inspect_spark_event_log`, `query_spark_events`, `get_spark_stage_metrics`, `get_spark_task_distribution` and `fetch_spark_executor_log`.
+Acquisition uses `fetch_spark_event_log(application_id, attempt_id=None, refresh=False)`.
+It downloads the configured Spark History Server logs ZIP, validates identities/CRC/JSONL,
+redacts credentials and saves local JSONL files plus one manifest for later diagnosis tools.
+The first format target is the verified Spark 2.4.7 single-file JSONL layout.
+
+| Input | Default | Meaning |
+| --- | --- | --- |
+| application_id | required | YARN ID such as `application_1700000000000_0042` |
+| attempt_id | null | Exact attempt; omitted requests all available attempt logs |
+| refresh | false | Reuse matching saved files; true downloads to a new directory |
+
+Unknown arguments and invalid raw types are rejected without echoing argument values.
+Tool arguments cannot specify URLs, output paths, credentials or TLS settings.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| history_server_url | required | HTTPS root including the gateway mount, without `/api/v1`, credentials or query |
+| cache_dir | required | Absolute dedicated local directory; POSIX macOS/Linux |
+| verify_tls | true | Set false explicitly to skip certificate and hostname verification |
+| knox_sso_url | null | Same-origin HTTPS Knox SSO endpoint, required with username/password |
+| ca_bundle_path | null | Optional readable trusted PEM CA for private certificates |
+| request_timeout_seconds | 300 | Whole-call budget, including lookup, queueing and processing (maximum 900) |
+| max_bytes | 268435456 | Independently bounds ZIP bytes, expanded input and output JSONL totals |
+
+JSON events have no separate per-line byte limit. Acquisition and offline analysis read each line within the remaining total byte budget; output text limits still apply. Large events can increase transient JSON parsing/redaction memory beyond their byte size.
+
+Use [spark.yaml](docs/examples/spark.yaml) or [spark.json](docs/examples/spark.json).
+Safely inject an existing login Cookie into `SPARK_GATEWAY_COOKIE`; configuration contains
+only its environment-variable name. Anonymous deployments may omit the secret reference.
+Verification is enabled by default. For an explicitly trusted self-signed deployment, set
+`SPARK_VERIFY_TLS=false` (or YAML `verify_tls: false`) and restart the MCP process.
+This disables server identity verification; HTTPS encryption remains. A configured CA is
+still validated locally but is not used when verification is disabled. Cookie mode does not log in.
+
+```sh
+uv run --locked mcp-stdio --plugin spark --config docs/examples/spark.yaml
+```
+
+Environment-only startup uses the same field names with the SPARK prefix:
+
+```sh
+export SPARK_HISTORY_SERVER_URL='https://history.example.invalid:8443/gateway/analytics/sparkhistory'
+export SPARK_CACHE_DIR='/var/tmp/mcp-spark-l3'
+export SPARK_CA_BUNDLE_PATH='/etc/mcp/spark-ca.pem'
+# SPARK_GATEWAY_COOKIE is already safely injected; optional overrides:
+# SPARK_REQUEST_TIMEOUT_SECONDS and SPARK_MAX_BYTES.
+uv run --locked mcp-stdio --plugin spark
+```
+
+For Knox username/password authentication, use [spark-basic.yaml](docs/examples/spark-basic.yaml)
+or [spark-basic.json](docs/examples/spark-basic.json). Inject `SPARK_USERNAME` and
+`SPARK_PASSWORD` through the host's protected environment; do not set `SPARK_GATEWAY_COOKIE`
+at the same time. Credentials must be paired, and `SPARK_KNOX_SSO_URL` is required:
+
+```sh
+export SPARK_HISTORY_SERVER_URL='https://history.example.invalid:8443/gateway/analytics/sparkhistory'
+export SPARK_KNOX_SSO_URL='https://history.example.invalid:8443/gateway/knoxsso/api/v1/websso'
+export SPARK_CACHE_DIR='/var/tmp/mcp-spark-l3'
+# SPARK_USERNAME and SPARK_PASSWORD are already securely injected.
+uv run --locked mcp-stdio --plugin spark
+# Or use --config docs/examples/spark-basic.yaml.
+```
+
+Before each network download, the adapter sends one empty POST with Basic Authorization to
+the configured SSO endpoint and obtains scoped cookies. Only that POST receives the password;
+the eventlog download GET uses cookies. Neither follows redirects or retries failed logins. Both
+requests share the call deadline. Cookies stay in memory for that acquisition, are cleared
+on all receive exits, and are included in credential redaction before publishing evidence.
+Cache hits make no login request. The plugin does not automatically read personal credential
+files. This exchange follows [Knox SSO](https://apache.github.io/knox/config_knox_sso/).
+
+For an MCP host, point to the installed release entry point described above and pass the
+selected credentials through the host's protected environment:
+
+```json
+{
+  "mcpServers": {
+    "spark": {
+      "command": "/absolute/path/to/hive-cli-mcp-stdio-prod/current/venv/bin/mcp-stdio",
+      "args": ["--plugin", "spark", "--config", "/absolute/path/to/spark.yaml"]
+    }
+  }
+}
+```
+
+Local MCP transport is stdio; outgoing HTTPS is the History Server connection.
+Set the host tool timeout above the configured whole-call budget.
+
+The result contains `application_id`, `requested_attempt_id`, `cache_hit`,
+`downloaded_at`, `manifest_path` and `files`. Each file contains `attempt_id`,
+`local_path`, `spark_version`, `size_bytes`, `sha256`, `source_sha256`,
+`event_count` and `application_end_seen`. The two digests describe sanitized output and
+original source bytes respectively; ApplicationEnd is not a YARN final status.
+
+JSONL is generated during post-download validation/redaction in a private temporary
+directory. After every member passes, the ZIP is removed and the directory is renamed to:
+
+```text
+<cache_dir>/<application_id>/all|attempt-<id>/<random-id>/
+  eventlog-0001.jsonl
+  manifest.json
+```
+
+The manifest adds `format_version=1` and the normalized source URL to the result fields,
+excluding `cache_hit`. No raw ZIP, unsanitized JSON, index or digest sidecar is retained.
+Events retain line order and numeric metrics; credential fields and non-allowlisted
+environment properties are redacted. Compressed/rolling logs and malformed tails fail.
+
+Reuse requires the same source URL and exact attempt selection plus verified file hashes.
+It preserves the original download time and makes no upstream request, so it does not
+guarantee freshness. Refresh saves another directory, preserving previous evidence.
+Directories persist until you clean them manually; there is no TTL, deduplication or GC.
+One process owns a cache root at a time. Failure/cancellation/shutdown clean owned staging;
+a force-killed process may leave ignored `.part-*` directories for manual cleanup.
+
+Live download is opt-in: supply `MCP_STDIO_SPARK_INTEGRATION=1`,
+`MCP_STDIO_SPARK_APPLICATION_ID`, optional `MCP_STDIO_SPARK_ATTEMPT_ID`, and the SPARK
+URL/cache/CA deployment environment plus either Cookie or paired username/password and SSO URL, then run:
+
+```sh
+uv run --locked pytest -m integration tests/integration/test_spark_server.py
+```
+
+### Inspect and query saved local evidence
+
+Both readers scan existing private sanitized JSONL without HTTP, refresh, analysis writes or credentials. The configured history_server_url must still match the manifest source; existing cache, size/deadline and exclusive ownership rules apply. inspect returns `SparkEventLogInspectionResult`; query returns `SparkEventQueryResult`. Examples below are synthetic.
+
+inspect accepts only the first two parameters; query accepts all. Numeric inputs are strict integers (not bool/string); unknown fields and empty lists are rejected. Entity IDs/cursors range from 0 to 2^63-1; physical lines start at 1. Attempt/executor IDs use `[A-Za-z0-9_-]{1,128}`.
+
+| Parameter | Type / default | Meaning |
+| --- | --- | --- |
+| manifest_path | string, required | Absolute existing private-cache manifest path |
+| attempt_id | string or null, required | Explicit selected attempt; null means actual no-attempt |
+| expected_sha256 | string, required by query | Copy inspect.snapshot.sha256; sanitized JSONL digest |
+| event_types | list[string] or null | 1–16 exact Event names, OR within list |
+| execution_id / job_id / stage_id / task_id | int or null | Nonnegative direct event IDs only |
+| stage_attempt_id | int or null | Requires stage_id |
+| executor_id | string or null | Direct executor ID |
+| task_end_reason | string or null | Exact TaskEnd reason; UNKNOWN selects missing/invalid reason |
+| lines | list[int] or null | 1–20 distinct 1-based physical lines |
+| after_line | int, 0 | Page begins strictly after this line |
+| limit | int, 20 | 1–20 returned records |
+| max_detail_chars | int, 2048 | 1–32768 characters; >2048 requires one lines entry and limit=1 |
+
+```json
+{"manifest_path":"/var/tmp/mcp-spark-l3/evidence/manifest.json","attempt_id":null}
+```
+
+```json
+{
+  "snapshot":{"application_id":"application_100_1","attempt_id":null,"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+  "spark_version":"2.4.7","event_count":3,
+  "event_types":[{"event_type":"SparkListenerApplicationStart","count":1},{"event_type":"SparkListenerJobEnd","count":1},{"event_type":"SparkListenerLogStart","count":1}],
+  "event_types_omitted":0,
+  "signals":{"job_failed_events":0,"stage_failure_events":0,"task_non_success_events":0,"executor_removed_events":0},
+  "task_end_count":0,"task_end_reasons":[],"reasons_omitted":0,
+  "evidence":[{"ref":{"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","line":3},"event_type":"SparkListenerJobEnd","ids":{"execution_id":null,"job_id":0,"stage_id":null,"stage_attempt_id":null,"task_id":null,"executor_id":null},"details":"Job Result: {\"Result\":\"JobSucceeded\"}","details_truncated":false}],
+  "evidence_omitted":0,"coverage":{"application_start_seen":true,"application_end_seen":false}
+}
+```
+
+```json
+{"manifest_path":"/var/tmp/mcp-spark-l3/evidence/manifest.json","attempt_id":null,"expected_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","event_types":["SparkListenerTaskEnd"],"stage_id":3,"task_end_reason":"FetchFailed"}
+```
+
+```json
+{
+  "snapshot":{"application_id":"application_100_1","attempt_id":null,"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+  "matched_count":0,"task_end_count":0,"task_end_reasons":[],"reasons_omitted":0,
+  "events":[],"returned_count":0,"next_after_line":null,
+  "coverage":{"application_start_seen":true,"application_end_seen":false}
+}
+```
+
+Filters are ANDed and match each event's own fields. job_id does not expand to stages/tasks; execution_id does not expand to JobEnd. Read JobStart Stage IDs / SQL properties and query each entity separately. matched_count and reason distribution cover all matches before pagination; keep filters/hash fixed while changing after_line.
+
+Outputs default to 20 records and 2048 characters per details. Type/reason lists contain at most 32 categories and overview evidence at most 20 entries, with omitted counts. details_truncated marks omitted middle text: the outer result is valid JSON, but details need not be. Expand critical text using the same hash and `lines=[ref.line], limit=1, max_detail_chars=32768`; report a gap if still truncated. References bind sanitized-file SHA-256 and physical line. coverage describes observed ApplicationStart/End only, not upstream completeness or YARN/SQL success.
+
+### Offline performance facts
+
+`get_spark_stage_metrics` returns `SparkStageMetricsResult`; `get_spark_task_distribution` returns `SparkTaskDistributionResult`. Both require `manifest_path`, explicit nullable application `attempt_id`, and the sanitized `expected_sha256` from inspect. They scan the same private snapshot locally without HTTP, refresh, credentials or persisted analysis; existing source/size/deadline/ownership checks apply.
+
+| Tool | Additional inputs | Scope and result |
+| --- | --- | --- |
+| get_spark_stage_metrics | Optional paired stage_id / stage_attempt_id; limit=20 (1–20) | Stage attempts ranked by valid duration descending; full group TaskEnd classification, successful input/Shuffle totals with valid/missing counts, lifecycle refs; matched_stage_attempt_count, unassigned_task_end_count, stages_omitted disclose scope |
+| get_spark_task_distribution | Required stage_id / stage_attempt_id; order_by=duration_ms; limit=20 (1–20) | Full successful-attempt min/p50/p95/max and independent valid_count/missing_count per metric; ranked_task_count, top_tasks with all metrics and refs, tasks_omitted |
+
+Fixed metrics/orderings: duration_ms, executor_run_time_ms, jvm_gc_time_ms, input_bytes, shuffle_read_bytes, shuffle_fetch_wait_ms. Times are milliseconds and quantities bytes. Shuffle sums valid Remote/Local Bytes Read; absent components remain unknown. Quantiles use nearest-rank without interpolation. Retry/speculative Success events remain separate samples; changing limit or ordering never changes distributions. Missing ordering values do not enter rankings.
+
+Example after inspect (synthetic path/hash; replace with returned evidence):
+
+```json
+{"manifest_path":"/var/tmp/mcp-spark-l3/evidence/manifest.json","attempt_id":null,"expected_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","stage_id":17,"stage_attempt_id":1,"order_by":"shuffle_fetch_wait_ms","limit":1}
+```
+
+For slow applications, query ApplicationStart/End timestamps, rank Stage attempts, select an explicit attempt, compare metrics on the same tasks and reread refs via query. Check retries/executor counterevidence. Successful JobEnd does not end performance investigation. Without a comparable baseline, do not call runtime abnormal. Large Shuffle and a duration tail suggest a workload-imbalance candidate; high Fetch Wait with similar bytes suggests a waiting candidate, neither proves skew/network/OOM. Stage overlap and time outside Stage remain gaps; Stage/GC/wait/runtime values cannot be added into application elapsed time. Reports retain full sample counts, missing metrics, omitted rankings and causal limits even with no observed failure.
+
+The [spark-diagnosis Skill](skills/spark-diagnosis/SKILL.md) guides hypotheses, counterevidence, recovery checks and citations with supported / inconclusive / no_observed_failure conclusions; it adds no backend classifier. Its optional [Spark 2.4.7 event reference](skills/spark-diagnosis/references/spark-events-2.4.7.md) explains event meanings, field availability and units; the [search guide](skills/spark-diagnosis/references/event-search.md) shows existing MCP filters and evidence selection. FetchFailed plus executor loss does not prove OOM. Existing installers copy this Skill and its references; `--with-mcp` continues to configure Hive, Zeppelin, and DolphinScheduler only. Configure the Spark instance separately as above; installation does not automatically alter user Spark MCP configuration.
+
+For operations questions, the [symptom and root-cause guide](skills/spark-diagnosis/references/operations-scenarios.md) starts with observable submission, scheduling, execution, output, and evidence gaps, then lists candidate causes and the evidence needed to support or reject them. YARN, storage, scheduler, and business-output causes remain inconclusive when their required evidence is unavailable; the guide does not add MCP tools or automatically classify failures.
+
+### Driver and executor stdout/stderr
+
+The Skill now includes a [container-log investigation workflow](skills/spark-diagnosis/references/container-logs.md): select Driver or an observed executor, download the needed stream, verify the saved file and event-log provenance, then search bounded redacted text and cross-check recovery. An exit code without a stack trace prompts checking the other stream; partial coverage remains explicit. For example: “Use spark-diagnosis to investigate application_1_42 attempt 1; supplement Driver/executor logs when event evidence cannot explain the failure, and cite evidence and remaining gaps.” Reading the downloaded text requires local file access on the MCP server's host.
+
+`fetch_spark_executor_log(application_id, attempt_id, executor_id, log_type="stderr", tail_bytes=65536)` saves a fresh redacted tail plus provenance manifest, returning paths and structural metadata without log text. Driver uses executor_id="driver"; numeric executors use the last registration in verified exact-attempt eventlog. Missing executor/stream returns NOT_FOUND without a download refresh; explicitly refresh via fetch_spark_event_log if needed. No container ID, owner or NodeId port is guessed.
+
+| Input | Contract |
+| --- | --- |
+| application_id | Required ASCII application_[0-9]+_[0-9]+, at most128 characters |
+| attempt_id | Required canonical positive decimal string, at most10 digits; no null/latest |
+| executor_id | Required driver or canonical nonnegative decimal string, at most20 digits |
+| log_type | stdout/stderr; default stderr |
+| tail_bytes | Strict integer1–1048576, default65536; no string/boolean coercion |
+
+[YAML](docs/examples/spark-executor-logs.yaml) and [JSON](docs/examples/spark-executor-logs.json) add only `executor_log_node_manager_path` (default null/disabled, safe gateway-relative path ending in /node) and `executor_log_allowed_upstreams` (default[], up to128 unique http(s)://host:explicit-port authorities, exact hosts or one DNS-label wildcard). Configure both together. The route is a deployment placeholder; replace with a confirmed path. history_server_url must end in /sparkhistory, whose prefix supplies the gateway root. Old configurations remain valid; disabled log calls return CONFIG_ERROR before acquisition.
+
+
+```sh
+# Inject SPARK_GATEWAY_COOKIE privately (or use the existing Knox Basic settings).
+export SPARK_HISTORY_SERVER_URL='https://history.example.invalid:8443/gateway/analytics/sparkhistory'
+export SPARK_CACHE_DIR='/var/tmp/mcp-spark-l3'
+export SPARK_EXECUTOR_LOG_NODE_MANAGER_PATH='/yarn/nodemanager/node'
+export SPARK_EXECUTOR_LOG_ALLOWED_UPSTREAMS='["http://*.nodes.example.invalid:8042","http://jobhistory.example.invalid:19888"]'
+# Private CA: export SPARK_CA_BUNDLE_PATH='/etc/mcp/spark-ca.pem'
+uv run --locked mcp-stdio --plugin spark
+# Equivalent file mode:
+uv run --locked mcp-stdio --plugin spark --config docs/examples/spark-executor-logs.yaml
+```
+
+```json
+{"application_id":"application_1700000000000_0042","attempt_id":"2","executor_id":"driver","log_type":"stdout"}
+{"application_id":"application_1700000000000_0042","attempt_id":"2","executor_id":"3","log_type":"stderr","tail_bytes":65536}
+```
+
+`SparkExecutorLogFetchResult` (12 fields; synthetic example):
+
+```json
+{"application_id":"application_1700000000000_0042","attempt_id":"2","executor_id":"driver","container_id":"container_e83_1700000000000_0042_02_000001","log_type":"stdout","requested_tail_bytes":65536,"fetched_at":"2026-10-14T00:00:00Z","coverage":"complete","local_path":"/var/tmp/mcp-spark-l3/executor-logs/application_1700000000000_0042/attempt-2/driver/00000000000040008000000000000001/stdout.log","size_bytes":4404,"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","manifest_path":"/var/tmp/mcp-spark-l3/executor-logs/application_1700000000000_0042/attempt-2/driver/00000000000040008000000000000001/manifest.json"}
+```
+
+Reuse existing TLS/CA and Cookie or paired Knox Basic authentication. For Basic mode remove the Cookie reference and use SPARK_USERNAME/SPARK_PASSWORD plus SPARK_KNOX_SSO_URL as in spark-basic.yaml. Basic Authorization only reaches the SSO POST. Actual GETs stay at the configured HTTPS gateway, including allowlisted backend queries; only this log tool permits up to3 validated identity-preserving NodeManager/JobHistory redirects. Eventlog downloads still refuse redirects. No caller URL/path/auth/TLS arguments.
+
+Each call creates a new private directory0700 with one stdout.log/stderr.log and manifest.json0600, atomic publication and saved-byte SHA-256 checks. The manifest additionally binds gateway root/route, redacted source URL, nullable source size and verified eventlog path/hash, with processing metadata. coverage=complete/tail/unknown describes observed scope; saved byte size changes with redaction and is not a source offset. Failed staging is removed; successful evidence is operator-managed, with no log-cache reuse or automatic retention cleanup.
+
+A response containing more source-text bytes than requested tail_bytes is rejected as UNEXPECTED_RESPONSE; saved redacted size never determines source offsets. Fixed caps: cumulative HTML8MiB and saved UTF-8 text1MiB, within one configured deadline including queueing and eventlog resolution. Redaction runs over the full acquired context before trimming complete tail lines. A confirmed nonzero source byte start conservatively discards the first boundary line; complete EOF-final lines need no newline. Credential redaction does not promise general business-data anonymization.
+
+Parsing accepts the verified UTF-8 Log Type/pre structure, ignores template whitespace, rejects login/ACL/missing pages, encoding conflicts and multiple versions. Standard local NodeManager pages lacking stream metadata may return UNEXPECTED_RESPONSE. The provided Driver JobHistory stdout was live-verified; production NodeManager routing and other streams still require deployment opt-in verification.
+
+Live stdio verification requires settings/auth plus MCP_STDIO_SPARK_EXECUTOR_LOG_INTEGRATION=1 and MCP_STDIO_SPARK_APPLICATION_ID / MCP_STDIO_SPARK_ATTEMPT_ID / MCP_STDIO_SPARK_EXECUTOR_ID. It requests stdout and verifies private files without printing their contents:
+
+```sh
+uv run --locked pytest -m integration tests/integration/test_spark_executor_logs.py
+```
+
 ## Process isolation
 
 Each `mcp-stdio` process loads exactly one plugin. Processes do not share
-memory, credentials, connections, caches, or mutable runtime state. If one
+memory, credentials, connections, live caches, or mutable runtime state. Spark permits sequential
+reuse of persistent evidence after the previous cache-directory owner exits. If one
 plugin process fails, independently launched plugin processes are unaffected.
 
 ## Tool errors

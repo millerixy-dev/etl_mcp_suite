@@ -1,0 +1,11 @@
+# Task 4.1 final verification micro-plan
+
+OpenSpec tasks.md is the only acceptance checklist. No behavior is added in this task; all implementation tasks have fresh controller verification and independent review. Controller-owned final evidence is recorded in task-4.1-report.md.
+
+1. Run `uv sync --locked`; expect the committed dependency lock to resolve without dependency edits. Then `uv sync --locked --no-editable --reinstall-package hive-cli-mcp-stdio` installs the final current source as a regular package, avoiding the previously diagnosed local macOS hidden editable .pth. Use `UV_NO_EDITABLE=1` for subsequent uv run commands; no project workflow/config workaround.
+2. Run `UV_NO_EDITABLE=1 uv run --locked pytest`; expect the complete configured suite to pass, with opt-in integration excluded/skipped honestly. Run `UV_NO_EDITABLE=1 uv run --locked ruff check .` and `UV_NO_EDITABLE=1 uv run --locked pyright`; expect zero lint/type errors.
+3. Run `uv build` and `UV_NO_EDITABLE=1 uv run --locked mcp-stdio --help`; expect wheel/sdist and console help without upstream access.
+4. Run `openspec validate add-spark-performance-metrics --strict`, `openspec validate --changes --strict`, `openspec validate --specs --strict`; expect no failed validations. Existing unrelated archive-order INFO notices remain recorded, not altered.
+5. Generate whole-change review package from capability baseline82ca6a7 to final implementation HEAD. Independent most-capable reviewer inspects code/contracts/security/economy/docs and verification evidence without rerunning controller suites. Reproduce/fix substantive findings with targeted RED/GREEN and re-review before completion.
+6. Include already executed two-real-snapshot check and fresh three-case48-call MCP replay from task3.2. Preserve their actual scope: no network/live authentication, no100MB benchmark and no proof of production causality. Configuration example `secrets: {}` correction is verified with the existing local config loader.
+7. Check `git diff --check`, ownership/status and final CLI all_done progress. Only then mark4.1 complete and commit owned acceptance docs. Preserve unrelated download/executor artifacts; do not push, merge, archive or deploy to global clients.

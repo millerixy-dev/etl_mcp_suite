@@ -115,3 +115,51 @@ def test_registry_exemption_does_not_allow_other_shared_zeppelin_imports(tmp_pat
     assert [(v.rule, v.module, v.imported) for v in find_import_violations(root)] == [
         ("shared-to-plugin", "mcp_stdio.bootstrap", "mcp_stdio.plugins.zeppelin.plugin"),
     ]
+
+
+@pytest.mark.parametrize(
+    "source, imported",
+    [
+        ("from .files import process_archive\n", "mcp_stdio.plugins.spark.files"),
+        ("from .cache import SparkEventLogAdapter\n", "mcp_stdio.plugins.spark.cache"),
+        ("from mcp_stdio.plugins.spark import cache\n", "mcp_stdio.plugins.spark.cache"),
+    ],
+)
+def test_spark_service_file_adapters_are_rejected(
+    tmp_path: Path, source: str, imported: str
+) -> None:
+    root = tmp_path / "src"
+    _write_module(root, "mcp_stdio/plugins/spark/service.py", source)
+    assert [(v.rule, v.imported) for v in find_import_violations(root)] == [
+        ("service-to-infrastructure", imported),
+    ]
+
+
+@pytest.mark.parametrize(
+    "module",
+    [
+        "inspection",
+        "inspection_reader",
+        "inspection_events",
+        "metrics",
+        "metrics_events",
+        "executor_logs",
+    ],
+)
+@pytest.mark.parametrize(
+    "form",
+    [
+        "from .{module} import Value\n",
+        "from mcp_stdio.plugins.spark import {module} as implementation\n",
+        "from . import {module} as implementation\n",
+        "import mcp_stdio.plugins.spark.{module}\n",
+    ],
+)
+def test_spark_service_inspection_infrastructure_rejected(
+    tmp_path: Path, module: str, form: str
+) -> None:
+    root = tmp_path / "src"
+    _write_module(root, "mcp_stdio/plugins/spark/service.py", form.format(module=module))
+    assert [(v.rule, v.imported) for v in find_import_violations(root)] == [
+        ("service-to-infrastructure", "mcp_stdio.plugins.spark." + module),
+    ]

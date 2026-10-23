@@ -10,6 +10,7 @@ The active OpenSpec change remains normative:
 - `openspec/specs/plugin-stdio-runtime/spec.md` (synced main spec)
 - `openspec/changes/build-plugin-mcp-stdio/` (multi-plugin runtime, partially deferred)
 - `openspec/changes/deliver-zeppelin-plugin-slice/` (Zeppelin notebook tools and write-safety)
+- `openspec/changes/add-spark-event-log-download/` (Spark acquisition, local evidence and raw argument validation)
 
 If this document differs from an active OpenSpec artifact, update the OpenSpec artifact first and then synchronize this explanation.
 
@@ -26,13 +27,17 @@ MCP Host
 ├── mcp-stdio --plugin zeppelin [--config zeppelin.yaml]   # --config optional; ZEPPELIN_* env vars may supply everything
 │     └── Zeppelin plugin ── HTTP / WebSocket ── Zeppelin Server
 │
-└── mcp-stdio --plugin dolphinscheduler --config dolphinscheduler.json   (deferred)
-      └── DolphinScheduler plugin ── REST ── DolphinScheduler             (deferred)
+├── mcp-stdio --plugin dolphinscheduler [--config dolphinscheduler.json]
+│     └── DolphinScheduler plugin ── REST ── DolphinScheduler
+│
+└── mcp-stdio --plugin spark [--config spark.yaml]
+      └── Spark plugin ── HTTPS ── Spark History Server
+            └── private local JSONL + manifest (persistent L3)
 ```
 
-Every child process has its own stdin/stdout MCP channel, configuration, secrets, clients, caches, failures, and shutdown lifecycle. Processes share installed package files only.
+Every child process owns its stdio channel, configuration, credentials, clients and live state. Spark permits sequential reuse of a dedicated persistent directory after the previous owner exits; a root lock prevents concurrent owners, and source/request matching prevents cross-source adoption.
 
-The Hive plugin ships via `deliver-hive-plugin-slice` and the Zeppelin plugin via `deliver-zeppelin-plugin-slice`; both are delivered. The DolphinScheduler process remains deferred; its registry loader is a placeholder that rejects runtime construction until implemented.
+The fixed registry contains the delivered Hive, Zeppelin, DolphinScheduler and Spark plugins. Every process loads only its selected plugin.
 
 ## Startup Flow
 
@@ -96,6 +101,8 @@ sequenceDiagram
 ```
 
 The application service does not know about FastMCP, PyHive, or HTTP. It works with domain models and gateway interfaces, which allows unit tests to use fake gateways.
+
+Before SDK argument preprocessing, the stdio boundary validates the original argument dictionary against the declared tool model. Unknown arguments and strict-type violations yield fixed INVALID_INPUT errors without input values. tools/list publishes closed input schemas.
 
 ## Hive Request Flow
 
@@ -165,7 +172,7 @@ Local MCP transport remains JSON-RPC over stdio. HTTP and WebSocket are outgoing
 
 ## DolphinScheduler Request Flow
 
-The v1 DolphinScheduler plugin exposes only `get_server_status`. This plugin is **deferred** to a follow-up change; the flow below describes the planned behavior for reference.
+The delivered DolphinScheduler plugin exposes get_server_status, list_objects, get_object, search_objects, start_workflow, get_task_log and extract_log_links. Its status flow is:
 
 ```text
 get_server_status
@@ -176,7 +183,77 @@ get_server_status
   -> discard raw headers, cookies, tokens, and unbounded bodies
 ```
 
-The MCP caller cannot select an HTTP method, URL, path, headers, or body. Workflow operations are not registered.
+The MCP caller cannot select an HTTP method, URL, path or headers. Scheduling inputs follow the active scheduling capability specs.
+
+## Spark Container Log Flow
+
+```text
+fetch_spark_executor_log(application_id, attempt_id, executor_id, log_type="stderr", tail_bytes=65536)
+  -> strict MCP input -> SparkExecutorLogService -> SparkExecutorLogGateway
+  -> enabled configuration -> one deadline/worker queue
+  -> same eventlog gateway lookup/download -> VerifiedEventLogReader exact attempt/hash
+  -> last Driver/Executor URL -> configured NodeManager gateway route
+  -> existing SSO Basic POST/Cookie -> validated same-gateway redirects/approved backend
+  -> bounded metadata-bound UTF-8 HTML -> shared redaction -> complete-line limits
+  -> private descriptor-relative staging -> log + manifest -> SHA-256 -> atomic rename
+  -> 12-field paths/metadata result, no log text
+```
+
+Only log GETs follow up to3 validated redirects; eventlog HTTP behavior stays unchanged. Both actual HTTPS gateway origin/root and embedded backend authority are constrained. Fixed8MiB response and1MiB output caps share the original deadline, including queueing/resolution. Missing stream never triggers automatic eventlog refresh. Disabled settings fail before acquisition, unknown HTML/stream identity or multiple versions fail closed.
+
+No second root lock: shutdown cancels/awaits log workers and closes/clears their HTTP/Cookie state before inspection and the existing eventlog owner release the evidence lock. Descriptor traversal rejects symlink descendants; directories0700/files0600; failed unpublished staging only is removed. Successful evidence remains operator-managed. Detailed source/coverage processing belongs to manifest; stdout remains MCP protocol-only.
+
+## Spark Request Flow
+
+```text
+fetch_spark_event_log(application_id, attempt_id=None, refresh=False)
+  -> strict input validation and one total deadline
+  -> exact source/application/attempt lookup unless refresh=true
+  -> verified cache hit returns existing paths and original download time
+  -> otherwise serialize one bounded HTTPS GET with environment Cookie
+  -> private .part directory: ZIP CRC/JSONL/identity validation and credential redaction
+  -> source/output digests, event counts and ApplicationEnd observation
+  -> write one manifest, remove ZIP, rename the whole directory
+  -> return JSONL + manifest paths
+```
+
+Startup acquires a local exclusive directory lock without connecting upstream. TLS defaults to verified with optional trusted CA; explicit deployment verify_tls=false skips certificate and hostname verification; eventlog redirects, ambient proxy/CA overrides and retries are excluded (container-log GET redirects use the separate validated flow above). Optional paired Basic credentials trigger one same-origin Knox SSO POST before the download GET; both share the deadline. No startup or cache-hit login occurs. Cookie jars clear on receive exit, while acquired values are used only for the current evidence redaction. All available attempts are separate files; none is automatically selected as latest. Malformed tails and compressed/rolling event logs fail.
+
+Evidence persists until user cleanup. Refresh creates another directory; there is no TTL, deduplication or GC. Cancellation/failure deletes only the call's unpublished directory. Shutdown cancels and awaits owned acquisition workers before closing the HTTP client and releasing the root lock. Force-kill remnants are ignored .part directories for manual cleanup.
+
+ZIP transfer, aggregate expanded source and aggregate saved JSONL each retain max_bytes. Acquisition and offline scans have no independent record-size cap: each readline is bounded by the remaining total budget plus one overflow-detection byte, checked before parsing. Large records may require substantially more transient parsing/redaction memory than their serialized size. MCP result text bounds remain unchanged.
+
+### Offline inspection and query
+
+```text
+inspect_spark_event_log(manifest_path, attempt_id)
+query_spark_events(manifest_path, attempt_id, expected_sha256, ...direct filters)
+  -> validate strict request DTO under the original total deadline
+  -> select one explicit attempt (null means actual no-attempt)
+  -> verify private regular paths, configured source and manifest format
+  -> single JSONL scan: digest/size/count/identity validation plus bounded selection
+  -> publish named result only after verified EOF; no HTTP or replacement download
+```
+
+query requires the sanitized snapshot.sha256 from inspect. It ANDs direct own-field filters, computes all-match counts/reasons before after_line/limit, and returns hash/physical-line references. JobStart Stage IDs remain readable evidence for a separate stage query; the adapter never expands job/SQL relationships. Critical truncated details can be reread with one lines entry, limit=1 and max_detail_chars=32768. End-event coverage records presence only, not terminal YARN/SQL success.
+
+Both calls reuse configured byte/time limits, redaction and directory ownership. Cancellation/timeout/shutdown cancel and await owned readers before directory lock release; corrupt or changed evidence returns safe errors without partial results or persisted analysis. These local calls work without credentials and never trigger the acquisition login/download flow above.
+
+The portable spark-diagnosis Skill discovers capabilities, pins manifest/attempt/hash, checks full-match distributions, direct entity evidence and recovery, and returns supported/inconclusive/no_observed_failure with supporting/opposing refs and gaps. Driver/Executor/YARN evidence is optional only through already available tools and its actual contract; no inferred uniform snapshot field, ad-hoc endpoint or backend classifier is introduced.
+
+### Offline performance metrics
+
+```text
+get_spark_stage_metrics(manifest_path, attempt_id, expected_sha256, ...paired Stage selector)
+get_spark_task_distribution(manifest_path, attempt_id, expected_sha256, stage_id, stage_attempt_id, ...)
+  -> tools.py -> SparkMetricsService -> SparkMetricsGateway
+  -> same SparkInspectionAdapter worker lifecycle -> metrics.py / VerifiedEventLogReader
+  -> verify complete snapshot before publishing SparkStageMetricsResult / SparkTaskDistributionResult
+```
+
+Stage aggregation retains counters/totals and lifecycle refs per explicit Stage attempt. Task distributions retain only six groups of numeric values for the selected group and at most limit ranked projections; nearest-rank sorting uses temporary O(n) sample space, released after return/cancellation. Full Success-event statistics precede ranking and do not deduplicate logical work. No HTTP, new directory owner, persisted index or diagnosis state is introduced. Runtime closes the shared inspector's inspection/metrics workers before acquisition releases directory ownership.
+
+The Skill's slow-job branch queries application timestamps, selects explicit Stage attempts, compares same-task metrics and rereads refs with retry/executor counterevidence. Successful JobEnd alone cannot resolve a performance question; unavailable baselines, missing metrics, ranking omissions, Stage overlap and unaccounted application time remain explicit limits. Metric signals generate candidate causes, not server-certified root causes.
 
 ## Error Flow
 
@@ -230,4 +307,4 @@ The implementation must provide automated evidence for:
 - Hive connection isolation and cache behavior;
 - subprocess startup and shutdown behavior.
 
-Zeppelin interpreter denial and write-safety gating are verified. DolphinScheduler status-only access is required once that deferred plugin ships.
+Zeppelin write-safety and DolphinScheduler scheduling contracts have their own suites. Spark adds synthetic archive/redaction, exact cache-scope/lock, real stdio download/reuse and opt-in live-download checks.

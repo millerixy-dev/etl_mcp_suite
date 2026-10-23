@@ -1,0 +1,204 @@
+# Verification — add-spark-event-log-download
+
+Date: 2026-10-12. Schema: spec-driven. Branch: codex/spark-job-failure-diagnosis.
+OpenSpec tasks.md is the implementation progress authority.
+
+## Scope and review
+
+Delivered one Spark plugin/tool: fetch_spark_event_log(application_id, attempt_id=None, refresh=False).
+Validated, redacted JSONL and one manifest are published in private per-download directories;
+default exact-source/scope reuse and explicit refresh are supported. No CAS, TTL, GC, tail repair
+or new runtime dependency was added.
+
+Implementation followed task-scoped RED/GREEN tests. Independent read-only review covered
+d2d80c1e7794336fad58376beba34e46da806dee through edf0eac0dd53d19787d91a1282752177cd8ebfbc,
+then reviewed the corrective working-tree diff after 961c3d3. Three Important findings were
+reproduced in failing tests and fixed separately:
+
+- Literal attempt string "null" was changed by SDK preprocessing: registered FuncMetadata now
+  preserves raw validated values while retaining output conversion. Regressions distinguish
+  string "null", string "1" and JSON null.
+- Prebuilt default SSLContext inherited environment CA settings: default trust now uses
+  HTTPX verify=True with trust_env=False; explicit CA configuration still uses verified
+  SSLContext. A no-network real context-factory test checks SSL_CERT_FILE/DIR isolation.
+- Unknown multi-value Cookie text leaked its second value: full Cookie/Set-Cookie header values
+  are redacted before generic assignment handling, with a persistent JSONL regression.
+
+Independent re-review: all three findings resolved, no remaining Critical/Important/Minor
+findings in the corrective diff. Reviewer fresh focused suite: 155 passed.
+
+## Final fresh commands and outcomes
+
+| Command | Result |
+| --- | --- |
+| `uv sync --locked` | exit 0; 57 packages resolved, 51 checked |
+| `PYTHONPATH=src uv run --locked pytest` | exit 0; 1580 passed, 6 skipped, 6 deselected (13.40 s) |
+| `uv run --locked ruff check .` | exit 0; all checks passed |
+| `uv run --locked pyright` | exit 0; 0 errors, 0 warnings |
+| `uv build` | exit 0; sdist and wheel built |
+| `PYTHONPATH=src uv run --locked mcp-stdio --help` | exit 0; four plugins including spark listed |
+| `PYTHONPATH=src uv run --locked pytest -m integration tests/integration/test_spark_server.py -rs` | exit 0; 1 skipped, deployment opt-in/settings absent |
+| `openspec validate add-spark-event-log-download --strict` | exit 0; valid |
+| `openspec validate --changes --strict` | exit 0; 14 passed, 0 failed |
+| `openspec validate --specs --strict` | exit 0; 2 passed, 0 failed |
+| `git diff --check` | exit 0 |
+
+Full pytest's skipped entries belong to the existing environment-gated DolphinScheduler suite;
+six integration-marker cases are deselected by the default test setting. The explicit Spark
+live command was also executed and skipped. No real authenticated HTTP download is claimed.
+Prior manual browser download is design evidence, not proof of this automatic client.
+
+OpenSpec emitted existing informational notes about unrelated change archive targets and an
+existing long main-spec requirement; none was a validation failure.
+
+## Console EOF and wheel smoke
+
+The following exact command was executed successfully. It launches the real console entry
+point, supplies a fresh temporary private root and unreachable source, sends EOF immediately,
+checks protocol-only stdout and no staging, then checks the built wheel's Spark modules.
+No upstream request is issued.
+
+```sh
+PYTHONPATH=src uv run --locked python - <<'PY'
+import os
+import subprocess
+from pathlib import Path
+from tempfile import TemporaryDirectory
+import zipfile
+
+root = Path.cwd()
+with TemporaryDirectory(prefix='spark-console-smoke-') as temporary:
+    env = {key: value for key, value in os.environ.items()
+           if not key.startswith(('SPARK_', 'MCP_STDIO__SETTINGS__'))}
+    env.update(PYTHONPATH=str(root / 'src'), SPARK_HISTORY_SERVER_URL='https://127.0.0.1:1',
+               SPARK_CACHE_DIR=str(Path(temporary) / 'l3'))
+    child = subprocess.run([str(root / '.venv/bin/mcp-stdio'), '--plugin', 'spark'],
+                           input='', capture_output=True, text=True, env=env, timeout=15)
+    assert child.returncode == 0, 'Spark console EOF smoke failed'
+    assert child.stdout == '', 'non-protocol stdout'
+    assert (Path(temporary) / 'l3' / '.lock').is_file()
+    assert not list((Path(temporary) / 'l3').glob('.part-*'))
+    print('Spark console EOF smoke: PASS (private temporary root, no upstream call)')
+wheel = next((root / 'dist').glob('*.whl'))
+with zipfile.ZipFile(wheel) as archive:
+    names = set(archive.namelist())
+    required = {'mcp_stdio/plugins/spark/' + name + '.py' for name in
+                ('config', 'models', 'gateway', 'service', 'http_client', 'files', 'cache', 'tools', 'plugin')}
+    assert required <= names
+    print('Built wheel contains all Spark runtime modules: PASS')
+PY
+```
+
+## Host environment note
+
+The execution host repeatedly marked virtual-environment .pth files with the macOS hidden
+flag. Python verbose startup showed it skipping the editable .pth, producing import failures.
+`chflags nohidden .venv/lib/python3.12/site-packages/*.pth` confirmed the cause, but the tool
+environment reapplied flags. Final development checks therefore explicitly use PYTHONPATH=src,
+also inherited by test subprocesses. This is a host test workaround, not a product-code change
+or production deployment instruction; README continues to require installed wheel releases.
+
+## Remaining deployment validation
+
+Supply a trusted CA where needed, inject the existing Cookie safely into SPARK_GATEWAY_COOKIE,
+and explicitly enable the documented live test for the actual gateway. Automatic login,
+insecure TLS and browser credential extraction are unsupported. Existing manually downloaded
+ZIP files are not imported. Persistent directories are user-managed and retained until cleanup.
+
+
+## TLS opt-out follow-up (task 5.1)
+
+User explicitly requested skipping certificate verification. Added deployment-only
+`verify_tls` / `SPARK_VERIFY_TLS`, default true; false passes HTTPX verify=False.
+No dependency, MCP argument, default TLS policy, redirect policy or credential handling change.
+
+TDD: config/HTTP tests first failed (21 failures / 17 passes) because the field was
+missing; after the minimal config/client change, all 38 passed.
+Fresh verification:
+
+| Command | Result |
+| --- | --- |
+| `uv sync --locked` | exit 0, 57 resolved / 51 checked |
+| `PYTHONPATH=src uv run --locked pytest -q` | 1586 passed, 6 skipped, 6 deselected |
+| `uv run --locked ruff check .` | all checks passed |
+| `uv run --locked pyright` | 0 errors, 0 warnings |
+| `uv build` | sdist and wheel built |
+| `PYTHONPATH=src uv run --locked mcp-stdio --help` | exit 0 |
+| Spark console EOF smoke with verify_tls=false and unreachable localhost source | exit 0, no stdout, root lock created, no staging |
+| `openspec validate add-spark-event-log-download --strict` | valid |
+| `openspec validate --changes --strict` | 14 passed, 0 failed |
+| `openspec validate --specs --strict` | 2 passed, 0 failed |
+| `git diff --check` | exit 0 |
+
+Reviewed scoped diff against default-on TLS, strict file/env validation, existing CA
+handling and fixed-origin/no-redirect behavior. No unrelated production modules changed.
+The PYTHONPATH workaround for this host's editable installation remains as documented above.
+
+Live check: launched actual mcp-stdio Spark subprocess through the MCP client SDK;
+called fetch_spark_event_log with the user's requested application, attempt 1,
+refresh=true, SPARK_VERIFY_TLS=false, the previously supplied History Server and
+local L3 cache. TLS no longer blocked the request. The gateway returned safe
+AUTHENTICATION_FAILED; SPARK_GATEWAY_COOKIE was absent from the process environment.
+No application manifest or staging directory remained. Authenticated download is
+still unverified and requires the user to inject an existing login Cookie; no
+credentials or response bodies were recorded. The TLS switch was set only for this
+subprocess, not persistently in personal MCP configuration.
+
+
+## Knox Basic authentication follow-up (task 6.1, 2026-10-13)
+
+Implemented paired SPARK_USERNAME/SPARK_PASSWORD plus same-origin SPARK_KNOX_SSO_URL.
+Cookie mode remains available and is mutually exclusive. No new dependency or MCP argument.
+Login is one empty Basic-auth POST; GET carries only scoped cookies. No redirect/retry;
+login/download share deadline. Cookie jar clears on receive exit; issued values are used
+only in current acquisition redaction. Static credentials and Basic encoding are redacted.
+
+TDD evidence: 25 new synthetic auth tests initially failed before implementation; the
+Spark suite then passed 123 tests. Basic opt-in gate regression failed with a skipped
+valid configuration, then passed after accepting complete Basic credentials. Final
+stdio contract includes Basic exchange plus cross-process reuse. Example config tests
+cover both YAML and JSON Basic files. Initial test type annotation failures were fixed;
+production type checking passes.
+
+Fresh checks:
+
+| Command | Result |
+| --- | --- |
+| `uv sync --locked` | exit 0; 57 resolved, 51 checked |
+| `PYTHONPATH=src uv run --locked pytest -q` | 1615 passed, 6 skipped, 6 deselected; 15.66s |
+| `uv run --locked ruff check .` | all checks passed |
+| `uv run --locked pyright` | 0 errors, 0 warnings |
+| `uv build` | sdist and wheel built |
+| `PYTHONPATH=src uv run --locked mcp-stdio --help` | exit 0 |
+| Basic-configured console EOF smoke with unreachable localhost | exit 0, empty stdout, no login, clean local lock lifecycle |
+| `openspec validate add-spark-event-log-download --strict` | valid |
+| `openspec validate --changes --strict` | 14 passed, 0 failed |
+| `openspec validate --specs --strict` | 2 passed, 0 failed |
+| `git diff --check` | exit 0 |
+
+Independent read-only review found no Critical or Important issues, and independently
+ran the affected suite: 155 passed, 1 deselected. Its minor environment-mapping table
+finding was verified and corrected before commit. No private credentials or real cache
+files were supplied to the reviewer. Existing unrelated OpenSpec informational notices
+and this host's previously documented PYTHONPATH editable-install workaround remain.
+
+### Real MCP validation
+
+Read the user-designated credential file only in process memory, parsed its named fields
+without shell execution and injected the username/password into the MCP child environment.
+Used the authorized TLS opt-out only for the live request. No credential/config copies or
+cookie files were written to the project. The actual MCP SDK launched mcp-stdio --plugin
+spark and invoked fetch_spark_event_log(application_id=application_1783000588461_681757,
+attempt_id="1", refresh=true).
+
+Result: successful login and download. Generated 4,008,504-byte sanitized JSONL with 2,094
+events; observed Spark 2.4.7.7.1.7.1000-141 and ApplicationEnd. Local SHA-256 and event count
+were independently checked, and configured credential strings were absent from saved
+JSONL and the returned result. No staging directories remained. Both a second call and
+a newly launched unauthenticated process returned cache_hit=true for the same evidence.
+
+Evidence remains only in the user's local L3 directory under:
+`application_1783000588461_681757/attempt-1/70b5d44ff317466c83b155477d615621/`
+with eventlog-0001.jsonl and manifest.json. Original ZIP is removed after successful processing.
+The normal suite still deselects marked live integration tests; the authenticated live
+result above comes from an actual MCP end-to-end invocation, not a mock or skipped test.

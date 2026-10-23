@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "plugin": "spark",
+  "settings": {
+    "history_server_url": "https://history.example.invalid:8443/gateway/analytics/sparkhistory",
+    "cache_dir": "/var/tmp/mcp-spark-l3",
+    "knox_sso_url": "https://history.example.invalid:8443/gateway/knoxsso/api/v1/websso",
+    "verify_tls": true
+  },
+  "secrets": {
+    "username": "SPARK_USERNAME",
+    "password": "SPARK_PASSWORD"
+  }
+}

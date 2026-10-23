@@ -80,7 +80,7 @@ For each pending task: read the directly relevant files; write a micro-plan scop
 - Distribute one Python package and one `mcp-stdio` console command.
 - The MCP host launches one independent child process per configured plugin instance.
 - Each process loads exactly one built-in plugin and exposes only that plugin's tools.
-- Processes share installed code only; they do not share memory, credentials, connections, caches, or mutable state.
+- Processes do not share memory, credentials, connections, live caches or mutable runtime state. Spark persistent evidence may be reused sequentially after the prior process exits, using a dedicated directory lock and source/request matching.
 - Communicate with the MCP host only through MCP JSON-RPC over stdin/stdout.
 - Write only MCP protocol messages to stdout. Send redacted application logs to stderr.
 - Do not open an MCP listening port or add HTTP/SSE MCP transport without an approved change.
@@ -89,12 +89,13 @@ For each pending task: read the directly relevant files; write a micro-plan scop
 
 ## Plugin Scope
 
-- Version one contains an explicit registry for the built-in `hive`, `zeppelin`, and `dolphinscheduler` plugins.
+- Version one contains an explicit registry for the built-in `hive`, `zeppelin`, `dolphinscheduler`, and `spark` plugins.
 - Do not add filesystem scanning, import-by-caller-input, Python entry points, hot reload, or third-party plugin loading in version one.
 - Hive is metadata-only: no arbitrary SQL, row reads, or DDL execution.
 - Zeppelin is execution-capable: interpreters default to deny and require an explicit configuration allowlist.
 - DolphinScheduler exposes server status plus scheduling tools: read-only enumeration, inspection, search, bounded task logs, YARN/Spark link extraction, and a constrained workflow start; exact tools and result shapes come from the active capability specs.
 - Exact tool names, schemas, result shapes, and backend behavior come from the active OpenSpec capability specs.
+- Spark acquires read-only History Server event logs into private local evidence; analysis tools require their own approved capability specs.
 
 ## Configuration and Secrets
 

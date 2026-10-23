@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from collections.abc import Mapping
 from pathlib import Path
@@ -10,8 +11,19 @@ from typing import cast
 import pytest
 import yaml
 
+from mcp_stdio.plugins.spark.executor_log_models import (
+    SparkExecutorLogFetchResult,
+    SparkExecutorLogRequest,
+)
+from mcp_stdio.plugins.spark.inspection_models import QueryRequest
+
 PROJECT_ROOT = Path(__file__).parents[2]
 CANONICAL_SKILLS = {
+    "spark-diagnosis": {
+        "fetch_spark_event_log", "inspect_spark_event_log", "query_spark_events",
+        "get_spark_stage_metrics", "get_spark_task_distribution",
+        "fetch_spark_executor_log",
+    },
     "hive": {"list_databases", "list_tables", "get_table_schema"},
     "zeppelin": {
         "get_interpreter_bindings",
@@ -37,6 +49,19 @@ CANONICAL_SKILLS = {
     },
 }
 REQUIRED_GUIDANCE = {
+    "spark-diagnosis": {
+        "manifest_path",
+        "attempt_id",
+        "expected_sha256",
+        "snapshot.sha256",
+        "Stage IDs",
+        "JobEnd",
+        "details_truncated",
+        "32768",
+        "supported",
+        "inconclusive",
+        "no_observed_failure",
+    },
     "hive": {"partition_columns", "[A-Za-z_][A-Za-z0-9_]*", "zeppelin"},
     "zeppelin": {
         "restart_allowed",
@@ -219,9 +244,12 @@ def test_installer_defaults_to_current_project_and_preserves_unrelated_skills(
     assert completed.returncode == 0, completed.stderr
     assert unrelated_file.read_text(encoding="utf-8") == "keep me\n"
     for skill_name in CANONICAL_SKILLS:
-        source = PROJECT_ROOT / "skills" / skill_name / "SKILL.md"
-        installed = project_root / client_directory / "skills" / skill_name / "SKILL.md"
-        assert installed.read_bytes() == source.read_bytes()
+        source_root = PROJECT_ROOT / "skills" / skill_name
+        installed_root = project_root / client_directory / "skills" / skill_name
+        for source in source_root.rglob("*"):
+            if source.is_file():
+                installed = installed_root / source.relative_to(source_root)
+                assert installed.read_bytes() == source.read_bytes()
 
 
 @pytest.mark.parametrize(("script_name", "client_directory"), INSTALLERS)
@@ -280,8 +308,7 @@ def test_installer_help_names_the_public_entry_point(
     assert completed.returncode == 0, completed.stderr
     expected_suffix = " [--with-mcp]"
     assert (
-        f"Usage: {script_name} [--project-root PATH] [--force]{expected_suffix}"
-        in completed.stdout
+        f"Usage: {script_name} [--project-root PATH] [--force]{expected_suffix}" in completed.stdout
     )
 
 
@@ -599,3 +626,86 @@ def test_simplified_chinese_readme_is_linked_and_covers_core_usage() -> None:
         "env_vars",
     ):
         assert required_content in chinese_readme
+
+
+def test_spark_skill_discovers_successful_slow_applications() -> None:
+    frontmatter, body = load_skill(PROJECT_ROOT / "skills/spark-diagnosis/SKILL.md")
+    assert "performance" in str(frontmatter["description"])
+    assert "long runtime" in str(frontmatter["description"])
+    for marker in (
+        "SparkListenerApplicationStart", "SparkListenerApplicationEnd",
+        "nearest-rank", "missing_count", "tasks_omitted", "stages_omitted",
+        "stage_attempt_id", "shuffle_fetch_wait_ms",
+    ):
+        assert marker in body
+
+
+def test_spark_skill_reference_links_resolve_inside_portable_skill() -> None:
+    skill_root = PROJECT_ROOT / "skills" / "spark-diagnosis"
+    _, body = load_skill(skill_root / "SKILL.md")
+    reference_targets = re.findall(r"\]\((references/[^)]+)\)", body)
+    assert {
+        "references/spark-events-2.4.7.md", "references/event-search.md",
+        "references/container-logs.md",
+        "references/operations-scenarios.md",
+    } <= set(reference_targets)
+    for target in reference_targets:
+        resolved = (skill_root / target).resolve()
+        assert resolved.is_relative_to(skill_root.resolve())
+        assert resolved.is_file()
+        assert not agent_coupling(resolved.read_text(encoding="utf-8"))
+
+
+def test_spark_operations_scenarios_have_valid_cross_references() -> None:
+    guide = (
+        PROJECT_ROOT / "skills/spark-diagnosis/references/operations-scenarios.md"
+    ).read_text(encoding="utf-8")
+    symptom_ids = re.findall(r"^\| (S\d{2}) \|", guide, flags=re.MULTILINE)
+    root_cause_rows = re.findall(r"^\| (R\d{2}) \|([^\n]+)", guide, flags=re.MULTILINE)
+
+    assert symptom_ids and len(symptom_ids) == len(set(symptom_ids))
+    root_cause_ids = [root_cause_id for root_cause_id, _ in root_cause_rows]
+    assert root_cause_ids and len(root_cause_ids) == len(set(root_cause_ids))
+    linked_symptoms: set[str] = set()
+    for _, row in root_cause_rows:
+        linked = set(re.findall(r"S\d{2}", row.split("|")[1]))
+        assert linked and linked <= set(symptom_ids)
+        linked_symptoms.update(linked)
+    assert set(symptom_ids) <= linked_symptoms
+
+
+def test_spark_search_examples_validate_against_actual_query_contract() -> None:
+    guide = (
+        PROJECT_ROOT / "skills/spark-diagnosis/references/event-search.md"
+    ).read_text(encoding="utf-8")
+    blocks = re.findall(r"```json\n(.*?)\n```", guide, flags=re.DOTALL)
+    assert len(blocks) >= 3
+    for block in blocks:
+        QueryRequest.model_validate(json.loads(block))
+
+
+def test_spark_container_log_examples_validate_against_actual_contract() -> None:
+    guide = (
+        PROJECT_ROOT / "skills/spark-diagnosis/references/container-logs.md"
+    ).read_text(encoding="utf-8")
+    blocks = re.findall(r"```json\n(.*?)\n```", guide, flags=re.DOTALL)
+    requests: list[SparkExecutorLogRequest] = []
+    results: list[SparkExecutorLogFetchResult] = []
+    for block in blocks:
+        value = json.loads(block)
+        if "local_path" in value:
+            results.append(SparkExecutorLogFetchResult.model_validate(value))
+        else:
+            requests.append(SparkExecutorLogRequest.model_validate(value))
+    assert any(request.executor_id == "driver" for request in requests)
+    assert any(request.executor_id.isdecimal() for request in requests)
+    assert results
+    for result in results:
+        assert any(
+            result.application_id == request.application_id
+            and result.attempt_id == request.attempt_id
+            and result.executor_id == request.executor_id
+            and result.log_type == request.log_type
+            and result.requested_tail_bytes == request.tail_bytes
+            for request in requests
+        )

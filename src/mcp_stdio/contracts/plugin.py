@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, Protocol
 
-BuiltinPluginName = Literal["hive", "zeppelin", "dolphinscheduler"]
+BuiltinPluginName = Literal["hive", "zeppelin", "dolphinscheduler", "spark"]
 ToolHandler = Callable[..., object]
 
 

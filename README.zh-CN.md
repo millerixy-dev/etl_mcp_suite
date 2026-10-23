@@ -4,7 +4,7 @@
 
 一个轻量级、基于插件的 MCP（Model Context Protocol）stdio Server。每个子进程只加载一个内置插件，并且只向 MCP Host 暴露该插件的工具。
 
-内置插件包括：用于只读 HiveServer2 元数据查询（数据库、表、字段、分区与可选 DDL）的 **Hive schema plugin**、用于 **Zeppelin 笔记本执行**的插件，以及用于 **DolphinScheduler 调度**的插件。
+内置插件包括：用于只读 HiveServer2 元数据查询（数据库、表、字段、分区与可选 DDL）的 **Hive schema plugin**、**Zeppelin 笔记本执行**、**DolphinScheduler 调度**，以及 **Spark event log 下载与取证**。
 
 ## 前置条件
 
@@ -168,7 +168,7 @@ ln -sfn "$PROD_ROOT/releases/<previous-release>" "$PROD_ROOT/current"
 
 ## Agent Skills
 
-客户端无关的 Hive、Zeppelin 和自然语言查询 Skill 统一维护在 `skills/hive`、`skills/zeppelin` 与 `skills/nl2sql`。根据正在使用的 MCP 客户端，将相同的规范文件安装到当前项目：
+客户端无关的 Hive、Zeppelin、自然语言查询和 Spark 诊断 Skill 统一维护在 `skills/hive`、`skills/zeppelin`、`skills/nl2sql` 与 `skills/spark-diagnosis`。根据正在使用的 MCP 客户端，将相同的规范文件安装到当前项目：
 
 ```bash
 ./scripts/install-skills-codex.sh
@@ -531,9 +531,257 @@ uv run mcp-stdio --plugin dolphinscheduler \
 
 该进程暴露 `get_server_status`、`list_objects`、`get_object`、`search_objects`、`start_workflow`、`get_task_log` 与 `extract_log_links`。`start_workflow` 在 `dry_run=0` 时会启动工作流；使用 `dry_run=1` 可只做校验、不实际执行，实际启动前必须获得用户批准。其余工具均为只读；结果和任务日志均有边界，服务不提供对象创建、更新、删除、暂停、恢复或停止操作。
 
+## Spark event log 下载
+
+Spark 暴露 `fetch_spark_event_log`、`inspect_spark_event_log`、`query_spark_events`、`get_spark_stage_metrics`、`get_spark_task_distribution` 和 `fetch_spark_executor_log`。
+获取接口为 `fetch_spark_event_log(application_id, attempt_id=None, refresh=False)`。
+它下载配置的 Spark History Server ZIP，校验身份、CRC 和 JSONL，脱敏后保存 JSONL 与一份
+清单，后续诊断工具直接读取本地路径。首版格式以已验证的 Spark 2.4.7 单文件 JSONL 为依据。
+
+| 参数 | 默认值 | 含义 |
+| --- | --- | --- |
+| application_id | 必填 | YARN ID，例如 `application_1700000000000_0042` |
+| attempt_id | null | 指定 attempt；省略时下载上游提供的全部 attempts |
+| refresh | false | 默认复用；true 重新下载到新目录 |
+
+未知参数和非法原始类型会被拒绝，错误不回显参数值。调用者不能指定 URL、输出目录、
+凭据或 TLS 设置。
+
+| 设置 | 默认值 | 含义 |
+| --- | --- | --- |
+| history_server_url | 必填 | HTTPS 根地址，保留网关路径，不带 `/api/v1`、凭据或 query |
+| cache_dir | 必填 | 绝对专用本地目录；支持 POSIX macOS/Linux |
+| verify_tls | true | 显式设为 false 时跳过证书和主机名校验 |
+| knox_sso_url | null | 同域 HTTPS Knox SSO 地址，使用用户名密码时必填 |
+| ca_bundle_path | null | 私有证书所需的可信可读 PEM CA |
+| request_timeout_seconds | 300 | 整个调用含查缓存、排队和处理的时间预算，最多 900 秒 |
+| max_bytes | 268435456 | 分别限制 ZIP、展开源文件总量和输出 JSONL 总量 |
+
+JSON 事件没有独立的单行字节上限。下载处理和离线分析按剩余总量预算逐行读取，工具返回文本仍保留长度限制。大型事件在 JSON 解析和脱敏时的瞬时内存可能明显高于其原始字节数。
+
+使用 [spark.yaml](docs/examples/spark.yaml) 或 [spark.json](docs/examples/spark.json)。
+通过安全环境注入已有登录 Cookie 到 `SPARK_GATEWAY_COOKIE`，配置文件只写变量名。
+匿名部署可以省略 secret 引用。默认校验证书；如明确需要跳过，可设置
+`export SPARK_VERIFY_TLS=false`（或 YAML `verify_tls: false`），然后重启 MCP 进程。
+此时 HTTPS 仍加密，但不验证服务器身份；已配置的 CA 仍须通过本地校验，连接时不使用。
+Cookie 模式不发起登录。
+
+```sh
+uv run --locked mcp-stdio --plugin spark --config docs/examples/spark.yaml
+```
+
+用户名密码方式使用 [spark-basic.yaml](docs/examples/spark-basic.yaml) 或
+[spark-basic.json](docs/examples/spark-basic.json)。通过环境注入 `SPARK_USERNAME` 和
+`SPARK_PASSWORD`，同时配置 `SPARK_KNOX_SSO_URL`；不能再设置 `SPARK_GATEWAY_COOKIE`。
+SSO 地址必须与 History Server 同域、同协议、同端口。
+
+```sh
+export SPARK_HISTORY_SERVER_URL='https://history.example.invalid:8443/gateway/analytics/sparkhistory'
+export SPARK_KNOX_SSO_URL='https://history.example.invalid:8443/gateway/knoxsso/api/v1/websso'
+export SPARK_CACHE_DIR='/var/tmp/mcp-spark-l3'
+# SPARK_USERNAME / SPARK_PASSWORD 已通过安全环境注入。
+uv run --locked mcp-stdio --plugin spark
+# 文件模式：uv run --locked mcp-stdio --plugin spark --config docs/examples/spark-basic.yaml
+```
+
+每次实际下载前发一次携带 Basic Authorization 的空 body POST，换取 Cookie；下载 GET
+只携带 Cookie。登录和 eventlog 下载共享超时预算，均不跟随重定向、不重试失败密码。Cookie 只在
+内存中使用，接收结束即清空 Cookie jar，并将本次 Cookie 值纳入落盘前脱敏。
+缓存命中不登录，插件不自动读取个人凭据文件。协议依据：[Knox SSO](https://apache.github.io/knox/config_knox_sso/)。
+
+只用环境变量启动：
+
+```sh
+export SPARK_HISTORY_SERVER_URL='https://history.example.invalid:8443/gateway/analytics/sparkhistory'
+export SPARK_CACHE_DIR='/var/tmp/mcp-spark-l3'
+export SPARK_CA_BUNDLE_PATH='/etc/mcp/spark-ca.pem'
+# SPARK_GATEWAY_COOKIE 已安全注入；可选覆盖：
+# SPARK_REQUEST_TIMEOUT_SECONDS、SPARK_MAX_BYTES。
+uv run --locked mcp-stdio --plugin spark
+```
+
+MCP host 使用前文的已安装 release 入口，通过 host 的安全环境向子进程传入 Cookie：
+
+```json
+{
+  "mcpServers": {
+    "spark": {
+      "command": "/absolute/path/to/hive-cli-mcp-stdio-prod/current/venv/bin/mcp-stdio",
+      "args": ["--plugin", "spark", "--config", "/absolute/path/to/spark.yaml"]
+    }
+  }
+}
+```
+
+本地 MCP 是 stdio，HTTPS 是向 History Server 发起的上游连接。host 的工具超时应大于
+配置的整次调用预算。
+
+结果字段为 `application_id`、`requested_attempt_id`、`cache_hit`、`downloaded_at`、
+`manifest_path`、`files`。每个文件记录 `attempt_id`、`local_path`、`spark_version`、
+`size_bytes`、`sha256`、`source_sha256`、`event_count`、`application_end_seen`。
+两个摘要分别对应脱敏输出和原始成员字节；ApplicationEnd 不代表 YARN 最终状态。
+
+JSONL 在下载后的校验/脱敏阶段生成于私有暂存目录。全部成员通过后移除 ZIP，
+将整个目录 rename 发布到：
+
+```text
+<cache_dir>/<application_id>/all|attempt-<id>/<random-id>/
+  eventlog-0001.jsonl
+  manifest.json
+```
+
+清单包含结果中除 `cache_hit` 外的字段，以及 `format_version=1` 和规范化源地址。
+不保留原始 ZIP、未脱敏 JSON、索引或摘要旁车文件。事件行序和数值指标保留；
+凭据字段及白名单以外的环境属性脱敏。压缩/滚动 event log 和损坏尾行直接报错。
+
+只有同来源、同 attempt 选择且文件摘要正确才命中，保留原下载时间且不联网；
+缓存不保证上游最新性。refresh 产生新目录，旧证据保留。目录跨会话存在，直到你手工清理，
+首版没有 TTL、去重或 GC。同根目录只能由一个活动进程使用。失败、取消和正常关闭清理
+本次暂存目录；强杀残留的 `.part-*` 不参与复用，可手工清理。
+
+真实下载测试需要显式设置 `MCP_STDIO_SPARK_INTEGRATION=1`、
+`MCP_STDIO_SPARK_APPLICATION_ID`、可选 `MCP_STDIO_SPARK_ATTEMPT_ID` 和
+SPARK URL/cache/CA 部署环境，以及 Cookie 或用户名密码和 SSO 地址，再运行：
+
+```sh
+uv run --locked pytest -m integration tests/integration/test_spark_server.py
+```
+
+### 本地证据概览与精确查询
+
+两个读取工具只扫描已保存的私有脱敏 JSONL，不发送 HTTP、不刷新、不写分析状态，也不需要凭据。`history_server_url` 仍必须与 manifest 来源一致；原 cache_dir、大小/时限和目录锁约束不变。inspect 返回 `SparkEventLogInspectionResult`，query 返回 `SparkEventQueryResult`。以下为合成示例，不是真实应用诊断。
+
+inspect 只接受前两项；query 接受所有参数。数字严格为整数（不接受 bool 或字符串），未知参数和空列表拒绝；实体 ID 与游标范围为 0–2^63-1，行号从 1 开始。attempt/executor ID 使用 `[A-Za-z0-9_-]{1,128}`。
+
+| Parameter | Type / default | Meaning |
+| --- | --- | --- |
+| manifest_path | string, required | Absolute existing private-cache manifest path |
+| attempt_id | string or null, required | Explicit selected attempt; null means actual no-attempt |
+| expected_sha256 | string, required by query | Copy inspect.snapshot.sha256; sanitized JSONL digest |
+| event_types | list[string] or null | 1–16 exact Event names, OR within list |
+| execution_id / job_id / stage_id / task_id | int or null | Nonnegative direct event IDs only |
+| stage_attempt_id | int or null | Requires stage_id |
+| executor_id | string or null | Direct executor ID |
+| task_end_reason | string or null | Exact TaskEnd reason; UNKNOWN selects missing/invalid reason |
+| lines | list[int] or null | 1–20 distinct 1-based physical lines |
+| after_line | int, 0 | Page begins strictly after this line |
+| limit | int, 20 | 1–20 returned records |
+| max_detail_chars | int, 2048 | 1–32768 characters; >2048 requires one lines entry and limit=1 |
+
+```json
+{"manifest_path":"/var/tmp/mcp-spark-l3/evidence/manifest.json","attempt_id":null}
+```
+
+```json
+{
+  "snapshot":{"application_id":"application_100_1","attempt_id":null,"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+  "spark_version":"2.4.7","event_count":3,
+  "event_types":[{"event_type":"SparkListenerApplicationStart","count":1},{"event_type":"SparkListenerJobEnd","count":1},{"event_type":"SparkListenerLogStart","count":1}],
+  "event_types_omitted":0,
+  "signals":{"job_failed_events":0,"stage_failure_events":0,"task_non_success_events":0,"executor_removed_events":0},
+  "task_end_count":0,"task_end_reasons":[],"reasons_omitted":0,
+  "evidence":[{"ref":{"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","line":3},"event_type":"SparkListenerJobEnd","ids":{"execution_id":null,"job_id":0,"stage_id":null,"stage_attempt_id":null,"task_id":null,"executor_id":null},"details":"Job Result: {\"Result\":\"JobSucceeded\"}","details_truncated":false}],
+  "evidence_omitted":0,"coverage":{"application_start_seen":true,"application_end_seen":false}
+}
+```
+
+```json
+{"manifest_path":"/var/tmp/mcp-spark-l3/evidence/manifest.json","attempt_id":null,"expected_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","event_types":["SparkListenerTaskEnd"],"stage_id":3,"task_end_reason":"FetchFailed"}
+```
+
+```json
+{
+  "snapshot":{"application_id":"application_100_1","attempt_id":null,"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+  "matched_count":0,"task_end_count":0,"task_end_reasons":[],"reasons_omitted":0,
+  "events":[],"returned_count":0,"next_after_line":null,
+  "coverage":{"application_start_seen":true,"application_end_seen":false}
+}
+```
+
+不同筛选 AND；只匹配事件自身字段。job_id 不自动带回 task/stage；execution_id 不自动带回 JobEnd。先读 JobStart 的 Stage IDs / SQL 属性，再分别查询实体。`matched_count` 和原因分布在分页前统计全部匹配；翻页只改变 after_line，保持筛选和摘要固定。
+
+默认最多 20 条、每条 details 最多 2048 字符；类型/原因前 32 类和概览证据前 20 条均有 omitted 字段。details_truncated 表示中段省略，外层结果合法 JSON，但正文不保证合法 JSON。关键文本用原 hash 和 `lines=[ref.line], limit=1, max_detail_chars=32768` 扩大回读；仍截断须报告缺口。ref 绑定脱敏文件 SHA-256 与物理行号。coverage 只表示 ApplicationStart/End 是否可见，不证明上游完整、YARN 或 SQL 成功。
+
+### 离线性能事实
+
+`get_spark_stage_metrics` 返回 `SparkStageMetricsResult`，`get_spark_task_distribution` 返回 `SparkTaskDistributionResult`。两者必填 manifest_path、显式可空 application attempt_id、inspect 返回的脱敏 expected_sha256；同一私有快照本地完整扫描，无 HTTP、刷新、凭证或持久聚合，沿用来源/大小/时限/所有权验证。
+
+| 工具 | 额外输入 | 范围与结果 |
+| --- | --- | --- |
+| get_spark_stage_metrics | 可选成对 stage_id / stage_attempt_id；limit=20（1–20） | Stage attempt 按有效 duration 降序；全组 TaskEnd 分类、成功 Input/Shuffle 总量及有效/缺失数、生命周期 refs；matched_stage_attempt_count、unassigned_task_end_count、stages_omitted 披露范围 |
+| get_spark_task_distribution | 必填 stage_id / stage_attempt_id；order_by=duration_ms；limit=20（1–20） | 全成功尝试样本 min/p50/p95/max、独立 valid_count/missing_count；ranked_task_count、含全部指标和 refs 的 top_tasks、tasks_omitted |
+
+固定指标/排序：duration_ms、executor_run_time_ms、jvm_gc_time_ms、input_bytes、shuffle_read_bytes、shuffle_fetch_wait_ms。时间单位 ms，数据量 bytes；Shuffle 两个合法 Remote/Local 分量才求和，缺失不补零。分位数 nearest-rank、不插值；重试/推测 Success 各计一次，不做逻辑去重。limit/order_by 不改变全样本分布；排序指标缺失不进入排名。
+
+inspect 后的调用示例（路径/摘要为合成占位，使用真实返回值替换）：
+
+```json
+{"manifest_path":"/var/tmp/mcp-spark-l3/evidence/manifest.json","attempt_id":null,"expected_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","stage_id":17,"stage_attempt_id":1,"order_by":"shuffle_fetch_wait_ms","limit":1}
+```
+
+慢作业先 query 应用起止时间，再排名 Stage、明确 attempt、比较同任务指标、回读 refs，检查重试/executor 反证。成功 JobEnd 不结束性能调查；无可比基准不称耗时异常。长尾与大 Shuffle 同现形成工作量不均衡候选，数据量相近而 Fetch Wait 高形成等待候选，均不直接证明倾斜/网络/OOM。Stage 重叠、阶段外时间保留为缺口，Stage/GC/等待/运行时间不相加为应用耗时。无失败也需报告性能事实、完整样本/缺失数、排名遗漏和因果限制。
+
+[spark-diagnosis Skill](skills/spark-diagnosis/SKILL.md) 指导假设、反证、重试恢复与引用，输出 supported / inconclusive / no_observed_failure；不自动分类根因。按需查阅 [Spark 2.4.7 事件语义](skills/spark-diagnosis/references/spark-events-2.4.7.md)，了解事件含义、字段可见性和单位；[搜索指引](skills/spark-diagnosis/references/event-search.md) 提供现有 MCP 筛选与证据选择示例。FetchFailed 加 executor 丢失不能证明 OOM。现有安装脚本会复制这份 Skill 及其参考文件；`--with-mcp` 仍只配置 Hive、Zeppelin 和 DolphinScheduler，Spark 实例按上文独立配置，不自动修改用户 MCP 配置。
+
+运维问题可从 [现象与候选根因指引](skills/spark-diagnosis/references/operations-scenarios.md) 进入：先定位提交、排队、执行、产出或证据缺失等表现，再核实候选原因的支持证据、反证和恢复情况。缺少 YARN、存储、调度或业务结果所需证据时保留 inconclusive；该指引不新增 MCP 工具，也不自动判定根因。
+
+### Driver / executor stdout、stderr
+
+Skill 已包含 [容器日志排查编排](skills/spark-diagnosis/references/container-logs.md)：选择 Driver 或事件中明确的 executor，下载所需流，核对本地文件及 event log 来源，再搜索有界脱敏正文并检查恢复。只有退出码、没有堆栈时继续查另一条流；不完整覆盖保留为缺口。例如：“使用 spark-diagnosis 排查 application_1_42、attempt 1；事件不足以解释失败时补充 Driver/executor 日志，列出证据和待验证原因。”读取下载后的正文需要能访问 MCP server 所在主机的本地文件。
+
+`fetch_spark_executor_log(application_id, attempt_id, executor_id, log_type="stderr", tail_bytes=65536)` 每次保存新的脱敏尾部及来源 manifest，MCP 仅返回路径和结构摘要。Driver 使用 executor_id="driver"；数字 executor 使用已验证的精确 attempt eventlog 末次注册。缺 executor/stream 返回 NOT_FOUND，不自动刷新整份 eventlog；需要时通过 fetch_spark_event_log 显式 refresh。不猜 container ID、owner 或 NodeId 端口。
+
+| 参数 | 约束 |
+| --- | --- |
+| application_id | 必填 ASCII application_[0-9]+_[0-9]+，最多128字符 |
+| attempt_id | 必填规范正整数字符串，最多10位；拒绝 null/latest |
+| executor_id | 必填 driver 或规范非负整数字符串，数字最多20位 |
+| log_type | stdout/stderr，默认 stderr |
+| tail_bytes | 严格整数1–1048576，默认65536；拒绝字符串和布尔值 |
+
+[YAML](docs/examples/spark-executor-logs.yaml) 和 [JSON](docs/examples/spark-executor-logs.json) 仅新增 `executor_log_node_manager_path`（默认 null 禁用，安全网关相对路径，以 /node 结尾）及 `executor_log_allowed_upstreams`（默认[]，最多128个唯一 http(s)://host:显式端口，精确主机或单 DNS 标签通配符）。两项须一起配置。示例路径需替换为部署确认值；history_server_url 须以 /sparkhistory 结尾，去掉后作为网关 root。旧配置兼容，禁用时新工具在获取前返回 CONFIG_ERROR。
+
+
+```sh
+# Inject SPARK_GATEWAY_COOKIE privately (or use the existing Knox Basic settings).
+export SPARK_HISTORY_SERVER_URL='https://history.example.invalid:8443/gateway/analytics/sparkhistory'
+export SPARK_CACHE_DIR='/var/tmp/mcp-spark-l3'
+export SPARK_EXECUTOR_LOG_NODE_MANAGER_PATH='/yarn/nodemanager/node'
+export SPARK_EXECUTOR_LOG_ALLOWED_UPSTREAMS='["http://*.nodes.example.invalid:8042","http://jobhistory.example.invalid:19888"]'
+# Private CA: export SPARK_CA_BUNDLE_PATH='/etc/mcp/spark-ca.pem'
+uv run --locked mcp-stdio --plugin spark
+# Equivalent file mode:
+uv run --locked mcp-stdio --plugin spark --config docs/examples/spark-executor-logs.yaml
+```
+
+```json
+{"application_id":"application_1700000000000_0042","attempt_id":"2","executor_id":"driver","log_type":"stdout"}
+{"application_id":"application_1700000000000_0042","attempt_id":"2","executor_id":"3","log_type":"stderr","tail_bytes":65536}
+```
+
+`SparkExecutorLogFetchResult` (12 fields; synthetic example):
+
+```json
+{"application_id":"application_1700000000000_0042","attempt_id":"2","executor_id":"driver","container_id":"container_e83_1700000000000_0042_02_000001","log_type":"stdout","requested_tail_bytes":65536,"fetched_at":"2026-10-14T00:00:00Z","coverage":"complete","local_path":"/var/tmp/mcp-spark-l3/executor-logs/application_1700000000000_0042/attempt-2/driver/00000000000040008000000000000001/stdout.log","size_bytes":4404,"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","manifest_path":"/var/tmp/mcp-spark-l3/executor-logs/application_1700000000000_0042/attempt-2/driver/00000000000040008000000000000001/manifest.json"}
+```
+
+复用既有 TLS/CA、Cookie 或 Knox Basic 认证。Basic 模式移除 Cookie 引用，按 spark-basic.yaml 设置 SPARK_USERNAME、SPARK_PASSWORD、SPARK_KNOX_SSO_URL；Basic Authorization 只到 SSO POST。实际 GET 限于配置的 HTTPS 网关，query 后端同样受 allowlist 约束；仅日志工具允许最多3次保持身份的 NodeManager/JobHistory 跳转，eventlog 下载仍拒绝跳转。工具不接受 URL、路径、认证或 TLS 参数。
+
+每次新目录0700，含一个 stdout.log/stderr.log 及 manifest.json0600，原子发布并核对保存字节的 SHA-256。manifest 另含网关 root/route、脱敏来源 URL、可空源长度、eventlog 路径/hash 及处理元数据。coverage=complete/tail/unknown 如实反映范围，脱敏后 size_bytes 不是源偏移。失败清理本次暂存，成功证据由操作者管理；不复用日志缓存，不自动清理保留证据。
+
+源正文超过请求 tail_bytes 时返回 UNEXPECTED_RESPONSE，不从脱敏字节数推算源范围。固定累计 HTML 上限8MiB、保存文本上限1MiB；排队、eventlog 定位与网络共用既有超时。先对完整已取得片段脱敏，再按完整逻辑行裁剪；确认源字节起点非零时保守丢弃首个边界行，完整 EOF 末行无换行也保留。凭据脱敏不承诺通用业务数据匿名化。
+
+仅解析已验证的 UTF-8 Log Type/pre 形态，忽略模板空白，拒绝登录/ACL/缺日志页、编码冲突及多个版本。没有 stream 元数据的标准本地 NodeManager 页面可能返回 UNEXPECTED_RESPONSE。用户指定的 Driver JobHistory stdout 已实测；生产 NodeManager 路由及其他 stream 仍需部署 opt-in 验证。
+
+真实 stdio 测试需注入设置/认证，以及 MCP_STDIO_SPARK_EXECUTOR_LOG_INTEGRATION=1、MCP_STDIO_SPARK_APPLICATION_ID、MCP_STDIO_SPARK_ATTEMPT_ID、MCP_STDIO_SPARK_EXECUTOR_ID；请求 stdout 并独立校验私有文件，不输出正文：
+
+```sh
+uv run --locked pytest -m integration tests/integration/test_spark_executor_logs.py
+```
+
 ## 进程隔离
 
-每个 `mcp-stdio` 进程只加载一个插件。各进程不共享内存、凭据、连接、缓存或可变运行时状态。某个插件进程失败时，独立启动的其他插件进程不受影响。
+每个 `mcp-stdio` 进程只加载一个插件。各进程不共享内存、凭据、连接、活动缓存或可变运行时状态。Spark 的持久证据允许前一目录所有者退出后被后续进程复用。某个插件进程失败时，独立启动的其他插件进程不受影响。
 
 ## 工具错误
 

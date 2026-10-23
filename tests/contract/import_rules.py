@@ -50,7 +50,18 @@ def _imports(tree: ast.AST, package: str) -> list[tuple[str, int]]:
                     (f"{imported}.{alias.name}", node.lineno)
                     for imported in resolved
                     for alias in node.names
-                    if alias.name == "websocket_client"
+                    if alias.name
+                    in {
+                        "websocket_client",
+                        "files",
+                        "cache",
+                        "inspection",
+                        "inspection_reader",
+                        "inspection_events",
+                        "metrics",
+                        "metrics_events",
+                        "executor_logs",
+                    }
                 )
     return imports
 
@@ -67,8 +78,24 @@ def _is_service_infrastructure_import(module: str, imported: str) -> bool:
         return False
     if imported.split(".", maxsplit=1)[0] in {"httpx", "mcp", "pyhive", "websockets"}:
         return True
-    infrastructure_modules = {"http_client", "plugin", "pyhive", "tools", "websocket_client"}
-    return imported.split(".")[-1] in infrastructure_modules
+    infrastructure_modules = {
+        "http_client",
+        "plugin",
+        "pyhive",
+        "tools",
+        "websocket_client",
+        "files",
+        "inspection",
+        "inspection_reader",
+        "inspection_events",
+        "metrics",
+        "metrics_events",
+        "executor_logs",
+    }
+    return (
+        imported.split(".")[-1] in infrastructure_modules
+        or imported == "mcp_stdio.plugins.spark.cache"
+    )
 
 
 def _is_shared_concrete_plugin_import(module: str, imported: str) -> bool:
@@ -84,9 +111,7 @@ def find_import_violations(source_root: Path) -> list[ImportViolation]:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for imported, line in _imports(tree, package):
             rule: str | None = None
-            if module.startswith("mcp_stdio.core") and imported.startswith(
-                "mcp_stdio.plugins"
-            ):
+            if module.startswith("mcp_stdio.core") and imported.startswith("mcp_stdio.plugins"):
                 rule = "core-to-plugin"
             elif _is_service_infrastructure_import(module, imported):
                 rule = "service-to-infrastructure"

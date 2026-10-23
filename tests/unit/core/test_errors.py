@@ -42,6 +42,23 @@ def test_error_categories_are_exactly_the_stable_public_set() -> None:
     }
 
 
+@pytest.mark.parametrize("name", ["get_spark_stage_metrics", "get_spark_task_distribution"])
+def test_metrics_operations_allow_only_application_and_attempt_identifiers(name: str) -> None:
+    from mcp_stdio.core.errors import ToolOperation, safe_error_identifiers
+
+    assert safe_error_identifiers(
+        ToolOperation(name),
+        {
+            "application_id": "application_1_42",
+            "attempt_id": "1",
+            "manifest_path": "/private",
+            "executor_id": "2",
+            "stage_id": "17",
+            "secret": "synthetic",
+        },
+    ) == {"application_id": "application_1_42", "attempt_id": "1"}
+
+
 def test_tool_operations_are_closed_to_v1_tools_plus_internal_fallback() -> None:
     from mcp_stdio.core.errors import ToolOperation
 
@@ -69,7 +86,33 @@ def test_tool_operations_are_closed_to_v1_tools_plus_internal_fallback() -> None
         "start_workflow",
         "get_task_log",
         "extract_log_links",
+        "fetch_spark_event_log",
+        "fetch_spark_executor_log",
+        "inspect_spark_event_log",
+        "query_spark_events",
+        "get_spark_stage_metrics",
+        "get_spark_task_distribution",
     }
+
+
+def test_spark_operation_accepts_only_application_and_attempt() -> None:
+    from mcp_stdio.core.errors import ErrorCategory, ToolError, ToolOperation
+
+    operation = ToolOperation("fetch_spark_event_log")
+    error = ToolError.create(
+        category=ErrorCategory.NOT_FOUND,
+        operation=operation,
+        retryable=False,
+        identifiers={"application_id": "application_1_42", "attempt_id": "1"},
+    )
+    assert error.identifiers["attempt_id"] == "1"
+    with pytest.raises(ValueError):
+        ToolError.create(
+            category=ErrorCategory.NOT_FOUND,
+            operation=operation,
+            retryable=False,
+            identifiers={"url": "https://example"},
+        )
 
 
 def test_restart_interpreter_operation_allows_setting_and_notebook_identifiers() -> None:
@@ -338,14 +381,20 @@ def test_safe_error_identifiers_support_discovery_and_reject_unsafe_shapes() -> 
         ToolOperation.GET_INTERPRETER_BINDINGS,
         {"notebook_id": "note-1"},
     ) == {"notebook_id": "note-1"}
-    assert safe_error_identifiers(
-        ToolOperation.GET_INTERPRETER_BINDINGS,
-        {"notebook_id": "bad\x00id"},
-    ) == {}
-    assert safe_error_identifiers(
-        ToolOperation.GET_INTERPRETER_BINDINGS,
-        {"notebook_id": 123},
-    ) == {}
+    assert (
+        safe_error_identifiers(
+            ToolOperation.GET_INTERPRETER_BINDINGS,
+            {"notebook_id": "bad\x00id"},
+        )
+        == {}
+    )
+    assert (
+        safe_error_identifiers(
+            ToolOperation.GET_INTERPRETER_BINDINGS,
+            {"notebook_id": 123},
+        )
+        == {}
+    )
 
 
 def test_tool_error_serialization_omits_identifier_containing_known_secret() -> None:
