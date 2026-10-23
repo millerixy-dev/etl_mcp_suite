@@ -265,4 +265,3 @@ refresh=true 新建一个下载目录，即使内容相同也不去重。保留�
 ## Verification
 
 按 tasks.md 串行 TDD；HTTP 测试负责传输/auth/TLS，文件测试负责 ZIP/JSONL/脱敏/发布，service 与 stdio 测试负责精确契约和跨会话复用。使用合成日志与 mock transport，不提交真实日志。完整 unit/contract、lint、类型、构建、console smoke 与 strict OpenSpec 验证继续保留；真实下载仅环境显式 opt-in，缺少条件记录 skipped。
-
